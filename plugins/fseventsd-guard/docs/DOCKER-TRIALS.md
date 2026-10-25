@@ -171,6 +171,31 @@ needs `AbandonProcessGroup` in its plist or to start Docker Desktop with
 
 Result: _not checked yet._
 
+**During one trial: do running sessions see file changes after the heal?** One
+report saw file watchers not recover after fseventsd restarted, so the heal
+notices say to restart a session that stops seeing file changes. That is a guess
+until checked. Check it once, with any variant:
+
+1. Before the trial, make a scratch dir and a file:
+   `D=$(mktemp -d); echo one > "$D/a.txt"; echo "$D"`. Start a Claude Code
+   session in `$D`, ask it to read `a.txt`, and leave it open. Optional: open `$D`
+   in your IDE too.
+2. Control, still before the trial: from another terminal, `echo two >> "$D/a.txt"`,
+   then send the session a short prompt that does not name the file ("ok?"). Note
+   whether it mentions that `a.txt` changed and whether the IDE shows the new line
+   without a manual refresh. A watcher that misses this change now tells you nothing
+   below.
+3. Run the trial. After it ends, `echo three >> "$D/a.txt"` and repeat step 2's
+   prompt and IDE check.
+4. If the old session misses it, start a new session in `$D`, have it read
+   `a.txt`, append a fourth line and ask again. New sees it, old does not: the old
+   session's watcher did not come back.
+5. Record the Claude Code version, the variant, and seen or missed for each
+   watcher. If running sessions do see the change, remove the line from
+   `lib/heal.sh` (`FSG_COSTS`), `lib/hint.sh` and the README.
+
+Result: _not checked yet._
+
 ## 3. Results
 
 Print every recorded trial as a table and paste it below:
