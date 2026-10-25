@@ -468,9 +468,7 @@ None of them lets a non-root user gain root.
   that window makes `kill` fail with ESRCH (exit 71). Accepted.
 - **Helper environment.** macOS `sudo` keeps `LANG`, `LC_*`, `TZ` and `HOME`. None is
   used in a security-relevant way, but tool output could vary with the locale. Fix
-  later: `LC_ALL=C; export LC_ALL` in the helper. Its `find` and `du` on the history
-  directory before the kill have no time bound, while its stale-lock window is 5
-  minutes (the heal bounds the whole helper call with `FSG_HELPER_TIMEOUT_S`).
+  later: `LC_ALL=C; export LC_ALL` in the helper.
 - **Heal lock put-back window.** The heal lock appears only with its owner record
   inside (built under a private name, then renamed into place), and a stale lock is
   renamed aside and deleted only if it is the one judged stale. If it turns out to

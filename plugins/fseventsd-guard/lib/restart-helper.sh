@@ -49,20 +49,24 @@ ARGC=$#
 FSEVENTSD=/System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/FSEvents.framework/Versions/A/Support/fseventsd
 RESPAWN_WAIT_S=15
 KEEP_RECORDS=20
+# Wall-time bounds on top and on the scan of the history directory.
+TOP_LIMIT_S=15
+SCAN_LIMIT_S=30
 
 # TOOLS is empty in every real install: install sets it only under a fake --prefix
 # for the test suite, and doctor fails a real install whose TOOLS is not empty.
 if [ -n "$TOOLS" ]; then
   PGREP=$TOOLS/pgrep; PS=$TOOLS/ps; TOP=$TOOLS/top; KILL=$TOOLS/kill
-  ID=$TOOLS/id; FOOTPRINT=$TOOLS/footprint; SLEEP=$TOOLS/sleep
+  ID=$TOOLS/id; FOOTPRINT=$TOOLS/footprint; SLEEP=$TOOLS/sleep; FIND=$TOOLS/find; DU=$TOOLS/du
 else
   PGREP=/usr/bin/pgrep; PS=/bin/ps; TOP=/usr/bin/top; KILL=/bin/kill
-  ID=/usr/bin/id; FOOTPRINT=/usr/bin/footprint; SLEEP=/bin/sleep
+  ID=/usr/bin/id; FOOTPRINT=/usr/bin/footprint; SLEEP=/bin/sleep; FIND=/usr/bin/find; DU=/usr/bin/du
 fi
 
 LOG=$EVIDENCE_DIR/helper.log
 LOCK=$EVIDENCE_DIR/.lock
 STAMP=$EVIDENCE_DIR/last-restart
+OUT=$EVIDENCE_DIR/.out.$$
 
 now() { date -u +%s; }
 log() {
@@ -77,9 +81,24 @@ refuse() {
 }
 is_uint() { case ${1:-x} in *[!0-9]*) return 1 ;; esac; return 0; }
 
+# bounded SECONDS CMD...: runs CMD with its output in $OUT and kills it after
+# SECONDS of wall time (returns 124 then); else returns its code.
+bounded() {
+  b_end=$(( $(now) + $1 )); shift
+  "$@" > "$OUT" 2>/dev/null &
+  b_pid=$!
+  while kill -0 "$b_pid" 2>/dev/null; do
+    if [ "$(now)" -ge "$b_end" ]; then kill -9 "$b_pid" 2>/dev/null; return 124; fi
+    "$SLEEP" 0.2
+  done
+  wait "$b_pid"
+}
+
 # top's MEM column is the physical footprint, e.g. 5456K-, 612M, 17G, 1.5G.
 footprint_mb() {
-  "$TOP" -l 1 -pid "$1" -stats mem 2>/dev/null | tail -n 1 | awk '
+  bounded "$TOP_LIMIT_S" "$TOP" -l 1 -pid "$1" -stats mem
+  [ $? -ne 124 ] || return 1
+  tail -n 1 "$OUT" | awk '
     { v = $1; sub(/[+-]$/, "", v); u = substr(v, length(v), 1); n = substr(v, 1, length(v) - 1)
       if (n !~ /^[0-9]+(\.[0-9]+)?$/) exit 1
       if (u == "B") mb = n / 1048576; else if (u == "K") mb = n / 1024
@@ -144,7 +163,7 @@ if ! mkdir "$LOCK" 2>/dev/null; then
     refuse 75 "another restart is in progress"
   fi
 fi
-trap 'rmdir "$LOCK" 2>/dev/null' EXIT
+trap 'rm -f "$OUT"; rmdir "$LOCK" 2>/dev/null' EXIT
 
 PID=$(genuine_pid); rc=$?
 case $rc in
@@ -176,12 +195,22 @@ REC=$EVIDENCE_DIR/restart-$TS.txt
   echo "pid=$PID footprint_mb=$MB floor_mb=$MIN_MB min_interval_s=$MIN_INTERVAL_S mode=$MODE"
   echo "--- ps"
   "$PS" -o pid,ppid,uid,etime,time,rss,vsz,comm -p "$PID" 2>&1
-  echo "--- top"
-  "$TOP" -l 1 -pid "$PID" -stats pid,mem,cpu,time,th,state 2>&1 | tail -n 2
-  echo "--- history dir $HISTORY_DIR"
+  echo "--- top ($TOP_LIMIT_S s limit)"
+  bounded "$TOP_LIMIT_S" "$TOP" -l 1 -pid "$PID" -stats pid,mem,cmprs,ports,cpu,time,th,state
+  [ $? -ne 124 ] || echo "(top timed out)"
+  tail -n 2 "$OUT"
+  echo "--- history dir $HISTORY_DIR ($SCAN_LIMIT_S s limit each)"
   if [ -d "$HISTORY_DIR" ]; then
-    echo "files=$(find "$HISTORY_DIR" -type f 2>/dev/null | wc -l | tr -d ' ')"
-    echo "size_kb=$(du -sk "$HISTORY_DIR" 2>/dev/null | awk '{print $1}')"
+    if bounded "$SCAN_LIMIT_S" "$FIND" "$HISTORY_DIR" -type f; [ $? -ne 124 ]; then
+      echo "files=$(wc -l < "$OUT" | tr -d ' ')"
+    else
+      echo "files=(find timed out)"
+    fi
+    if bounded "$SCAN_LIMIT_S" "$DU" -sk "$HISTORY_DIR"; [ $? -ne 124 ]; then
+      echo "size_kb=$(awk '{print $1}' "$OUT")"
+    else
+      echo "size_kb=(du timed out)"
+    fi
   else
     echo "missing"
   fi

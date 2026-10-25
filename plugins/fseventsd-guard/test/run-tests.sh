@@ -411,6 +411,28 @@ if ! skip_case helper; then
   rm -f "$FSG_FAKE/no-respawn"; echo 4242 > "$FSG_FAKE/fsev/pids"; mem 3G; rm -f "$EV/last-restart"
   touch "$FSG_FAKE/kill-fail"; /bin/sh "$H" 2>/dev/null; eq $? 71 "kill failed"; rm -f "$FSG_FAKE/kill-fail"
 
+  t "helper bounds top, find and du"
+  H="$C/helper"; render_helper "$C/h0" 0
+  sed -e 's/^TOP_LIMIT_S=.*/TOP_LIMIT_S=1/' -e 's/^SCAN_LIMIT_S=.*/SCAN_LIMIT_S=1/' "$C/h0" > "$H"
+  EV="$FSG_PREFIX/Library/Logs/fseventsd-guard"
+  mkdir -p "$FSG_PREFIX/.fseventsd"; touch "$FSG_PREFIX/.fseventsd/a" "$FSG_PREFIX/.fseventsd/b" "$FSG_PREFIX/.fseventsd/c"
+  mem 3G; /bin/sh "$C/h0" >/dev/null 2>&1; eq $? 0 "restart"
+  rec=$(cat "$EV"/restart-*.txt)
+  has "$rec" "files=3" "history files counted"; printf '%s' "$rec" | grep -q '^size_kb=[0-9][0-9]*$' && ok || bad "history size: $rec"
+  has "$rec" "--- top (15 s limit)" "top bounded"; has "$rec" "PID MEM CMPRS PORTS" "top's columns"
+  ls -A "$EV" | grep -q '^\.out' && bad "the output file is left behind" || ok
+  rm -f "$EV"/restart-*.txt "$EV/last-restart"; echo 4242 > "$FSG_FAKE/fsev/pids"; mem 3G
+  echo 5 > "$FSG_FAKE/find-delay"; echo 5 > "$FSG_FAKE/du-delay"; s=$(date +%s)
+  /bin/sh "$H" >/dev/null 2>&1; eq $? 0 "a hung scan does not stop the restart"
+  [ $(( $(date +%s) - s )) -lt 8 ] && ok || bad "scans bounded: took $(( $(date +%s) - s )) s"
+  rec=$(cat "$EV"/restart-*.txt)
+  has "$rec" "files=(find timed out)" "find bounded"; has "$rec" "size_kb=(du timed out)" "du bounded"
+  rm -f "$FSG_FAKE/find-delay" "$FSG_FAKE/du-delay" "$EV/last-restart"; echo 4242 > "$FSG_FAKE/fsev/pids"; mem 3G
+  echo 5 > "$FSG_FAKE/top-delay"; s=$(date +%s)
+  /bin/sh "$H" 2> "$C/err"; eq $? 70 "a hung top: cannot measure"
+  [ $(( $(date +%s) - s )) -lt 4 ] && ok || bad "top bounded: took $(( $(date +%s) - s )) s"
+  rm -f "$FSG_FAKE/top-delay"
+
   t "helper trial window"
   H="$C/helper"; render_helper "$H" $(( $(date +%s) + 3600 ))
   mem 5000K; out=$(/bin/sh "$H"); eq $? 0 "trial: healthy daemon restarted"; has "$out" "mode=trial" "mode"
