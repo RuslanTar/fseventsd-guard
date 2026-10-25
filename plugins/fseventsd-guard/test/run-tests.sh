@@ -56,6 +56,12 @@ tgit() {
 REPO=$ROOT/repo
 mkdir -p "$REPO/plugins"
 cp -R "$GUARD_HOME" "$REPO/plugins/fseventsd-guard"
+# The repository root's marketplace and .gitattributes, which the plugin tests check,
+# when this runs from a checkout of the whole repository (else those tests skip).
+SRC_TOP=$(cd -P "$GUARD_HOME/../.." && pwd)
+if [ "$(cd -P "$SRC_TOP/plugins/fseventsd-guard" 2>/dev/null && pwd)" = "$GUARD_HOME" ]; then
+  for f in .gitattributes .claude-plugin; do [ -e "$SRC_TOP/$f" ] && cp -R "$SRC_TOP/$f" "$REPO/"; done
+fi
 tgit init -q && tgit add -A && tgit commit -q -m "guard under test" && tgit update-ref refs/remotes/origin/main HEAD &&
   tgit remote add origin https://github.com/RuslanTar/fseventsd-guard.git ||
   { echo "SETUP: cannot create the test repo" >&2; exit 2; }
@@ -130,6 +136,7 @@ t() { # start a test: t NAME
 }
 skip_case() { [ -n "$FILTER" ] && case $1 in *"$FILTER"*) return 1 ;; *) return 0 ;; esac; return 1; }
 ok() { PASS=$((PASS + 1)); }
+skip() { printf 'SKIP [%s] %s\n' "$CUR" "$*"; }
 bad() { FAIL=$((FAIL + 1)); printf 'FAIL [%s] %s\n' "$CUR" "$*"; }
 eq() { [ "$1" = "$2" ] && ok || bad "${3:-}: expected '$2', got '$1'"; }
 has() { printf '%s' "$1" | grep -qF -- "$2" && ok || bad "${3:-}: missing '$2' in: $(printf '%s' "$1" | head -c 400)"; }
@@ -4807,8 +4814,12 @@ if ! skip_case claude-hook-wrapper; then
 
   t "the plugin's hooks.json runs the wrapper, and the manifests name the plugin"
   # The marketplace sits at the repository root, two levels above the plugin.
-  MKT=$(cd -P "$HERE/../../.." && pwd)/.claude-plugin/marketplace.json
-  for f in "$GUARD_HOME/hooks/hooks.json" "$GUARD_HOME/.claude-plugin/plugin.json" "$MKT"; do
+  MKT=$REPO/.claude-plugin/marketplace.json
+  if [ ! -f "$MKT" ]; then
+    skip "no .claude-plugin/marketplace.json: run the suite from a checkout of the whole repository to check it"
+    MKT=
+  fi
+  for f in "$GUARD_HOME/hooks/hooks.json" "$GUARD_HOME/.claude-plugin/plugin.json" ${MKT:+"$MKT"}; do
     /usr/bin/plutil -convert json -o /dev/null "$f" 2>/dev/null && ok || bad "not JSON: $f"
   done
   out=$(/usr/bin/python3 - "$GUARD_HOME" "$MKT" <<'PY'
@@ -4838,16 +4849,17 @@ for k, v in (("name", "fseventsd-guard"), ("license", "MIT"),
 # No version anywhere: Claude Code then versions the plugin by the commit of main.
 if "version" in p:
     print("plugin.json has a version: users would stay on it until it is bumped")
-m = json.load(open(mkt))
-if m.get("name") != "fseventsd-guard":
-    print("marketplace name: %r" % m.get("name"))
-es = [e for e in m.get("plugins", []) if e.get("name") == "fseventsd-guard"]
-if len(es) != 1 or es[0].get("source") != "./plugins/fseventsd-guard":
-    print("marketplace entry: %r" % es)
-elif "version" in es[0]:
-    print("marketplace entry has a version: users would stay on it until it is bumped")
-elif not os.path.isfile(os.path.join(os.path.dirname(os.path.dirname(mkt)), "plugins/fseventsd-guard/.claude-plugin/plugin.json")):
-    print("marketplace entry source has no plugin.json")
+if mkt:
+    m = json.load(open(mkt))
+    es = [e for e in m.get("plugins", []) if e.get("name") == "fseventsd-guard"]
+    if m.get("name") != "fseventsd-guard":
+        print("marketplace name: %r" % m.get("name"))
+    if len(es) != 1 or es[0].get("source") != "./plugins/fseventsd-guard":
+        print("marketplace entry: %r" % es)
+    elif "version" in es[0]:
+        print("marketplace entry has a version: users would stay on it until it is bumped")
+    elif not os.path.isfile(os.path.join(os.path.dirname(os.path.dirname(mkt)), "plugins/fseventsd-guard/.claude-plugin/plugin.json")):
+        print("marketplace entry source has no plugin.json")
 PY
 )
   eq "$out" "" "hooks.json and the manifests"
@@ -4861,10 +4873,13 @@ PY
     printf '{"session_id":"h1","hook_event_name":"%s","tool_name":"Bash"}' "$2" | CLAUDE_PLUGIN_ROOT="$1" bash -c "$cmd"; echo "rc=$?"
   }
   # The repository forces LF, so a Windows checkout (core.autocrlf=true) gets none.
-  TOP=$(cd -P "$HERE/../../.." && pwd)
-  eq "$(GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 git -C "$TOP" check-attr eol -- plugins/fseventsd-guard/hooks/fseventsd-guard-hook.sh \
-    plugins/fseventsd-guard/hooks/hooks.json plugins/fseventsd-guard/fseventsd-guard plugins/fseventsd-guard/lib/hint.sh | grep -c ': eol: lf$')" 4 \
-    "the hook files check out with LF"
+  if [ -f "$REPO/.gitattributes" ]; then
+    eq "$(GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 git -C "$REPO" check-attr eol -- plugins/fseventsd-guard/hooks/fseventsd-guard-hook.sh \
+      plugins/fseventsd-guard/hooks/hooks.json plugins/fseventsd-guard/fseventsd-guard plugins/fseventsd-guard/lib/hint.sh | grep -c ': eol: lf$')" 4 \
+      "the hook files check out with LF"
+  else
+    skip "no .gitattributes: run the suite from a checkout of the whole repository to check the LF rule"
+  fi
   mem 3G
   has "$(hook_msg "$(hrun "$GUARD_HOME" UserPromptSubmit | sed '$d')")" "fseventsd is running away" "on macOS the command runs the wrapper"
   rm -rf "$FSG_HINT_DIR"
