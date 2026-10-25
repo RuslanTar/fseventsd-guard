@@ -101,9 +101,10 @@ fsg_hint_nudge_json() {
   # An older clone is brought up to date first: install would install its release.
   cmd="if [ -d $FSG_HINT_CLONE ]; then git -C $FSG_HINT_CLONE pull --ff-only; else git clone $FSG_HINT_REPO.git $FSG_HINT_CLONE; fi && $g install"
   doc="$FSG_HINT_REPO#readme"
-  off="$FSG_HINT_DIR/off"
+  off=$FSG_HINT_DIR
   case $off in "$HOME"/*) off="~${off#"$HOME"}" ;; esac
-  msg="fseventsd-guard: $lead (up $(fsg_dur "${M_UP:-0}")). On macOS $FSG_OS_VER it can grow without limit and silently stop delivering file events. Install the guard in a new terminal window (it asks for sudo): $cmd. Why: $doc. Silence: FSG_HINT=0, or touch $off"
+  msg="fseventsd-guard: $lead (up $(fsg_dur "${M_UP:-0}")). On macOS $FSG_OS_VER it can grow without limit and silently stop delivering file events. Install the guard in a new terminal window (it asks for sudo): $cmd. Why: $doc. Silence: FSG_HINT=0, or mkdir -p $off && touch $off/off"
+  off="$off/off"
   ctx="fseventsd-guard install hint (from its Claude Code plugin; $every at this level). Measured now: fseventsd, the macOS file-events daemon, has a footprint of $M_MB MB ($x), uptime $(fsg_dur "${M_UP:-0}"), level $S_LEVEL (the guard warns at $FSG_WARN_MB MB and heals at $FSG_ACT_MB MB). On macOS $FSG_OS_VER fseventsd has a known bug: its memory grows without limit and it silently stops delivering file events, so the IDE, dev servers, Docker bind mounts and Claude Code stop seeing file changes until it is restarted as root. fseventsd-guard, which restarts it safely (it lets test runs finish and brings Docker back), is not installed here. Install asks for sudo, so it runs in a new terminal window, not through Claude: $cmd, then the same path with doctor. Why and what it costs: $doc. The hint stops once the guard is installed; FSG_HINT=0 in Claude Code's environment, or a file $off, silences it. The user has not been told about this in the conversation yet."
   printf '{"systemMessage":%s,"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":%s}}\n' \
     "$(fsg_json_str "$msg")" "$(fsg_json_str "$ctx")"

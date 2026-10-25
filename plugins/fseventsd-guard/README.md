@@ -307,8 +307,8 @@ the root logs, the root-owned copy of the root steps (last, so an uninstall cut
 short runs again from it), every directory an install
 created (such as `/usr/local/libexec`) once it is empty, the user state (app copy,
 probe, config, heal and trial records), the user logs, the Claude Code install
-hint's stamps and its `off` file (`~/Library/Caches/fseventsd-guard-hint`, which
-`install` removes too; "Claude Code hooks" below), and the temp files an
+hint's stamps (in `~/Library/Caches/fseventsd-guard-hint`, which `install` clears
+too; its `off` file stays; "Claude Code hooks" below), and the temp files an
 interrupted guard command left (those over an hour old, so a guard command
 running in another terminal keeps its own). It takes the state and log paths from
 the agent's plist, and removes nothing until no tick or root helper runs any more.
@@ -365,7 +365,7 @@ sudo rm -rf /Library/Logs/fseventsd-guard
 rm -rf "$HOME/Library/Application Support/fseventsd-guard"
 rm -f "$HOME/Library/LaunchAgents/io.github.ruslantar.fseventsd-guard.plist"
 rm -f "$HOME/Library/Logs/fseventsd-guard.log" "$HOME/Library/Logs/fseventsd-guard.agent.log"
-rm -rf "$HOME/Library/Caches/fseventsd-guard-hint"    # the Claude Code hint's stamps
+rm -rf "$HOME/Library/Caches/fseventsd-guard-hint"    # the Claude Code hint's stamps and off file
 ```
 
 If the install created `/usr/local/libexec` and it is now empty,
@@ -456,9 +456,14 @@ root `README.md`.
 Once the guard is installed the nudge stops, and the agent heals unattended.
 To silence both hooks, set `FSG_HINT=0` in the environment Claude Code starts with
 (an `export` in your shell profile, or `"env": {"FSG_HINT": "0"}` in
-`.claude/settings.local.json`), or create `~/Library/Caches/fseventsd-guard-hint/off`.
-`install` and `uninstall` remove that directory, the `off` file included;
-`FSG_HINT=0` stays.
+`.claude/settings.local.json`), or create the `off` file:
+
+```sh
+mkdir -p ~/Library/Caches/fseventsd-guard-hint && touch ~/Library/Caches/fseventsd-guard-hint/off
+```
+
+`install` and `uninstall` remove the nudge's stamps from that directory, not the
+`off` file.
 
 ## Replacing an older watcher
 

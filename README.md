@@ -87,8 +87,8 @@ root, never change the installed guard, and always exit 0. Off macOS they exit a
 once and print nothing.
 
 To silence them: set `FSG_HINT=0` in the environment Claude Code starts with (for
-example in the `env` block of a settings file), or create
-`~/Library/Caches/fseventsd-guard-hint/off`.
+example in the `env` block of a settings file), or create the `off` file:
+`mkdir -p ~/Library/Caches/fseventsd-guard-hint && touch ~/Library/Caches/fseventsd-guard-hint/off`.
 
 ### For a team
 

@@ -640,7 +640,7 @@ EOF
     } > "$FSG_STATE_DIR/config"
   fi
   # The Claude Code install hint's stamps (lib/hint.sh) are moot once installed.
-  fsg_uninstall_path_ok "$FSG_HINT_DIR" fseventsd-guard-hint && rm -rf "$FSG_HINT_DIR"
+  fsg_uninstall_path_ok "$FSG_HINT_DIR" fseventsd-guard-hint && fsg_hint_stamps_rm
 
   echo "[2/5] delivery probe"
   if [ $no_probe = 1 ]; then
@@ -893,6 +893,19 @@ fsg_uninstall_disabled() {
     grep -qF -e "\"$FSG_LABEL\" => disabled" -e "\"$FSG_LABEL\" => true"
 }
 
+# The Claude Code install hint's stamps (lib/hint.sh) that exist. Its off switch in
+# the same dir is the user's, and stays.
+fsg_hint_stamps() {
+  local f
+  for f in "$FSG_HINT_DIR/checked" "$FSG_HINT_DIR"/last-*; do [ -e "$f" ] && echo "$f"; done
+  return 0
+}
+fsg_hint_stamps_rm() {
+  fsg_hint_stamps | while IFS= read -r f; do rm -f "$f"; done
+  rmdir "$FSG_HINT_DIR" 2>/dev/null
+  return 0
+}
+
 # --keep-logs: the heal and trial records and the user config leave the state dir for
 # a dated dir next to the user log (~/Library/Logs). Sets U_RECORDS to it (empty
 # when there was nothing to keep); 1 when a move failed.
@@ -981,7 +994,7 @@ fsg_cmd_uninstall() {
     fi
   fi
   [ $U_STATE_OK = 1 ] && echo "  $FSG_STATE_DIR (app copy, delivery probe, config, heal and trial records, drain state)"
-  [ $U_HINT_OK = 1 ] && [ -e "$FSG_HINT_DIR" ] && echo "  $FSG_HINT_DIR (the Claude Code install hint's stamps and off switch)"
+  [ $U_HINT_OK = 1 ] && [ -n "$(fsg_hint_stamps)" ] && echo "  the Claude Code install hint's stamps in $FSG_HINT_DIR (an off switch there stays)"
   if [ $keep = 0 ]; then
     [ $U_LOG_OK = 1 ] && echo "  $FSG_LOG"
     [ $U_ALOG_OK = 1 ] && echo "  $FSG_AGENT_LOG"
@@ -1055,7 +1068,7 @@ fsg_cmd_uninstall() {
     fsg_say "uninstall: could not move the records to ${U_RECORDS:-a dir next to $FSG_LOG}, so $FSG_STATE_DIR is kept"
   fi
   [ $rm_state = 1 ] && rm -rf "$FSG_STATE_DIR"
-  [ $U_HINT_OK = 1 ] && rm -rf "$FSG_HINT_DIR"
+  [ $U_HINT_OK = 1 ] && fsg_hint_stamps_rm
   if [ $keep = 0 ]; then
     [ $U_LOG_OK = 1 ] && rm -f "$FSG_LOG" "$FSG_LOG.tmp"
     [ $U_ALOG_OK = 1 ] && rm -f "$FSG_AGENT_LOG"

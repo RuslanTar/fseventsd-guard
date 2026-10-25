@@ -4472,17 +4472,19 @@ if ! skip_case uninstall; then
   # hint_cache: the Claude Code install hint's stamps and off switch, as it leaves them.
   hint_cache() { mkdir -p "$FSG_HINT_DIR"; date +%s > "$FSG_HINT_DIR/checked"; date +%s > "$FSG_HINT_DIR/last-warn"; : > "$FSG_HINT_DIR/off"; }
 
-  t "install and uninstall remove the Claude Code install hint's stamps"
+  t "install and uninstall remove the Claude Code install hint's stamps, not its off switch"
   hint_cache; install_fake; eq $? 0 "install"
-  absent "$FSG_HINT_DIR" "install removes them: moot once installed"
+  absent "$FSG_HINT_DIR/checked" "install removes the stamps: moot once installed"; absent "$FSG_HINT_DIR/last-warn" "each of them"
+  exists "$FSG_HINT_DIR/off" "the off switch stays"
+  touch "$FSG_HINT_DIR/off" && ok || bad "the documented touch works on an installed guard"
   hint_cache
   "$G" uninstall --yes --prefix "$FSG_PREFIX" > "$C/un.out" 2>&1; eq $? 0 "uninstall"
-  has "$(cat "$C/un.out")" "$FSG_HINT_DIR (the Claude Code install hint's stamps and off switch)" "listed"
-  absent "$FSG_HINT_DIR" "uninstall removes them"
+  has "$(cat "$C/un.out")" "the Claude Code install hint's stamps in $FSG_HINT_DIR (an off switch there stays)" "listed"
+  absent "$FSG_HINT_DIR/checked" "uninstall removes them"; exists "$FSG_HINT_DIR/off" "and keeps the off switch"
   has "$(cat "$C/un.out")" "uninstalled: no traces left" "clean"
-  install_fake; hint_cache
+  install_fake; mv "$FSG_HINT_DIR/off" "$C/off.was"; date +%s > "$FSG_HINT_DIR/checked"
   "$G" uninstall --yes --keep-logs --prefix "$FSG_PREFIX" > "$C/un.out" 2>&1; eq $? 0 "uninstall --keep-logs"
-  absent "$FSG_HINT_DIR" "--keep-logs removes them too (no log)"
+  absent "$FSG_HINT_DIR" "--keep-logs removes them too (no log), and the dir with no off switch in it"
   # Named otherwise (an exported FSG_HINT_DIR), the dir is not the guard's to remove.
   export FSG_HINT_DIR="$C/home/Caches/other"; hint_cache
   install_fake; eq $? 0 "install"; exists "$FSG_HINT_DIR/checked" "install leaves another name alone"
@@ -4524,7 +4526,7 @@ if ! skip_case claude-hook-prompt; then
   has "$m" "fseventsd is running away: 3.0 GB, 102x Apple's 30 MB budget (up 1h02m)" "the user's line"
   has "$m" "On macOS 27.0.1 it can grow without limit and silently stop delivering file events" "why it matters"
   has "$m" "new terminal window (it asks for sudo): if [ -d ~/fseventsd-guard ]; then git -C ~/fseventsd-guard pull --ff-only; else git clone https://github.com/RuslanTar/fseventsd-guard.git ~/fseventsd-guard; fi && ~/fseventsd-guard/plugins/fseventsd-guard/fseventsd-guard install." "the install command, from an up-to-date clone of the public repo"
-  has "$m" "Silence: FSG_HINT=0, or touch $FSG_HINT_DIR/off" "how to silence it"
+  has "$m" "Silence: FSG_HINT=0, or mkdir -p $FSG_HINT_DIR && touch $FSG_HINT_DIR/off" "how to silence it"
   has "$x" "a footprint of 3072 MB (102x Apple's 30 MB budget), uptime 1h02m, level runaway (the guard warns at 500 MB and heals at 2048 MB)" "the facts"
   has "$x" "On macOS 27.0.1 fseventsd has a known bug" "the version"
   has "$x" "IDE, dev servers, Docker bind mounts and Claude Code stop seeing file changes" "the symptoms"
