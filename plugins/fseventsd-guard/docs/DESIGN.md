@@ -15,7 +15,7 @@ decision from an accident. The user-facing summary is `../README.md`.
 | Drain sketch: a lock that runners respect, running specs finish (cap ~60 min, configurable), then stop Docker, restart, start again, release | owner, 2026-10-16 (improved on, §5) |
 | Emergency tier: stop and heal, but through the drain | owner, 2026-10-16 |
 | Suggest the guard only on affected macOS versions | owner, 2026-10-16 (§9) |
-| Affected = an explicit list of versions with a reported reproduction, not a range | owner, 2026-10-20 (§9) |
+| Affected = a range: from the first version with a reported runaway (15.6.1) up to the first fixed version of each major line (replaces an explicit list, 2026-10-20) | owner, 2026-10-25 (§9) |
 | Only the launchd agent runs heals; wave, manual and trial callers write a request and wait for its result | owner, 2026-10-20 (§5.3) |
 
 ## 2. Parts and where they live
@@ -909,28 +909,31 @@ sample cannot give CPU. Uptime is `ps -o etime`. No root needed.
 
 ## 9. Affected versions
 
-- The guard is suggested only on the macOS versions in `FSG_AFFECTED_VERSIONS`
-  (`config.defaults`): an explicit list, not a range (owner, 2026-10-20: "limit it
-  to the macOS versions where the bug reproduces"). A version is on the list when a
-  first-hand report states it and shows the runaway (multi-GB footprint against the
-  30 MB budget that a restart clears, often with events no longer delivered).
-- Every other version counts as not affected, including releases newer than the
-  list: none has a report yet. That is not proof that they are clean. The bug looks
-  long-standing (the same defect was found in fseventsd 1400.100.1 on 15.7.9 and
-  1413.160.2 on 26.7.1), no fix is claimed anywhere, and healthy readings after a
-  few days without a file-event flood say nothing (27.0.1 has both). The list
-  therefore goes stale on each release: when the runaway shows on an unlisted
-  version, add it to `FSG_AFFECTED_VERSIONS` and its report to the table below,
-  in one pull request. Until then `install --force` installs there.
+- The guard is suggested only on affected macOS versions (owner, 2026-10-25): from
+  `FSG_AFFECTED_MIN` (15.6.1, the earliest version with a first-hand report) up to,
+  not including, the first fixed version of the same major line, listed in
+  `FSG_AFFECTED_FIXED` (`config.defaults`; `"26.8 27.1"` would mean 26.x is fixed
+  from 26.8 and 27.x from 27.1). A major line with no entry counts as affected from
+  the minimum on, newer lines included. No fix is known, so the list is empty.
+- This replaces an explicit list of reported versions (owner, 2026-10-20), which
+  went stale on every release: the bug looks long-standing (the same defect was
+  found in fseventsd 1400.100.1 on 15.7.9 and 1413.160.2 on 26.7.1), no source
+  claims a fix, and healthy readings after a few days without a file-event flood
+  say nothing (27.0.1 has both). Versions in the range without a report of their
+  own (26.0, 27.2) are treated as affected for the same reason.
+- When Apple ships a fix, add that line's first fixed version to
+  `FSG_AFFECTED_FIXED` with its evidence below, in one pull request. A report on a
+  version older than 15.6.1 moves `FSG_AFFECTED_MIN` down.
 - `fseventsd-guard doctor --affected` (exit 0/1/3) and the `os.affected` field in
-  `status --json` expose the answer. `install` refuses on an unlisted version
-  unless `--force`. `FSG_AFFECTED=yes|no` overrides it on one machine. Versions
-  compare numerically, so `27.0` also matches `27.0.0`.
+  `status --json` expose the answer. `install` refuses outside the range unless
+  `--force`. `FSG_AFFECTED=yes|no` overrides it on one machine. Versions compare
+  numerically, component by component (15.10 is after 15.6.1, 27.0 equals 27.0.0).
 
-Reports behind the list (researched 2026-10-20; no source claims a fix):
+Reports behind the range (researched 2026-10-20 and 2026-10-25; no source claims a fix):
 
 | macOS (build) | Report |
 |---|---|
+| 15.6.1 (24G90) | The earliest version with a report, by mikirejf ([bun#43870](https://github.com/oven-sh/bun/issues/43870)) |
 | 15.7.9 (24G830) | 2.9 GiB, back to 4.5 MB after a restart, FB25224901; the reporter hedges only on the cause ([Apple forum 849819](https://developer.apple.com/forums/thread/849819)) |
 | 26.4.1 | ~62 GB resident at 193% CPU ([remotion#7207](https://github.com/remotion-dev/remotion/issues/7207)) |
 | 26.5.1 (25F80) | ~19 GB in `top` (~2.5-3 GB resident), ~100% CPU, ~160 CPU-hours over 36 days ([Kiro#9742](https://github.com/kirodotdev/Kiro/issues/9742)) |
@@ -969,15 +972,15 @@ create and one delete per check: 2 events every 5 minutes.
 | Footprint via `top` (and `footprint` if cheap) | `top` for the decision; `footprint` (10 s bound) only in the helper's evidence | `footprint` on a 17 GB process is slow |
 | (not planned) | Emergency ceiling 8 GB cuts the drain short | Protects a machine with a nearly full disk |
 | (not planned) | Helper requires ppid 1 | A root process exec'ing the binary from elsewhere is not the daemon |
-| (not planned) | `doctor --affected` and the affected version list | Owner, 2026-10-16 and 2026-10-20 |
+| (not planned) | `doctor --affected` and the affected version range | Owner, 2026-10-16, 2026-10-20 and 2026-10-25 |
 
 ## 12. Open questions
 
 1. Thresholds after a few days of logs (warn 500 MB, act 2 GB, floor 150 MB,
    emergency interval 3 h, ceiling 8 GB, drain cap 60 min).
 2. Which Docker variant wins (trials pending). B is the default until then.
-3. Keeping the affected version list current (§9): it covers no release newer than
-   27.0.1, and macOS 27.2 is already at release candidate.
+3. Recording fixes (§9): `FSG_AFFECTED_FIXED` is empty, so every version from
+   15.6.1 on counts as affected until a fix is reported and added.
 4. A stall with a footprint below the helper's floor: the helper refuses, and the
    guard notifies with the manual command. Should the helper accept a stall it can
    verify itself (a root-owned copy of the probe)?

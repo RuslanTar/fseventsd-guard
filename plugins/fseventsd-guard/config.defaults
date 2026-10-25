@@ -174,12 +174,14 @@ FSG_RUN_ON_TIMEOUT=fail
 FSG_RUN_POLL_S=5
 
 # --- Affected macOS versions --------------------------------------------------------
-# The guard is suggested only on these macOS versions: each has a first-hand
-# reproduction with the version stated (docs/DESIGN.md "Affected versions" lists
-# the reports). Any other version counts as not affected until someone reports
-# the runaway on it; add it here with the report in docs/DESIGN.md.
-FSG_AFFECTED_VERSIONS="15.7.9 26.4.1 26.5.1 26.5.2 26.6 26.6.1 26.6.2 26.7 26.7.1 27.0 27.0.1"
-# Force the answer (yes|no); empty = use the list.
+# Affected: from the first version with a first-hand report of the runaway
+# (docs/DESIGN.md "Affected versions" lists the reports) up to, not including, the
+# first fixed version of its major line. No fix is known yet.
+FSG_AFFECTED_MIN=15.6.1
+# First fixed version per major line, space-separated: "26.8 27.1" means 26.x is
+# fixed from 26.8 and 27.x from 27.1. A line without an entry has no known fix.
+FSG_AFFECTED_FIXED=
+# Force the answer (yes|no); empty = use the range.
 FSG_AFFECTED=
 
 # --- Notifications ------------------------------------------------------------------

@@ -15,9 +15,8 @@ you at each step.
 - **fseventsd** is the system daemon that delivers file events to Spotlight, IDEs,
   the Next.js dev server, Docker Desktop's file sharing and every other file watcher
   (Claude Code's included).
-- **The bug.** On the macOS versions listed in
-  [`docs/DESIGN.md` §9](docs/DESIGN.md#9-affected-versions) (15.7.9, 26.4.1, 26.5.1,
-  26.5.2, 26.6, 26.6.1, 26.6.2, 26.7, 26.7.1, 27.0, 27.0.1), a sustained file-event
+- **The bug.** On macOS 15.6.1 and later (the reports are in
+  [`docs/DESIGN.md` §9](docs/DESIGN.md#9-affected-versions)), a sustained file-event
   flood makes its memory grow without limit (17.7 GB measured on one affected
   Mac against Apple's own 30 MB budget) and it **stops delivering events**,
   silently. It never recovers by itself: only a restart helps, and a restart needs
@@ -29,7 +28,8 @@ you at each step.
   bind-mounted containers and Claude Code stop seeing file changes, and Spotlight
   goes stale. `fseventsd-guard status` shows the footprint far above 30 MB.
 - **Who should install it.** Whoever's `fseventsd-guard doctor --affected` exits 0.
-  On other versions nobody has reported the runaway; `install` refuses there
+  Before 15.6.1 nobody has reported the runaway, and a version at or past a known
+  fix (`FSG_AFFECTED_FIXED`, none yet) counts as fixed; `install` refuses there
   without `--force`.
 - **What it costs.** One sudo prompt at install; then a notification on each heal,
   IDE and Spotlight rescans after it, and a Docker restart during it (by the Docker
@@ -151,8 +151,8 @@ Say this out loud before you heal by hand; the notifications repeat it.
 
 ## Install
 
-macOS only, and only on the versions where the runaway is reported
-(`fseventsd-guard doctor --affected`; the list is in `config.defaults`).
+macOS only, and only on affected versions
+(`fseventsd-guard doctor --affected`; the range is in `config.defaults`).
 Needs the Command Line Tools (`xcode-select --install`) for the probe.
 
 ```sh

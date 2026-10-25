@@ -21,7 +21,7 @@ This repo holds two things:
 
 ## Who needs it
 
-Macs on the versions where the runaway is reported (the list is in
+Macs on macOS 15.6.1 or later (the range and the reports behind it are in
 [`docs/DESIGN.md` §9](plugins/fseventsd-guard/docs/DESIGN.md#9-affected-versions)),
 especially under heavy file churn: parallel agents and test suites, throwaway git
 repos, Docker bind mounts. After cloning, this tells you:
@@ -128,7 +128,7 @@ Claude Code updates the plugin only when the `version` in
 version bump, not every commit. That version always equals `FSG_VERSION` in
 `lib/common.sh` (a test checks it), and the marketplace entry sets none. Bump both
 whenever anything the hooks read changes: `hooks/`, the `fseventsd-guard` script,
-`config.defaults` (thresholds and `FSG_AFFECTED_VERSIONS`) or a library the hooks
+`config.defaults` (thresholds and the affected range) or a library the hooks
 load (`lib/hint.sh`, `lib/common.sh`, `lib/lease.sh`, `lib/measure.sh`). A change
 pushed without a bump never reaches users.
 

@@ -542,8 +542,8 @@ fsg_cmd_install() {
   fsg_check_root_paths
   fsg_affected
   if [ "$FSG_AFF" != yes ] && [ $force = 0 ]; then
-    # An update of an existing install is not a new suggestion: a macOS update off
-    # the list must not lock the owner out of updating the guard.
+    # An update of an existing install is not a new suggestion: a macOS update past
+    # a fix must not lock the owner out of updating the guard.
     [ -f "$FSG_HELPER_PATH" ] ||
       fsg_die 1 "install: not needed here: $FSG_AFF_WHY. Use --force to install anyway."
     echo "  note: $FSG_AFF_WHY; updating the existing install"
@@ -1196,7 +1196,7 @@ fsg_cmd_doctor() {
   echo "fseventsd-guard doctor (version $FSG_VERSION)"
   fsg_doc info "macOS ${FSG_OS_VER:-?} (${FSG_OS_BUILD:-?}): affected=$FSG_AFF - $FSG_AFF_WHY"
   if [ "$FSG_AFF" != yes ] && [ -f "$FSG_HELPER_PATH" ]; then
-    fsg_doc info "no reproduction is reported on this version yet; the list may be behind (docs/DESIGN.md §9). Keep the guard if fseventsd still runs away here"
+    fsg_doc info "this version is outside the affected range (docs/DESIGN.md §9). Keep the guard if fseventsd still runs away here"
   fi
   local k v def src
   while IFS=$(printf '\037') read -r k v def src; do

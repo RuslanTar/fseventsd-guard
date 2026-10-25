@@ -307,17 +307,19 @@ fsg_affected() {
   if [ -z "$FSG_OS_VER" ]; then
     FSG_AFF=unknown; FSG_AFF_WHY="sw_vers gave no version"; return 0
   fi
-  local v
-  for v in ${FSG_AFFECTED_VERSIONS:-}; do
-    if fsg_ver_eq "$FSG_OS_VER" "$v"; then
-      FSG_AFF=yes; FSG_AFF_WHY="the runaway is reported on macOS $FSG_OS_VER"; return 0
-    fi
+  local v fixed='' min=${FSG_AFFECTED_MIN:-}
+  for v in ${FSG_AFFECTED_FIXED:-}; do
+    [ "${v%%.*}" = "${FSG_OS_VER%%.*}" ] && fixed=$v
   done
-  FSG_AFF=no; FSG_AFF_WHY="no reproduction reported on macOS $FSG_OS_VER (reported on: ${FSG_AFFECTED_VERSIONS:-none})"
+  if [ -n "$min" ] && ! fsg_ver_ge "$FSG_OS_VER" "$min"; then
+    FSG_AFF=no; FSG_AFF_WHY="macOS $FSG_OS_VER is older than $min, the first version the runaway is reported on"; return 0
+  fi
+  if [ -n "$fixed" ] && fsg_ver_ge "$FSG_OS_VER" "$fixed"; then
+    FSG_AFF=no; FSG_AFF_WHY="macOS $FSG_OS_VER has the fix (fixed in $fixed)"; return 0
+  fi
+  FSG_AFF=yes
+  FSG_AFF_WHY="macOS $FSG_OS_VER is in the affected range (from ${min:-any version}, ${fixed:+fixed in $fixed}${fixed:-no fix known for ${FSG_OS_VER%%.*}.x})"
 }
-
-# 0 when two versions are equal numerically ("27.0" equals "27.0.0").
-fsg_ver_eq() { fsg_ver_ge "$1" "$2" && fsg_ver_ge "$2" "$1"; }
 
 # --- Installed helper facts -----------------------------------------------------------
 # Reads one setting from the installed (world-readable) helper's settings block.

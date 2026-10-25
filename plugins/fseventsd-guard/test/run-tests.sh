@@ -123,7 +123,7 @@ t() { # start a test: t NAME
     FSG_DOCKER_TIMEOUT_S=10 FSG_DOCKER_QUERY_TIMEOUT_S=2 FSG_PROBE_TIMEOUT_S=2 FSG_RUN_POLL_S=1 \
     FSG_DETECT_COMMANDS=fsgtestrspec FSG_DETECT_DOCKER_CLI=0 FSG_DETECT_DOCKER_EXECS=1 FSG_DETECT_DOCKER_CONTAINERS=1 \
     FSG_DESKTOP_SOCKET="$FSG_DESKTOP_SOCKET" FSG_DESKTOP_BACKEND_SOCKET="$FSG_DESKTOP_BACKEND_SOCKET" FSG_DESKTOP_SETTINGS="$FSG_DESKTOP_SETTINGS"
-  unset FSG_AFFECTED FSG_AFFECTED_VERSIONS FSG_LEASE_FILE FSG_PROBE_BIN FSG_PROBE_DIR 2>/dev/null
+  unset FSG_AFFECTED FSG_AFFECTED_MIN FSG_AFFECTED_FIXED FSG_LEASE_FILE FSG_PROBE_BIN FSG_PROBE_DIR 2>/dev/null
   echo 4242 > "$FSG_FAKE/fsev/pids"
   echo 5000K > "$FSG_FAKE/fsev/4242.mem"
   : > "$FSG_FAKE/calls.log"
@@ -277,22 +277,37 @@ if ! skip_case status; then
   "$G" status >/dev/null; eq $? 1 "user config warn 250"
   FSG_WARN_MB=400 "$G" status >/dev/null; eq $? 0 "env beats user config"
 
-  t "affected versions"
-  for v in 15.7.9 26.4.1 26.5.1 26.5.2 26.6 26.6.1 26.6.2 26.7 26.7.1 27.0 27.0.1; do
-    echo "$v" > "$FSG_FAKE/sw_vers"; "$G" doctor --affected >/dev/null; eq $? 0 "$v affected (reported)"
+  t "affected versions: a range"
+  for v in 15.6.1 15.6.2 15.7.9 15.10 26.0 26.4.1 27.0 27.0.0 27.0.1 27.2 28.0; do
+    echo "$v" > "$FSG_FAKE/sw_vers"; "$G" doctor --affected >/dev/null; eq $? 0 "$v affected (in the range)"
   done
-  echo 27.0.0 > "$FSG_FAKE/sw_vers"; "$G" doctor --affected >/dev/null; eq $? 0 "27.0.0 matches 27.0"
-  for v in 15.7.3 15.8 26.4 26.5 26.6.3 26.7.2 27.0.2 27.2 28.0; do
-    echo "$v" > "$FSG_FAKE/sw_vers"; "$G" doctor --affected >/dev/null; eq $? 1 "$v not affected (no report)"
+  for v in 14.7 15.1.9 15.5 15.6 15.6.0; do
+    echo "$v" > "$FSG_FAKE/sw_vers"; "$G" doctor --affected >/dev/null; eq $? 1 "$v not affected (before 15.6.1)"
   done
-  out=$("$G" doctor --affected); has "$out" "no reproduction reported on macOS 28.0" "message names the version"
-  echo 27.2 > "$FSG_FAKE/sw_vers"; FSG_AFFECTED_VERSIONS="27.0.1 27.2" "$G" doctor --affected >/dev/null; eq $? 0 "a version added to the list"
-  echo 28.0 > "$FSG_FAKE/sw_vers"
+  out=$("$G" doctor --affected); has "$out" "macOS 15.6.0 is older than 15.6.1" "message names the version and the start"
+  echo 27.0.1 > "$FSG_FAKE/sw_vers"; out=$("$G" doctor --affected); has "$out" "from 15.6.1, no fix known for 27.x" "message: no fix known"
+  export FSG_AFFECTED_FIXED="26.8 27.1"
+  for v in 15.7.9 26.7.9 27.0.1 28.0; do
+    echo "$v" > "$FSG_FAKE/sw_vers"; "$G" doctor --affected >/dev/null; eq $? 0 "$v affected (before its line's fix, or no fix for the line)"
+  done
+  for v in 26.8 26.8.0 26.10 27.1 27.1.1 27.2; do
+    echo "$v" > "$FSG_FAKE/sw_vers"; "$G" doctor --affected >/dev/null; eq $? 1 "$v not affected (fixed in its line)"
+  done
+  echo 26.10 > "$FSG_FAKE/sw_vers"; out=$("$G" doctor --affected); has "$out" "macOS 26.10 has the fix (fixed in 26.8)" "message names the fix"
+  echo 26.7.9 > "$FSG_FAKE/sw_vers"; out=$("$G" doctor --affected); has "$out" "from 15.6.1, fixed in 26.8" "message names the line's fix"
+  unset FSG_AFFECTED_FIXED
+  mkdir -p "$FSG_STATE_DIR"; echo "FSG_AFFECTED_MIN=26.0" > "$FSG_STATE_DIR/config"
+  echo 15.7.9 > "$FSG_FAKE/sw_vers"; "$G" doctor --affected >/dev/null; eq $? 1 "the start from the user config"
+  : > "$FSG_STATE_DIR/config"
+  echo 15.5 > "$FSG_FAKE/sw_vers"
   FSG_AFFECTED=yes "$G" doctor --affected >/dev/null; eq $? 0 "forced yes"
   echo 27.0.1 > "$FSG_FAKE/sw_vers"
   FSG_AFFECTED=no "$G" doctor --affected >/dev/null; eq $? 1 "forced no"
+  echo 26.8 > "$FSG_FAKE/sw_vers"
+  FSG_AFFECTED_FIXED=26.8 FSG_AFFECTED=yes "$G" doctor --affected >/dev/null; eq $? 0 "forced yes beats a fix"
   echo 28.0 > "$FSG_FAKE/sw_vers"
   out=$("$G" status --json); eq "$(jget "$out" 'd["os"]["version"]')" 28.0 "version in JSON"
+  eq "$(jget "$out" 'd["os"]["affected"]')" True "a newer major line without a fix is affected"
 fi
 
 # ======================================================================== config-check
@@ -557,14 +572,14 @@ if ! skip_case install; then
   has "$(cat "$C/doc.out")" "FAIL  this config cannot be rendered into a helper, so install refuses it: FSG_HELPER_MIN_MB=0 is below 150" "doctor names it"
 
   t "install guards"
-  echo 26.4 > "$FSG_FAKE/sw_vers"; install_fake; eq $? 1 "refuses on a version with no reported reproduction"
+  echo 15.5 > "$FSG_FAKE/sw_vers"; install_fake; eq $? 1 "refuses on a version before the affected range"
   has "$(cat "$C/install.out")" "not needed here" "message"
   absent "$FSG_PREFIX/usr/local/libexec/fseventsd-guard-restart" "nothing installed"
   install_fake --force --no-agent; eq $? 0 "--force installs anyway"
   install_fake --no-agent; eq $? 0 "an existing install updates without --force"
   has "$(cat "$C/install.out")" "updating the existing install" "update note"
   out=$("$G" doctor --prefix "$FSG_PREFIX")
-  has "$out" "no reproduction is reported on this version yet" "doctor on an unlisted version"
+  has "$out" "this version is outside the affected range" "doctor on a version outside the range"
   hasnt "$out" "uninstall" "doctor does not advise uninstalling"
   echo 27.0.1 > "$FSG_FAKE/sw_vers"
   "$G" install --prefix "relative/dir" > /dev/null 2>&1; eq $? 64 "relative prefix refused"
@@ -4273,7 +4288,7 @@ if ! skip_case claude-hook-prompt; then
   : > "$FSG_LAUNCH_AGENTS_DIR/io.github.ruslantar.fseventsd-guard.plist"; eq "$(hook prompt)" "" "agent plist installed"
   rm "$FSG_LAUNCH_AGENTS_DIR/io.github.ruslantar.fseventsd-guard.plist"
   absent "$FSG_HINT_DIR" "an installed guard is neither measured nor stamped"
-  echo 28.0 > "$FSG_FAKE/sw_vers"; eq "$(hook prompt)" "" "a version without a report"; rm "$FSG_FAKE/sw_vers"
+  echo 15.5 > "$FSG_FAKE/sw_vers"; eq "$(hook prompt)" "" "a version before the range"; rm "$FSG_FAKE/sw_vers"
   rm -rf "$FSG_HINT_DIR"; eq "$(FSG_AFFECTED=no hook prompt)" "" "FSG_AFFECTED=no"
   rm -rf "$FSG_HINT_DIR"; not_darwin "$C/bin"
   eq "$(PATH="$C/bin:$PATH" hook prompt)" "" "not macOS"; absent "$FSG_HINT_DIR" "nothing written off macOS"
