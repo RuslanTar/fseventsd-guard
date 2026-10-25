@@ -4725,6 +4725,12 @@ if ! skip_case claude-hook-bash; then
   echo "$((e - 1)) healed manual none 30 /x" > "$FSG_STATE_DIR/last-heal"
   x=$(hook_ctx "$(hook bash PostToolUse s1)")
   has "$x" "Docker step none: it leaves Docker alone" "variant none"; hasnt "$x" "worth re-running" "nor for variant none"
+  has "$x" "and ended: fseventsd restarted, and Docker was left alone." "variant none: Docker not claimed verified"
+  echo "$((e - 2)) healed emergency skip 30 /x" > "$FSG_STATE_DIR/last-heal"
+  x=$(hook_ctx "$(hook bash PostToolUse s1)")
+  has "$x" "and ended: fseventsd restarted; Docker was not touched or checked." "Docker stopped (skip): nothing checked"
+  hasnt "$x" "verified" "nor claimed verified"
+  has "$x" "If a session stops seeing file changes after the heal, restart it." "fseventsd still restarted"
 
   t "claude-hook bash: a failed restart says what happened to Docker"
   app_copy; e=$(date +%s)

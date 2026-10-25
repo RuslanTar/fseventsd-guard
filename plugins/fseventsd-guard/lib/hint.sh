@@ -273,7 +273,13 @@ fsg_hint_heal_text() {
     ended)
       local restarted=0
       case $HN_RESULT in
-        healed) r="fseventsd restarted, and Docker and its containers verified"; restarted=1 ;;
+        healed)
+          case $HN_VARIANT in
+            skip) r="fseventsd restarted; Docker was not touched or checked" ;;
+            none) r="fseventsd restarted, and Docker was left alone" ;;
+            *) r="fseventsd restarted, and Docker and its containers verified" ;;
+          esac
+          restarted=1 ;;
         # The Docker intent stays until Docker verified (a hold shows as held first).
         restart-failed)
           r="the fseventsd restart failed ($g doctor says why)"
