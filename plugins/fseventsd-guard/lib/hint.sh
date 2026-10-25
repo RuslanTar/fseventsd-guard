@@ -267,7 +267,12 @@ fsg_hint_heal_text() {
       local restarted=0
       case $HN_RESULT in
         healed) r="fseventsd restarted, and Docker and its containers verified"; restarted=1 ;;
-        restart-failed) r="the fseventsd restart failed ($g doctor says why), and Docker was brought back" ;;
+        # The Docker intent stays until Docker verified (a hold shows as held first).
+        restart-failed)
+          r="the fseventsd restart failed ($g doctor says why)"
+          if [ $docker = 0 ]; then r="$r, and Docker was left alone"
+          elif [ -f "$FSG_DOCKER_INTENT" ]; then r="$r, and Docker is not verified back ($g status says what is left)"
+          else r="$r, and Docker was brought back"; fi ;;
         restored-partly) r="fseventsd restarted, but the heal ended incomplete (fseventsd not healthy in time, or Docker not fully back; $g status says what is left)"; restarted=1 ;;
         aborted-at-cap) r="it gave up at the drain cap, and nothing was stopped or restarted"; docker=0 ;;
         refused-*) r="it was refused before its Docker step, and nothing was stopped or restarted"; docker=0 ;;

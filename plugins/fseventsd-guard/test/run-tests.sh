@@ -4582,6 +4582,22 @@ if ! skip_case claude-hook-bash; then
   x=$(hook_ctx "$(hook bash PostToolUse s1)")
   has "$x" "Docker step none: it leaves Docker alone" "variant none"; hasnt "$x" "worth re-running" "nor for variant none"
 
+  t "claude-hook bash: a failed restart says what happened to Docker"
+  app_copy; e=$(date +%s)
+  echo "$e restart-failed manual skip 30 /x" > "$FSG_STATE_DIR/last-heal"
+  x=$(hook_ctx "$(hook bash PostToolUse s1)")
+  has "$x" "and ended: the fseventsd restart failed ($(appg) doctor says why), and Docker was left alone." "no Docker step"
+  hasnt "$x" "brought back" "not brought back"
+  echo "$((e - 1)) restart-failed manual B 30 /x" > "$FSG_STATE_DIR/last-heal"
+  has "$(hook_ctx "$(hook bash PostToolUse s1)")" "and ended: the fseventsd restart failed ($(appg) doctor says why), and Docker was brought back." "Docker verified"
+  # An intent that holds no runs (C before its restart) is left until Docker verified.
+  printf 'state_version=1\nowner_pid=999999\nowner_lstart=gone\nstarted_epoch=%s\ntrigger=manual\nvariant=C\naction_ran=0\nhold_s=3600\n' \
+    $((e - 30)) > "$FSG_STATE_DIR/docker-intent"
+  echo "$((e - 2)) restart-failed manual C 30 /x" > "$FSG_STATE_DIR/last-heal"
+  x=$(hook_ctx "$(hook bash PostToolUse s1)")
+  has "$x" "and ended: the fseventsd restart failed ($(appg) doctor says why), and Docker is not verified back ($(appg) status says what is left)." "Docker not verified"
+  hasnt "$x" "brought back" "not claimed back"
+
   t "claude-hook bash: a drain marker or hold a killed heal left costs no process"
   app_copy; mkdir -p "$FSG_STATE_DIR/drain/leases" "$C/log"
   printf '#!/bin/bash\necho "ps $*" >> "%s/calls"\nexec "%s/ps" "$@"\n' "$C/log" "$STUBS" > "$C/log/ps"
