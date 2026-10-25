@@ -1162,6 +1162,15 @@ if ! skip_case source-gate; then
   HOME=$CH "$C/link/fseventsd-guard" install --yes --prefix "$FSG_PREFIX" --no-agent > "$C/o" 2>&1; eq $? 1 "also through a symlink"
   hasnt "$(cat "$FSG_FAKE/calls.log")" "sudo" "no sudo call"
   hasnt "$(cat "$FSG_FAKE/calls.log")" "swiftc" "nothing built"
+  # status and doctor from the plugin's copy point at a clone, as install refuses there.
+  echo '# stale' >> "$FSG_STATE_DIR/app/config.defaults"
+  out=$(HOME=$CH "$CP/fseventsd-guard" status 2>&1)
+  has "$out" "install: the app copy differs from this plugin copy and the root code is unchanged: run install from a clone (git pull in it first); it needs no sudo" "status from the plugin copy"
+  hasnt "$out" "this checkout" "status does not send you back to the plugin copy"
+  HOME=$CH "$CP/fseventsd-guard" doctor --prefix "$FSG_PREFIX" > "$C/o" 2>&1
+  has "$(cat "$C/o")" "installed app copy differs from this plugin copy ($CP): run install from a clone (git pull in it first) to update the agent" "doctor from the plugin copy"
+  hasnt "$(cat "$C/o")" "this checkout" "doctor does not send you back to the plugin copy"
+  sed '$d' "$FSG_STATE_DIR/app/config.defaults" > "$C/cd" && cat "$C/cd" > "$FSG_STATE_DIR/app/config.defaults"
   CD="$C/cfg/plugins/cache/x/fseventsd-guard"; mkdir -p "$(dirname "$CD")"; cp -R "$GUARD_HOME" "$CD"
   CLAUDE_CONFIG_DIR="$C/cfg" "$CD/fseventsd-guard" install --yes --prefix "$FSG_PREFIX" --no-agent > "$C/o" 2>&1; eq $? 1 "refused under CLAUDE_CONFIG_DIR's plugins"
   has "$(cat "$C/o")" "inside Claude Code's plugin directory" "message"

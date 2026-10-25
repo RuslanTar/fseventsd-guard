@@ -183,11 +183,23 @@ fsg_status_install_text() {
   [ -x "$app/fseventsd-guard" ] || return 0
   a=$(cd -P "$app" 2>/dev/null && pwd -P); h=$(cd -P "$FSG_HOME" 2>/dev/null && pwd -P)
   [ "$a" != "$h" ] || return 0
+  fsg_where
   fsg_root_stale 0 1
   if [ -n "$FSG_ROOT_STALE" ]; then
-    echo "install: root code changed ($(printf '%s\n' "$FSG_ROOT_STALE" | head -n 1)): re-run install from this checkout; it asks for sudo"
+    echo "install: root code changed ($(printf '%s\n' "$FSG_ROOT_STALE" | head -n 1)): $FSG_REDO_HERE; it asks for sudo"
   elif [ "$(fsg_app_sum "$app")" != "$(fsg_app_sum "$FSG_HOME")" ]; then
-    echo "install: the app copy differs from this checkout and the root code is unchanged: re-run install from this checkout; it needs no sudo"
+    echo "install: the app copy differs from $FSG_HERE and the root code is unchanged: $FSG_REDO_HERE; it needs no sudo"
+  fi
+}
+
+# How status and doctor name the copy they run from (FSG_HERE) and the install to
+# re-run (FSG_REDO, FSG_REDO_HERE). install refuses the plugin's copy, so from there
+# it is a clone, brought up to date first.
+fsg_where() {
+  if fsg_in_claude_plugins "$FSG_HOME"; then
+    FSG_HERE="this plugin copy"; FSG_REDO="run install from a clone (git pull in it first)"; FSG_REDO_HERE=$FSG_REDO
+  else
+    FSG_HERE="this checkout"; FSG_REDO="re-run install"; FSG_REDO_HERE="re-run install from this checkout"
   fi
 }
 
@@ -1194,6 +1206,7 @@ fsg_cmd_doctor() {
   local want_uid=0 st uid perm d
   [ -n "$FSG_PREFIX" ] && want_uid=$(id -u)
   echo "fseventsd-guard doctor (version $FSG_VERSION)"
+  fsg_where
   fsg_doc info "macOS ${FSG_OS_VER:-?} (${FSG_OS_BUILD:-?}): affected=$FSG_AFF - $FSG_AFF_WHY"
   if [ "$FSG_AFF" != yes ] && [ -f "$FSG_HELPER_PATH" ]; then
     fsg_doc info "this version is outside the affected range (docs/DESIGN.md §9). Keep the guard if fseventsd still runs away here"
@@ -1248,9 +1261,9 @@ EOF
     if ! err=$( ( fsg_render_helper "$tmp" "$tu" ) 2>&1 ); then
       fsg_doc fail "this config cannot be rendered into a helper, so install refuses it: ${err#fseventsd-guard: }"
     elif cmp -s "$tmp" "$FSG_HELPER_PATH"; then
-      fsg_doc ok "helper matches this checkout's source and config"
+      fsg_doc ok "helper matches $FSG_HERE's source and config"
     else
-      fsg_doc warn "helper differs from this checkout's source or config (floor/interval changed?): review the change, then re-run install; root code changed, so it asks for sudo (it runs only code that matches origin/main)"
+      fsg_doc warn "helper differs from $FSG_HERE's source or config (floor/interval changed?): review the change, then $FSG_REDO; root code changed, so it asks for sudo (it runs only code that matches origin/main)"
     fi
     rm -f "$tmp"
     fsg_helper_limits
@@ -1273,7 +1286,7 @@ EOF
     if [ "${1:-}" = "$want_uid" ] && [ "${3:-}" = 755 ] && [ -z "$(fsg_acl "$FSG_ROOT_STEPS")" ]; then
       fsg_doc ok "root-steps copy $FSG_ROOT_STEPS is owned by uid $want_uid, mode 0755, no ACL"
       fsg_root_text | cmp -s - "$FSG_ROOT_STEPS" ||
-        fsg_doc warn "root-steps copy $FSG_ROOT_STEPS differs from this checkout's lib/root-steps.sh: re-run install; root code changed, so it asks for sudo"
+        fsg_doc warn "root-steps copy $FSG_ROOT_STEPS differs from $FSG_HERE's lib/root-steps.sh: $FSG_REDO; root code changed, so it asks for sudo"
     else
       fsg_doc fail "root-steps copy $FSG_ROOT_STEPS has owner uid ${1:-?}, mode ${3:-?}$( [ -n "$(fsg_acl "$FSG_ROOT_STEPS")" ] && echo ' and an access control list') (want uid $want_uid, 0755, no ACL): re-run install"
     fi
@@ -1334,13 +1347,13 @@ EOF
   fi
   if [ -x "$FSG_STATE_DIR/app/fseventsd-guard" ]; then
     if [ "$(fsg_app_sum "$FSG_STATE_DIR/app")" = "$(fsg_app_sum "$FSG_HOME")" ]; then
-      fsg_doc ok "installed app copy matches this checkout"
+      fsg_doc ok "installed app copy matches $FSG_HERE"
     else
       fsg_root_stale 0
       if [ -n "$FSG_ROOT_STALE" ]; then
-        fsg_doc warn "installed app copy differs from this checkout ($FSG_HOME): re-run install to update the agent; it asks for sudo too, as $(printf '%s\n' "$FSG_ROOT_STALE" | head -n 1)"
+        fsg_doc warn "installed app copy differs from $FSG_HERE ($FSG_HOME): $FSG_REDO to update the agent; it asks for sudo too, as $(printf '%s\n' "$FSG_ROOT_STALE" | head -n 1)"
       else
-        fsg_doc warn "installed app copy differs from this checkout ($FSG_HOME): re-run install to update the agent; the root code is unchanged, so it needs no sudo"
+        fsg_doc warn "installed app copy differs from $FSG_HERE ($FSG_HOME): $FSG_REDO to update the agent; the root code is unchanged, so it needs no sudo"
       fi
     fi
     if [ "${A_INSTALLED:-false}" = true ] && [ "${A_REQUESTS:-false}" != true ] && ! fsg_agent_ready; then
