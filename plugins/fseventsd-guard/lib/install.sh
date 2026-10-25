@@ -1162,11 +1162,11 @@ fsg_helper_dirs() {
 }
 
 # Reports the agent's last exit status from `launchctl print` output. A tick exits
-# with its level (0-3), an emergency heal's code (4-11, docs/DESIGN.md §7) or 130
-# when a signal stopped it; any other code means the job itself failed (126/127:
-# the script could not run).
+# with its level (0-3), an emergency heal's code (4-11, or 14 when it refused to
+# stop Docker; docs/DESIGN.md §7) or 130 when a signal stopped it; any other code
+# means the job itself failed (126/127: the script could not run).
 fsg_doctor_last_exit() { # launchctl-print-output
-  local ec sig n
+  local ec sig n res dir
   ec=$(printf '%s\n' "$1" | sed -n 's/^[[:space:]]*last exit code = //p' | head -n 1)
   sig=$(printf '%s\n' "$1" | sed -n 's/^[[:space:]]*last terminating signal = //p' | head -n 1)
   n=${ec%%[!0-9]*}
@@ -1178,6 +1178,11 @@ fsg_doctor_last_exit() { # launchctl-print-output
     fsg_doc ok "launchctl: the agent's last tick exited $ec (0 ok, 1 warn, 2 runaway, 3 cannot measure)"
   elif [ "$n" -le 11 ]; then
     fsg_doc info "launchctl: the agent's last tick exited $ec, an emergency heal's exit code (docs/DESIGN.md §7)"
+  elif [ "$n" = 14 ]; then
+    # last-heal: epoch result trigger variant wall_s record-dir
+    res=; dir=
+    read -r _ res _ _ _ dir 2>/dev/null < "$FSG_STATE_DIR/last-heal"
+    fsg_doc info "launchctl: the agent's last tick exited 14: its heal refused to stop Docker, for data safety (last heal: ${res:-not recorded}${dir:+, record $dir}); see the README, Notifications and what to do: heal refused"
   elif [ "$n" = 130 ]; then
     fsg_doc info "launchctl: the agent's last tick was stopped by a signal (exit 130) and cleaned up after itself"
   else

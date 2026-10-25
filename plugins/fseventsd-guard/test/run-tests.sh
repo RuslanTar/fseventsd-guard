@@ -4089,6 +4089,11 @@ if ! skip_case heartbeat; then
   printf '\tlast exit code = 8\n' > "$FSG_FAKE/launchctl-print"
   out=$("$G" doctor --prefix "$FSG_PREFIX" 2>&1); rc=$?
   has "$out" "info  launchctl: the agent's last tick exited 8, an emergency heal's exit code" "heal code"; eq $rc 0 "a heal code is not a doctor warning"
+  printf '\tlast exit code = 14\n' > "$FSG_FAKE/launchctl-print"
+  echo "$(date +%s) refused-anonymous-volumes emergency B 3 $C/heal dir" > "$FSG_STATE_DIR/last-heal"
+  out=$("$G" doctor --prefix "$FSG_PREFIX" 2>&1); rc=$?
+  has "$out" "info  launchctl: the agent's last tick exited 14: its heal refused to stop Docker, for data safety (last heal: refused-anonymous-volumes, record $C/heal dir); see the README, Notifications and what to do: heal refused" "a Docker safety refusal"
+  hasnt "$out" "re-run install" "no reinstall advice"; eq $rc 0 "a refusal is not a doctor warning"
   printf '\tlast exit code = 126: Unknown error: 126\n' > "$FSG_FAKE/launchctl-print"
   out=$("$G" doctor --prefix "$FSG_PREFIX" 2>&1); rc=$?
   has "$out" "WARN  launchctl: the agent's last run exited 126: Unknown error: 126" "cannot execute"; eq $rc 1 "doctor warns"
