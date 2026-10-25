@@ -2649,6 +2649,7 @@ if ! skip_case heal-hold; then
   docker_default; install_fake; mem 3G
   touch "$FSG_FAKE/docker/bind-broken"
   heal --docker-variant C > "$C/o" 2>&1; eq $? 8 "restarted, Docker not fully back"
+  has "$(grep 'heal incomplete' "$FSG_FAKE/notifications.log")" "Docker not fully restored (bind mount: the container ran" "the reason has no empty part first"
   grep -qx 'variant=C' "$FSG_STATE_DIR/drain/pending" && ok || bad "the hold names the heal's Docker step"
   FSG_RUN_MAX_WAIT_S=1 "$G" run --label after-broken -- true 2> "$C/err"; eq $? 75 "a new run is held"
   has "$(cat "$C/err")" "holding 'after-broken'" "held message"
@@ -2729,6 +2730,17 @@ if ! skip_case heal-hold; then
   "$G" tick >/dev/null 2>&1
   absent "$FSG_STATE_DIR/docker-intent" "Docker verified at the next tick"
   FSG_RUN_MAX_WAIT_S=1 "$G" run -- true 2>/dev/null; eq $? 75 "the agent does not release it"
+
+  t "the reason joins only the parts it has"
+  out=$( FSG_HOME=$GUARD_HOME; . "$GUARD_HOME/lib/common.sh"; . "$GUARD_HOME/lib/docker.sh"
+    DK_ERR=; DK_FAILED=c1; BM_DETAIL="not checked"; fsg_docker_why
+    DK_ERR="containers not back"; DK_FAILED=c1; BM_DETAIL=; fsg_docker_why
+    DK_ERR=; DK_FAILED=; BM_DETAIL="x"; fsg_docker_why
+    DK_ERR="e"; DK_FAILED=c1; BM_DETAIL="x"; fsg_docker_why nobind )
+  eq "$out" "containers: c1; bind mount: not checked
+containers not back containers: c1
+bind mount: x
+e containers: c1" "joined"
 fi
 
 # ======================================================================== docker-silent

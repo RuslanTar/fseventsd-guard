@@ -424,7 +424,7 @@ fsg_intent_recover() {
     fi
     return 0
   fi
-  what="${DK_ERR:-}${DK_FAILED:+ containers: $DK_FAILED}${BM_DETAIL:+; bind mount: $BM_DETAIL}"
+  what="$(fsg_docker_why)"
   fsg_drain_end
   if [ $ran = 1 ] || [ -n "$held" ] || [ -n "$RC_DROPPED" ]; then
     fsg_log "RECOVER Docker not verified after heal pid $opid: $what"
@@ -479,9 +479,9 @@ fsg_recover_interrupted() {
     [ -n "$DK_NOTE" ] && fsg_notify "fseventsd-guard: Docker restored" "after an interrupted heal" \
       "The agent was stopped while it restored Docker after an earlier heal (tick pid $opid, $HEAL_TRIGGER); it finished the pass and Docker verified. $DK_NOTE."
   else
-    fsg_log "RECOVER interrupted; Docker not verified: ${DK_ERR:-}${DK_FAILED:+ containers: $DK_FAILED}${BM_DETAIL:+; bind mount: $BM_DETAIL}"
+    fsg_log "RECOVER interrupted; Docker not verified: $(fsg_docker_why)"
     fsg_notify "fseventsd-guard: heal interrupted" "Docker not verified" \
-      "The agent was stopped while it restored Docker after an earlier heal (tick pid $opid, $HEAL_TRIGGER), and Docker is not fully back (${DK_ERR:-}${DK_FAILED:+ containers: $DK_FAILED}).${DK_NOTE:+ $DK_NOTE.} $FSG_HOLD_NEXT. Next: docker desktop status; docker ps."
+      "The agent was stopped while it restored Docker after an earlier heal (tick pid $opid, $HEAL_TRIGGER), and Docker is not fully back ($(fsg_docker_why nobind)).${DK_NOTE:+ $DK_NOTE.} $FSG_HOLD_NEXT. Next: docker desktop status; docker ps."
   fi
   return 0
 }
@@ -611,9 +611,9 @@ fsg_heal_cleanup() {
       [ -n "${DK_NOTE:-}" ] && fsg_notify "fseventsd-guard: Docker restored" "after an interrupted heal" \
         "The heal was stopped part way; it restored Docker and Docker verified. $DK_NOTE."
     else
-      fsg_log "HEAL interrupted; Docker not verified: ${DK_ERR:-}${DK_FAILED:+ containers: $DK_FAILED}${BM_DETAIL:+; bind mount: $BM_DETAIL}"
+      fsg_log "HEAL interrupted; Docker not verified: $(fsg_docker_why)"
       fsg_notify "fseventsd-guard: heal interrupted" "Docker not verified" \
-        "The heal was stopped part way and Docker is not fully back (${DK_ERR:-}${DK_FAILED:+ containers: $DK_FAILED}).${DK_NOTE:+ $DK_NOTE.}$( [ "$HEAL_DK_HELD" = 1 ] && echo " $FSG_HOLD_NEXT.") Next: docker desktop status; docker ps."
+        "The heal was stopped part way and Docker is not fully back ($(fsg_docker_why nobind)).${DK_NOTE:+ $DK_NOTE.}$( [ "$HEAL_DK_HELD" = 1 ] && echo " $FSG_HOLD_NEXT.") Next: docker desktop status; docker ps."
     fi
   fi
   fsg_drain_end
@@ -1073,7 +1073,7 @@ fsg_heal_run() { # t0 old_pid cap policy
     HEAL_DK_VERIFIED=1
     rm -f "$FSG_DOCKER_INTENT"
     if [ "$DK_STATE" = notlocal ]; then fsg_drain_end; else fsg_drain_end verified; fi
-  elif fsg_drain_hold "${DK_ERR:-}${DK_FAILED:+ containers: $DK_FAILED}${BM_DETAIL:+; bind mount: $BM_DETAIL}"; then
+  elif fsg_drain_hold "$(fsg_docker_why)"; then
     # The intent stays until the agent sees Docker verified.
     HEAL_DK_HELD=1
     fsg_intent_set hold_epoch "$(fsg_now)"
@@ -1099,7 +1099,7 @@ fsg_heal_run() { # t0 old_pid cap policy
   fi
   local what=""
   [ $healthy = 1 ] || what="fseventsd did not come back healthy within ${FSG_HEALTHY_TIMEOUT_S}s"
-  [ $dk_ok = 1 ] || what="${what:+$what; }Docker not fully restored (${DK_ERR:-}${DK_FAILED:+ containers: $DK_FAILED}${BM_DETAIL:+; bind mount: $BM_DETAIL})"
+  [ $dk_ok = 1 ] || what="${what:+$what; }Docker not fully restored ($(fsg_docker_why))"
   fsg_heal_record restored-partly "$wall"
   fsg_notify "fseventsd restarted, check needed" "heal incomplete" \
     "$what.$nr_note$held Next: fseventsd-guard status; docker desktop status; restart Docker Desktop if containers misbehave. Record: $HEAL_DIR"

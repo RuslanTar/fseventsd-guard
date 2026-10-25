@@ -496,6 +496,15 @@ EOF
   return 1
 }
 
+# Why Docker is not verified: DK_ERR, the containers not back and, unless NOBIND,
+# the bind mount's detail, joined so that none that is empty leaves a separator.
+fsg_docker_why() { # [nobind]
+  local s=${DK_ERR:-}
+  [ -n "${DK_FAILED:-}" ] && s="${s:+$s }containers: $DK_FAILED"
+  [ -z "${1:-}" ] && [ -n "${BM_DETAIL:-}" ] && s="${s:+$s; }bind mount: $BM_DETAIL"
+  printf '%s\n' "$s"
+}
+
 # Docker is back: the engine answers, the recorded containers run (healthy when
 # checked) and a bind mount round trip works. A Docker that was stopped needs
 # nothing, nor does one that is not local (never touched). Returns non-zero
