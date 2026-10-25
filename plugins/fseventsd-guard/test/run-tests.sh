@@ -3074,7 +3074,96 @@ if ! skip_case bind-probe; then
   has "$(cat "$C/doc.out")" "bind-mount probe dir $FSG_STATE_DIR/mountprobe is not in Docker Desktop's File Sharing list" "warned"
   sharing "$C/home"
   "$G" doctor --prefix "$FSG_PREFIX" > "$C/doc.out" 2>/dev/null
-  hasnt "$(cat "$C/doc.out")" "File Sharing list" "no warning once shared"
+  hasnt "$(cat "$C/doc.out")" "is not in Docker Desktop's File Sharing list" "no warning once shared"
+
+  # cache LINES...: the File Sharing list install cached for the agent.
+  cache() { mkdir -p "$FSG_STATE_DIR"; printf '%s\n' "$@" > "$FSG_STATE_DIR/desktop-shared-dirs"; }
+  cached() { cat "$FSG_STATE_DIR/desktop-shared-dirs" 2>/dev/null; }
+  # Docker Desktop's settings as macOS app-data protection shows them to the agent:
+  # the file is there, opening it is refused.
+  unreadable() { chmod 000 "$FSG_DESKTOP_SETTINGS"; }
+  readable() { chmod 644 "$FSG_DESKTOP_SETTINGS"; }
+
+  t "an agent that cannot read Docker Desktop's settings uses the list cached at install"
+  mkdir -p "$C/home/.local/share" "$C/home/Projects"
+  sharing /Volumes/elsewhere "$C/home/.local/share"; unreadable
+  eq "$(probe_dir)" "- $FSG_STATE_DIR/mountprobe" "unreadable, nothing cached: default sharing, the state dir"
+  cache '#list' /Volumes/elsewhere "$C/home/.local/share"
+  eq "$(probe_dir)" "1 $C/home/.local/share/.fseventsd-guard-mountprobe" "unreadable: the first shared folder under home, from the cache"
+  cache '#default'
+  eq "$(probe_dir)" "- $FSG_STATE_DIR/mountprobe" "unreadable, default sharing cached"
+  cache '#list'
+  eq "$(probe_dir)" "0 $FSG_STATE_DIR/mountprobe" "an empty cached list shares nothing"
+  cache "$C/home/.local/share"
+  eq "$(probe_dir)" "- $FSG_STATE_DIR/mountprobe" "a cache without its header counts as none"
+  cache '#list' "$C/home/Projects"
+  eq "$(FSG_PROBE_DIR=$C/home/Projects/p probe_dir)" "1 $C/home/Projects/p" "FSG_PROBE_DIR still wins, checked against the cache"
+  eq "$(FSG_PROBE_DIR=$C/other probe_dir)" "0 $C/other" "FSG_PROBE_DIR is kept when the cache does not share it"
+  readable
+  cache '#list' /Volumes/elsewhere
+  sharing "$C/home"
+  eq "$(probe_dir)" "1 $FSG_STATE_DIR/mountprobe" "a readable list wins over a stale cache"
+  rm -f "$FSG_DESKTOP_SETTINGS"
+  cache '#list' "$C/home/.local/share"
+  eq "$(probe_dir)" "- $FSG_STATE_DIR/mountprobe" "no settings file: default sharing, whatever is cached"
+
+  t "install caches Docker Desktop's File Sharing list for the agent"
+  docker_default; mkdir -p "$C/home/.local/share"
+  sharing /Volumes/elsewhere "$C/home/.local/share"
+  install_fake; eq $? 0 "installed ($(tail -n 1 "$C/install.out"))"
+  eq "$(cached)" "$(printf '#list\n/Volumes/elsewhere\n%s' "$C/home/.local/share")" "the list cached"
+  has "$(cat "$C/install.out")" "Docker Desktop's File Sharing list (2 folders) cached for the agent" "install says so"
+  absent "$FSG_STATE_DIR/desktop-shared-dirs.new" "no temp file left"
+  echo '{"AutoStart":false}' > "$FSG_DESKTOP_SETTINGS"
+  install_fake; eq "$(cached)" "#default" "no FilesharingDirectories: default sharing cached"
+  rm -f "$FSG_DESKTOP_SETTINGS"
+  install_fake; eq "$(cached)" "#default" "no settings file: default sharing cached"
+  sharing "$C/home"; unreadable
+  install_fake; eq $? 0 "installs anyway"
+  eq "$(cached)" "#default" "an unreadable list leaves the cache as it was"
+  has "$(cat "$C/install.out")" "cannot read Docker Desktop's File Sharing list" "install warns"
+  readable
+
+  t "doctor warns when the agent's cached File Sharing list is missing or stale"
+  docker_default; sharing "$C/home"; install_fake
+  "$G" doctor --prefix "$FSG_PREFIX" > "$C/doc.out" 2>/dev/null
+  hasnt "$(cat "$C/doc.out")" "File Sharing list" "silent while the cache matches"
+  sharing "$C/home" /Volumes/elsewhere
+  "$G" doctor --prefix "$FSG_PREFIX" > "$C/doc.out" 2>/dev/null
+  has "$(cat "$C/doc.out")" "the File Sharing list cached at install differs from Docker Desktop's current list" "warned: stale"
+  FSG_PROBE_DIR=$C/home/p "$G" doctor --prefix "$FSG_PREFIX" > "$C/doc.out" 2>/dev/null
+  hasnt "$(cat "$C/doc.out")" "cached at install" "not with FSG_PROBE_DIR set"
+  rm -f "$FSG_STATE_DIR/desktop-shared-dirs"
+  "$G" doctor --prefix "$FSG_PREFIX" > "$C/doc.out" 2>/dev/null
+  has "$(cat "$C/doc.out")" "no copy of Docker Desktop's File Sharing list is cached for the agent" "warned: missing"
+  unreadable
+  "$G" doctor --prefix "$FSG_PREFIX" > "$C/doc.out" 2>/dev/null
+  has "$(cat "$C/doc.out")" "Docker Desktop's File Sharing list cannot be read and no copy was cached at install" "warned: unreadable, nothing cached"
+  cache '#list' "$C/home"
+  "$G" doctor --prefix "$FSG_PREFIX" > "$C/doc.out" 2>/dev/null
+  hasnt "$(cat "$C/doc.out")" "File Sharing list" "unreadable with a cache: silent"
+  readable
+  rm -f "$FSG_DESKTOP_SETTINGS" "$FSG_STATE_DIR/desktop-shared-dirs"
+  "$G" doctor --prefix "$FSG_PREFIX" > "$C/doc.out" 2>/dev/null
+  hasnt "$(cat "$C/doc.out")" "File Sharing list" "no Docker Desktop settings and no cache: silent"
+
+  t "a heal whose agent cannot read the File Sharing list probes in the cached folder"
+  docker_default; mkdir -p "$C/home/.local/share"
+  sharing /Volumes/elsewhere "$C/home/.local/share"
+  HOME=$C/home install_fake; mem 3G
+  unreadable
+  # Docker Desktop shares only that folder.
+  echo "$C/home/.local/share" > "$FSG_FAKE/docker/mounts-denied"
+  HOME=$C/home heal --docker-variant B > "$C/o" 2>&1; eq $? 0 "healed ($(tail -n 1 "$C/o"))"
+  grep -q '^bind_mount=ok' "$(cat "$FSG_STATE_DIR/last-heal-dir")/result.txt" && ok || bad "bind mount verified in the cached folder"
+  has "$(cat "$FSG_LOG")" "DOCKER File Sharing list unreadable by the agent (macOS app-data protection); using the list cached at install" "logged"
+  rm -f "$FSG_STATE_DIR/desktop-shared-dirs"
+  echo 4242 > "$FSG_FAKE/fsev/pids"; mem 3G; rm -f "$FSG_PREFIX/Library/Logs/fseventsd-guard/last-restart"
+  HOME=$C/home heal --docker-variant B > "$C/o" 2>&1; eq $? 0 "healed, the check skipped ($(tail -n 1 "$C/o"))"
+  has "$(grep '^bind_mount=' "$(cat "$FSG_STATE_DIR/last-heal-dir")/result.txt")" "bind_mount=skipped the probe dir $FSG_STATE_DIR/mountprobe is not shared with Docker Desktop (mounts denied)" "recorded as skipped"
+  has "$(grep '^bind_mount=' "$(cat "$FSG_STATE_DIR/last-heal-dir")/result.txt")" "the agent could not read Docker Desktop's settings and no cached list exists: run install from a terminal, or set FSG_PROBE_DIR" "the record says why"
+  has "$(cat "$FSG_LOG")" "DOCKER File Sharing list unreadable by the agent (macOS app-data protection) and none cached at install" "logged"
+  readable
 fi
 
 # ======================================================================== heal-signal

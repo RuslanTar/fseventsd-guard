@@ -580,17 +580,42 @@ fsg_probe_images() {
 }
 
 # Docker Desktop's File Sharing list (FilesharingDirectories in its
-# settings-store.json, read only), one path per line. 1 when the file or the key is
-# missing or unreadable: Desktop's default sharing (/Users, /Volumes, /private, /tmp,
-# /var/folders) applies.
+# settings-store.json, read only), one path per line. 1 when the file is missing or
+# has no such key: Desktop's default sharing (/Users, /Volumes, /private, /tmp,
+# /var/folders) applies. 2 when the file is there but cannot be opened: macOS
+# app-data protection refuses the launchd agent (a background session, so it never
+# prompts) what it lets a terminal read. Only the shell opens the file and plutil
+# reads its stdin, so the open checked is the open used. Missing is told from
+# refused by the open's error, not by test -e: whether the protection refuses the
+# agent a stat too is not known.
 fsg_desktop_shared_dirs() {
-  local f=${FSG_DESKTOP_SETTINGS:-"$HOME/Library/Group Containers/group.com.docker/settings-store.json"} n i=0
-  [ -r "$f" ] || return 1
-  n=$(plutil -extract FilesharingDirectories raw -o - "$f" 2>/dev/null) && fsg_is_uint "$n" || return 1
+  local f=${FSG_DESKTOP_SETTINGS:-"$HOME/Library/Group Containers/group.com.docker/settings-store.json"} n i=0 err
+  if ! err=$( { : < "$f"; } 2>&1 ); then
+    case $err in *"No such file or directory"*) return 1 ;; esac
+    return 2
+  fi
+  n=$(plutil -extract FilesharingDirectories raw -o - - < "$f" 2>/dev/null) && fsg_is_uint "$n" || return 1
   while [ $i -lt "$n" ]; do
-    plutil -extract "FilesharingDirectories.$i" raw -o - "$f" 2>/dev/null | sed '/^$/d'
+    plutil -extract "FilesharingDirectories.$i" raw -o - - < "$f" 2>/dev/null | sed '/^$/d'
     i=$((i + 1))
   done
+}
+
+# The File Sharing list in BM_LIST, with fsg_desktop_shared_dirs's return codes:
+# Docker Desktop's own file (BM_LIST_SRC=live), else, when it cannot be opened, the
+# copy install cached from a terminal (cache; its first line is #list, the list
+# follows, or #default), else none (2).
+fsg_shared_dirs_known() {
+  local rc
+  BM_LIST_SRC=live
+  BM_LIST=$(fsg_desktop_shared_dirs); rc=$?
+  [ $rc = 2 ] || return $rc
+  BM_LIST=; BM_LIST_SRC=none
+  case $(head -n 1 "$FSG_SHARED_CACHE" 2>/dev/null) in
+    '#list') BM_LIST_SRC=cache; BM_LIST=$(sed 1d "$FSG_SHARED_CACHE"); return 0 ;;
+    '#default') BM_LIST_SRC=cache; return 1 ;;
+  esac
+  return 2
 }
 
 # 0 when PATH is one of the dirs in LIST (lines) or under one, by whole components.
@@ -609,12 +634,13 @@ EOF
 # The bind-mount probe's host dir in BM_DIR: FSG_PROBE_DIR, else the state dir's
 # mountprobe when Docker Desktop shares it (default sharing does), else a dir in the
 # first shared folder under your home. BM_SHARED: 1 in the File Sharing list, 0 not,
-# empty when Desktop uses its default sharing.
+# empty when Desktop uses its default sharing or its list is not known (as
+# fsg_shared_dirs_known reads it; BM_LIST_SRC says from where).
 fsg_probe_dir() {
-  local list e
+  local e
   BM_SHARED=; BM_DIR=${FSG_PROBE_DIR:-"$FSG_STATE_DIR/mountprobe"}
-  list=$(fsg_desktop_shared_dirs) || return 0
-  if fsg__under_any "$BM_DIR" "$list"; then BM_SHARED=1; return 0; fi
+  fsg_shared_dirs_known || return 0
+  if fsg__under_any "$BM_DIR" "$BM_LIST"; then BM_SHARED=1; return 0; fi
   BM_SHARED=0
   [ -z "${FSG_PROBE_DIR:-}" ] || return 0
   while IFS= read -r e; do
@@ -622,7 +648,7 @@ fsg_probe_dir() {
       "$HOME"/*) if [ -d "$e" ] && [ -w "$e" ]; then BM_DIR="${e%/}/.fseventsd-guard-mountprobe"; BM_SHARED=1; return 0; fi ;;
     esac
   done <<EOF
-$list
+$BM_LIST
 EOF
 }
 
@@ -640,6 +666,10 @@ fsg_docker_verify_bind_mount() {
   if [ "$DK_STATE" = notlocal ]; then BM_DETAIL="not a local Docker engine"; return 0; fi
   local dir f out nonce img got rc made=0 tried=""
   fsg_probe_dir
+  case $BM_LIST_SRC in
+    cache) fsg_log "DOCKER File Sharing list unreadable by the agent (macOS app-data protection); using the list cached at install" ;;
+    none) fsg_log "DOCKER File Sharing list unreadable by the agent (macOS app-data protection) and none cached at install" ;;
+  esac
   dir=$BM_DIR; f="$BM_DIR/$FSG__PROBE_FILE"; out="$FSG_STATE_DIR/mountprobe.out"
   [ -d "$dir" ] || made=1
   mkdir -p "$dir" || { BM_RESULT=failed; BM_DETAIL="cannot create $dir"; return 1; }
@@ -656,7 +686,11 @@ fsg_docker_verify_bind_mount() {
       case $(tr 'A-Z' 'a-z' < "$out" 2>/dev/null) in
         *"mounts denied"*|*"is not shared"*)
           BM_RESULT=skipped
-          BM_DETAIL="the probe dir $dir is not shared with Docker Desktop (mounts denied); set FSG_PROBE_DIR to a dir in a folder of its File Sharing list"
+          if [ "$BM_LIST_SRC" = none ] && [ -z "${FSG_PROBE_DIR:-}" ]; then
+            BM_DETAIL="the probe dir $dir is not shared with Docker Desktop (mounts denied); the agent could not read Docker Desktop's settings and no cached list exists: run install from a terminal, or set FSG_PROBE_DIR to a dir in a folder of its File Sharing list"
+          else
+            BM_DETAIL="the probe dir $dir is not shared with Docker Desktop (mounts denied); set FSG_PROBE_DIR to a dir in a folder of its File Sharing list"
+          fi
           BM_NOTE="Bind mount check skipped: $BM_DETAIL."
           break ;;
       esac

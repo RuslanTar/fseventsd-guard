@@ -112,7 +112,10 @@ something else starts Docker Desktop during the heal (another session's
 running and restores as usual. The bind-mount check needs its probe dir in Docker
 Desktop's File Sharing list: the guard picks one there (or set `FSG_PROBE_DIR`),
 and a probe Docker refuses ("Mounts denied") is reported as skipped, not as a
-broken Docker. `doctor` warns when the probe dir is not shared.
+broken Docker. `doctor` warns when the probe dir is not shared. macOS can keep the
+launchd agent from reading Docker Desktop's settings while a terminal reads them
+(app-data protection), so `install` caches the list for the agent: re-run
+`install` after you change File Sharing (`doctor` warns when the copy is stale).
 
 The `healing` notification and `status` name what the drain waits for (command,
 pid, age). At a cap a manual or pre-run (`--trigger wave`) heal gives up and tells you what was
@@ -494,6 +497,12 @@ None of them lets a non-root user gain root.
 - **Stale Docker Desktop sockets.** A Docker Desktop that crashed and left its
   socket files behind is seen as stopped only through its status; otherwise B's
   stop wait runs out (logged; the heal goes on). Accepted.
+- **The agent's File Sharing list is install's copy.** Where macOS app-data
+  protection refuses the agent Docker Desktop's settings (seen on 2026-10-25), the
+  bind-mount probe picks its dir from the list `install` cached. Change File Sharing
+  later and the agent works from the old list until `install` runs again; `doctor`
+  reports the difference. A wrong pick only makes the check skip, never fail. With
+  no copy (install could not read the list either), set `FSG_PROBE_DIR`.
 - **PID reuse between the re-check and the kill.** Tens of milliseconds; macOS
   hands out pids in sequence, so reuse there is not practical, and a respawn in
   that window makes `kill` fail with ESRCH (exit 71). Accepted.

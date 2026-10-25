@@ -497,6 +497,37 @@ fsg_print_root_code() {
   echo "  root-steps text sha256: $(printf '%s\n' "$FSG_ROOT_TEXT" | fsg_sha)"
 }
 
+# What the agent's copy of Docker Desktop's File Sharing list holds when read here
+# (fsg_shared_dirs_known reads it back): #list and the list, or #default when
+# Desktop's default sharing applies. 2 when it cannot be read here either.
+fsg_shared_dirs_cache_text() {
+  local list rc
+  list=$(fsg_desktop_shared_dirs); rc=$?
+  case $rc in
+    0) echo '#list'; [ -z "$list" ] || printf '%s\n' "$list" ;;
+    1) echo '#default' ;;
+    *) return 2 ;;
+  esac
+}
+
+# Install runs in a terminal, which macOS lets read Docker Desktop's settings; the
+# agent may not, so it gets a copy. One that cannot be read here keeps the old copy.
+fsg_shared_dirs_cache_write() {
+  local text n
+  if ! text=$(fsg_shared_dirs_cache_text); then
+    echo "  WARNING: cannot read Docker Desktop's File Sharing list from here, so nothing new is cached for the agent; heals may skip the bind-mount check: run install from a terminal, or set FSG_PROBE_DIR"
+    return 0
+  fi
+  if ! { printf '%s\n' "$text" > "$FSG_SHARED_CACHE.new" && mv -f "$FSG_SHARED_CACHE.new" "$FSG_SHARED_CACHE"; }; then
+    rm -f "$FSG_SHARED_CACHE.new"
+    echo "  WARNING: cannot write $FSG_SHARED_CACHE; heals may skip the bind-mount check"
+    return 0
+  fi
+  [ "$text" = '#default' ] && return 0
+  n=$(printf '%s\n' "$text" | sed 1d | grep -c .)
+  echo "  Docker Desktop's File Sharing list ($n folder$( [ "$n" = 1 ] || echo s)) cached for the agent, which macOS may keep from reading it"
+}
+
 fsg_usage_install() {
   cat <<'EOF'
 usage: fseventsd-guard install [--trial-hours N] [--force] [--no-agent] [--no-probe]
@@ -648,6 +679,7 @@ EOF
       sed -n 's/^\(FSG_[A-Z0-9_]*=.*\)/# \1/p' "$FSG_STATE_DIR/app/config.defaults"
     } > "$FSG_STATE_DIR/config"
   fi
+  fsg_shared_dirs_cache_write
 
   echo "[2/5] delivery probe"
   if [ $no_probe = 1 ]; then
@@ -1410,6 +1442,20 @@ EOF
     fsg_probe_dir
     [ "$BM_SHARED" = 0 ] &&
       fsg_doc warn "bind-mount probe dir $BM_DIR is not in Docker Desktop's File Sharing list, so heals skip the bind-mount check: set FSG_PROBE_DIR to a dir in a shared folder, or share one in Docker Desktop (Settings > Resources > File sharing)"
+    # The agent works from install's copy when macOS keeps it from Desktop's file, and
+    # this runs where the live one may be readable, so the two are compared.
+    if [ -z "${FSG_PROBE_DIR:-}" ]; then
+      local want
+      if ! want=$(fsg_shared_dirs_cache_text); then
+        [ "$BM_LIST_SRC" = none ] &&
+          fsg_doc warn "Docker Desktop's File Sharing list cannot be read and no copy was cached at install, so heals probe $BM_DIR and skip the bind-mount check if Docker Desktop does not share it: run install from a terminal, or set FSG_PROBE_DIR"
+      elif [ -f "$FSG_SHARED_CACHE" ]; then
+        [ "$(cat "$FSG_SHARED_CACHE" 2>/dev/null)" = "$want" ] ||
+          fsg_doc warn "the File Sharing list cached at install differs from Docker Desktop's current list, and the agent may only see the cached one (macOS app-data protection): re-run install, or set FSG_PROBE_DIR"
+      elif [ "$want" != '#default' ]; then
+        fsg_doc warn "no copy of Docker Desktop's File Sharing list is cached for the agent, which macOS may keep from reading it, so heals may probe an unshared dir and skip the bind-mount check: re-run install"
+      fi
+    fi
   fi
   if fsg_drain_hold_active; then
     fsg_doc warn "test runs are held: $(fsg__kv "$FSG_PENDING" reason). Recover Docker, then: fseventsd-guard release"

@@ -34,6 +34,9 @@ fsg_init_paths() {
   FSG_LEASE_DIR="$FSG_DRAIN_DIR/leases"
   FSG_DOCKER_INTENT="$FSG_STATE_DIR/docker-intent"
   FSG_REQ_DIR="$FSG_STATE_DIR/requests"
+  # Docker Desktop's File Sharing list as install read it, for an agent that macOS
+  # keeps from reading it (lib/docker.sh fsg_shared_dirs_known).
+  FSG_SHARED_CACHE="$FSG_STATE_DIR/desktop-shared-dirs"
   # The Claude Code install hint's stamps (lib/hint.sh): outside the state dir, as
   # they exist while the guard is not installed.
   FSG_HINT_DIR=${FSG_HINT_DIR:-"$HOME/Library/Caches/fseventsd-guard-hint"}

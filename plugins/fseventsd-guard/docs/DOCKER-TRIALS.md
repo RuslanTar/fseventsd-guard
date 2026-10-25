@@ -85,7 +85,9 @@ usual way. Then record:
    - **The VM / engine**: `docker info` errors in `after.txt`.
    - **File sharing / bind mounts**: `bind_mount=failed` in `result.txt`
      (`bind_mount=skipped ... not shared` means the probe dir is not in Docker
-     Desktop's File Sharing list: set `FSG_PROBE_DIR`, see `doctor`). Or check by
+     Desktop's File Sharing list: set `FSG_PROBE_DIR`, see `doctor`; with "no
+     cached list" the agent could not read that list, so re-run `install` from a
+     terminal first). Or check by
      hand: `docker run --rm -v "$PWD:/w" alpine:3 ls /w` (use any local image that
      has `/bin/sh`).
    - **Containers**: `containers_failed=` in `result.txt`, `docker ps -a`.
