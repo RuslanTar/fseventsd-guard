@@ -86,7 +86,9 @@ Your machine is never idle, so a heal cannot wait for a free moment. Instead:
    waited for; they lose their connection. A TTY exec of anything else, such as
    `docker compose exec api bundle exec rspec`, is work.
 3. Then it stops Docker as the chosen variant requires, restarts fseventsd, restores
-   Docker and the containers that were running, verifies, and releases the drain.
+   Docker and the containers that were running, verifies (each container runs, and is
+   healthy again if it was healthy before; one already unhealthy only needs to run),
+   and releases the drain.
    While Docker answers, it stops no container and no Docker Desktop unless it
    listed every running container and none is a `--rm` container with an anonymous
    volume (Docker would delete the volume with the container). So when the drain

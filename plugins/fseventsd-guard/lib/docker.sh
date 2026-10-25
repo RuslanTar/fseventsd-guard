@@ -135,6 +135,8 @@ fsg_docker_answers() { fsg_timeout "$FSG_DOCKER_QUERY_TIMEOUT_S" docker info >/d
 #   DK_STOP_IDS   every running container (variant A stops them all)
 #   DK_IDS        the restore set: running containers that can be started again
 #   DK_NAMES      their names
+#   DK_HEALTH     their health status then, in the same order: healthy, unhealthy,
+#                 starting, none (no health check), or - when it was not read
 #   DK_EPHEMERAL  names of running --rm containers (HostConfig.AutoRemove): Docker
 #                 deletes them when they stop, so they cannot be restored
 #   DK_ONEOFF     names of running one-off containers (`docker compose run`, label
@@ -149,7 +151,7 @@ fsg_docker_answers() { fsg_timeout "$FSG_DOCKER_QUERY_TIMEOUT_S" docker info >/d
 #                 failed for a container that still runs, or a line of it that is
 #                 not a whole record), so --rm volumes were not checked
 fsg_docker_record() {
-  DK_KIND=none; DK_STATE=stopped; DK_RUNNING=0; DK_IDS=; DK_NAMES=; DK_PS_OK=0; DK_STOP_IDS=; DK_EPHEMERAL=""; DK_ONEOFF=""
+  DK_KIND=none; DK_STATE=stopped; DK_RUNNING=0; DK_IDS=; DK_NAMES=; DK_HEALTH=; DK_PS_OK=0; DK_STOP_IDS=; DK_EPHEMERAL=""; DK_ONEOFF=""
   DK_AT_RISK=""; DK_RM_PLAIN=""; DK_LISTED=1
   DK_ENDPOINT=; DK_EP_WHY=; DK_ENGINE=
   command -v docker >/dev/null 2>&1 || return 0
@@ -193,13 +195,13 @@ fsg_docker_record() {
 }
 
 # rec() in awk -F'\t' -v ids=IDS: 1 when the line is a whole container record
-# (fsg__docker_containers) of one of IDS: its five fields, then three per mount, each
+# (fsg__docker_containers) of one of IDS: its six fields, then three per mount, each
 # holding what its part of the template prints (a JSON value for free text).
 # shellcheck disable=SC2016
 FSG__AWK_RECORD='
   function jv(s) { return s == "null" || s ~ /^"([^"\\]|\\.)*"$/ }
   function rec(   i) {
-    if (NF < 5 || (NF - 5) % 3 || !($1 in want) || $2 !~ /^\/[a-zA-Z0-9][a-zA-Z0-9_.-]*$/ ||
+    if (NF < 6 || (NF - 6) % 3 || !($1 in want) || $2 !~ /^\/[a-zA-Z0-9][a-zA-Z0-9_.-]*$/ ||
       ($3 != "true" && $3 != "false") || !jv($4) || $5 !~ /^(null|\[.*\])(null|\[.*\])$/) return 0
     for (i = 6; i <= NF; i++) if (!jv($i)) return 0
     return 1
@@ -207,8 +209,8 @@ FSG__AWK_RECORD='
   BEGIN { nw = split(ids, w, " "); for (iw = 1; iw <= nw; iw++) want[w[iw]] = 1 }'
 
 # The running containers of the pinned engine: sets DK_PS_OK, DK_STOP_IDS, DK_IDS,
-# DK_NAMES, DK_EPHEMERAL, DK_ONEOFF, DK_AT_RISK, DK_RM_PLAIN and DK_LISTED (as in
-# fsg_docker_record).
+# DK_NAMES, DK_HEALTH, DK_EPHEMERAL, DK_ONEOFF, DK_AT_RISK, DK_RM_PLAIN and
+# DK_LISTED (as in fsg_docker_record).
 #
 # A volume mount is anonymous when the container's own spec names no volume for it
 # (an image VOLUME, `-v /path`, `--mount type=volume` without a source): Docker's
@@ -217,7 +219,7 @@ FSG__AWK_RECORD='
 # so such a container is protected even if its volume would survive.
 fsg__docker_containers() {
   local ps out ar="" arc skip_ids t unread now bad
-  DK_PS_OK=0; DK_STOP_IDS=; DK_IDS=; DK_NAMES=; DK_EPHEMERAL=""; DK_ONEOFF=""; DK_AT_RISK=""; DK_RM_PLAIN=""; DK_LISTED=0
+  DK_PS_OK=0; DK_STOP_IDS=; DK_IDS=; DK_NAMES=; DK_HEALTH=; DK_EPHEMERAL=""; DK_ONEOFF=""; DK_AT_RISK=""; DK_RM_PLAIN=""; DK_LISTED=0
   ps=$(fsg_timeout 30 docker ps --no-trunc --format '{{.ID}} {{.Names}}' 2>/dev/null) || return 0
   DK_PS_OK=1; DK_LISTED=1
   DK_STOP_IDS=$(printf '%s\n' "$ps" | awk 'NF { print $1 }' | tr '\n' ' ' | sed 's/ $//')
@@ -226,13 +228,13 @@ fsg__docker_containers() {
     # docker inspect tries a template on its typed struct first and, when that fails
     # (here at once: the struct has ID, the JSON Id), on the raw JSON with
     # missingkey=error. Every key that JSON may lack (a mount's Name, absent for a
-    # bind mount, and Type; HostConfig.Mounts, absent without --mount) is read with
-    # index: a missing one prints null through json. Free text (the label, a mount's
-    # name and destination) goes through json too, so a tab or newline in it cannot
-    # shift the fields or split the record. A real engine's records:
+    # bind mount, and Type; HostConfig.Mounts, absent without --mount; State.Health,
+    # absent without a health check) is read with index: a missing one prints null.
+    # Free text (the label, a mount's name and destination) goes through json too, so
+    # a tab or newline in it cannot shift the fields or split the record. A real engine's records:
     # test/fixtures/docker-cli-29.9.2/.
     # shellcheck disable=SC2086
-    ar=$(fsg_timeout 20 docker inspect --format "{{.Id}}$t{{.Name}}$t{{.HostConfig.AutoRemove}}$t{{json (index .Config.Labels \"com.docker.compose.oneoff\")}}$t{{json (index .HostConfig \"Binds\")}}{{json (index .HostConfig \"Mounts\")}}{{range .Mounts}}$t{{json (index . \"Type\")}}$t{{json (index . \"Name\")}}$t{{json (index . \"Destination\")}}{{end}}" $DK_STOP_IDS 2>/dev/null); arc=$?
+    ar=$(fsg_timeout 20 docker inspect --format "{{.Id}}$t{{.Name}}$t{{.HostConfig.AutoRemove}}$t{{json (index .Config.Labels \"com.docker.compose.oneoff\")}}$t{{json (index .HostConfig \"Binds\")}}{{json (index .HostConfig \"Mounts\")}}$t{{with index .State \"Health\"}}{{json (index . \"Status\")}}{{else}}null{{end}}{{range .Mounts}}$t{{json (index . \"Type\")}}$t{{json (index . \"Name\")}}$t{{json (index . \"Destination\")}}{{end}}" $DK_STOP_IDS 2>/dev/null); arc=$?
     # A container that exited since docker ps fails inspect for itself only. One that
     # still runs but failed it (a per-container template error), or whose line is not
     # a whole record, was not checked.
@@ -262,11 +264,12 @@ fsg__docker_containers() {
   # One line per --rm container: "V name (mount points)" with an anonymous volume,
   # else "R name". Field 4 is the one-off label (null when not set: not a one-off),
   # field 5 the spec (HostConfig.Binds, then HostConfig.Mounts; null for each that is
-  # absent), and each mount three more: type, name (null for a bind mount) and
-  # destination. Names are compared, and mount points printed, as JSON escapes them.
+  # absent), field 6 the health status (null without a health check), and each mount
+  # three more: type, name (null for a bind mount) and destination. Names are
+  # compared, and mount points printed, as JSON escapes them.
   out=$(printf '%s\n' "$ar" | awk -F'\t' '$3 == "true" {
     name = $2; sub(/^\//, "", name); d = ""
-    for (i = 6; i + 2 <= NF; i += 3) {
+    for (i = 7; i + 2 <= NF; i += 3) {
       if ($i != "\"volume\"") continue
       vn = $(i + 1); dest = $(i + 2)
       if (dest != "null") dest = substr(dest, 2, length(dest) - 2)
@@ -285,13 +288,17 @@ fsg__docker_containers() {
     NF && !($1 in skip)')
   DK_IDS=$(printf '%s\n' "$out" | awk 'NF { print $1 }' | tr '\n' ' ' | sed 's/ $//')
   DK_NAMES=$(printf '%s\n' "$out" | awk 'NF { print $2 }' | tr '\n' ' ' | sed 's/ $//')
+  DK_HEALTH=$(printf '%s\n' "$ar" | awk -F'\t' -v ids="$DK_IDS" 'NF >= 6 {
+      h = $6; if (h == "null") h = "none"; else if (h ~ /^"[a-z]+"$/) h = substr(h, 2, length(h) - 2); else h = "-"
+      got[$1] = h }
+    END { n = split(ids, a, " "); for (i = 1; i <= n; i++) printf "%s%s", (i > 1 ? " " : ""), (a[i] in got ? got[a[i]] : "-") }')
 }
 
 # The running --rm containers with an anonymous volume now, from a fresh listing, in
 # AT_RISK_NOW (the record's restore set stays as it is). 1 when they could not be
 # listed.
 fsg_docker_at_risk_now() {
-  local DK_PS_OK DK_STOP_IDS DK_IDS DK_NAMES DK_EPHEMERAL DK_ONEOFF DK_AT_RISK DK_RM_PLAIN DK_LISTED
+  local DK_PS_OK DK_STOP_IDS DK_IDS DK_NAMES DK_HEALTH DK_EPHEMERAL DK_ONEOFF DK_AT_RISK DK_RM_PLAIN DK_LISTED
   AT_RISK_NOW=
   fsg__docker_containers
   [ "$DK_LISTED" = 1 ] || return 1
@@ -318,6 +325,7 @@ fsg_docker_record_text() {
   echo "endpoint=$DK_ENDPOINT${DK_EP_WHY:+ (not used: $DK_EP_WHY)}"
   echo "ids=$DK_IDS"
   echo "names=$DK_NAMES"
+  echo "health=$DK_HEALTH"
   echo "not_restorable=$DK_EPHEMERAL"
   echo "not_restored_oneoff=$DK_ONEOFF"
   echo "rm_anonymous_volumes=$DK_AT_RISK"
@@ -525,23 +533,31 @@ fsg_docker_after() { # variant
   return 0
 }
 
-# Waits until every recorded container is running and, when it has a health check,
-# healthy. Sets DK_FAILED to the ids that never got there.
+# Waits until every recorded container is running and, when it was healthy at the
+# record (DK_HEALTH, by position), healthy. One that was unhealthy, starting or had
+# no health check then only needs to run; one whose health was not recorded (an
+# older record) needs to be healthy when it has a check. Sets DK_FAILED to the ids
+# that never got there.
 fsg_docker_wait_containers() {
   DK_FAILED=
   [ -n "$DK_IDS" ] || return 0
-  local t0 id line bad
+  local t0 id line bad i
+  local -a H
+  # shellcheck disable=SC2206
+  H=(${DK_HEALTH:-})
   t0=$(fsg_now)
   while :; do
-    bad=
+    bad=; i=0
     for id in $DK_IDS; do
       # Typed fields only, so the CLI never falls back to the raw JSON, where the
       # absent Health key of a container without a health check would fail it.
       line=$(fsg_timeout 20 docker inspect --format '{{.State.Status}} {{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$id" 2>/dev/null)
       case $line in
         "running healthy"|"running none") ;;
+        "running "*) case ${H[$i]:-} in unhealthy|starting|none) ;; *) bad="$bad $id" ;; esac ;;
         *) bad="$bad $id" ;;
       esac
+      i=$((i + 1))
     done
     if [ -z "$bad" ]; then return 0; fi
     if [ $(( $(fsg_now) - t0 )) -ge "$FSG_CONTAINER_TIMEOUT_S" ]; then
@@ -671,7 +687,7 @@ fsg_docker_why() { # [nobind]
 }
 
 # Docker is back: the engine answers, the recorded containers run (healthy when
-# checked) and a bind mount round trip works. A Docker that was stopped needs
+# they were) and a bind mount round trip works. A Docker that was stopped needs
 # nothing, nor does one that is not local (never touched). Returns non-zero
 # otherwise (DK_ERR, DK_FAILED, BM_* say why).
 fsg_docker_verified() {

@@ -567,6 +567,7 @@ fsg_drain_hold() { # what failed
     echo "phase=held-docker-not-restored"
     echo "variant=${HEAL_VARIANT:-}"
     echo "restore_names=${DK_NAMES:-}"
+    echo "restore_health=${DK_HEALTH:-}"
     echo "endpoint=${DK_ENDPOINT:-}"
   } > "$tmp" 2>/dev/null && mv -f "$tmp" "$FSG_PENDING"; then
     DRAIN_HELD=0

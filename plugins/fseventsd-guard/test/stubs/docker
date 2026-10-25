@@ -3,12 +3,15 @@
 #   desktop      running|stopped; absent = not Docker Desktop (see engine-ok)
 #   engine-ok    present = a non-Desktop engine answers `docker info`
 #   containers   one per line: ID NAME STATUS HEALTH IMAGE RESTART MANUAL [AUTOREMOVE
-#                [ONEOFF [STARTED [VOLS]]]] (HEALTH is healthy|none; MANUAL=1 after a
-#                `docker stop`; AUTOREMOVE=1 is a --rm container: stopping it removes
-#                it; ONEOFF=1 a `docker compose run` container, label
-#                com.docker.compose.oneoff=True; STARTED its start epoch, - or absent
-#                for an hour ago; VOLS its volume mounts as NAME:DEST,... where NAME
-#                anon is an anonymous volume and any other a named one)
+#                [ONEOFF [STARTED [VOLS]]]] (HEALTH is healthy, unhealthy, starting or
+#                none: no health check; MANUAL=1 after a `docker stop`; AUTOREMOVE=1
+#                is a --rm container: stopping it removes it; ONEOFF=1 a `docker
+#                compose run` container, label com.docker.compose.oneoff=True; STARTED
+#                its start epoch, - or absent for an hour ago; VOLS its volume mounts
+#                as NAME:DEST,... where NAME anon is an anonymous volume and any other
+#                a named one)
+#   health-after-start  ID HEALTH lines: container ID's HEALTH once it starts again
+#                (docker start, or Docker Desktop's start under its restart policy)
 #   images       one image per line
 #   execs        NAME COUNT [tty|-] [CMD...] lines: COUNT exec sessions in container
 #                NAME, with a TTY and open stdin when tty is given, running CMD (the
@@ -93,14 +96,18 @@ engine_up() {
   if [ "$ENG" = other ]; then [ -f "$D/other/engine-ok" ]
   elif [ -f "$D/desktop" ]; then [ "$(cat "$D/desktop")" = running ]; else [ -f "$D/engine-ok" ]; fi
 }
+# health-after-start as "ID HEALTH ..." on one line.
+after_start() { tr '\n' ' ' < "$D/health-after-start" 2>/dev/null; }
 set_status() { # id-or-name status manual
-  awk -v id="$1" -v st="$2" -v m="$3" '$1 == id || $2 == id { $3 = st; if (m != "") $7 = m } { print }' "$CF" > "$D/c.tmp" && mv "$D/c.tmp" "$CF"
+  awk -v id="$1" -v st="$2" -v m="$3" -v hs="$(after_start)" 'BEGIN { n = split(hs, a, " "); for (i = 1; i < n; i += 2) h[a[i]] = a[i + 1] }
+    $1 == id || $2 == id { $3 = st; if (m != "") $7 = m; if (st == "running" && ($1 in h)) $4 = h[$1] } { print }' "$CF" > "$D/c.tmp" && mv "$D/c.tmp" "$CF"
 }
 engine_stop() { awk '$3 == "running" && $8 == 1 { next } $3 == "running" { $3 = "exited" } { print }' "$CF" > "$D/c.tmp" && mv "$D/c.tmp" "$CF"; }
 remove_if_autoremove() { awk -v id="$1" '($1 == id || $2 == id) && $8 == 1 { next } { print }' "$CF" > "$D/c.tmp" && mv "$D/c.tmp" "$CF"; }
 # Restart policy: unless-stopped/always containers come back unless stopped by hand.
 engine_start() {
-  awk '($6 == "unless-stopped" || $6 == "always") && $7 != 1 { $3 = "running" } { print }' "$CF" > "$D/c.tmp" && mv "$D/c.tmp" "$CF"
+  awk -v hs="$(after_start)" 'BEGIN { n = split(hs, a, " "); for (i = 1; i < n; i += 2) h[a[i]] = a[i + 1] }
+    ($6 == "unless-stopped" || $6 == "always") && $7 != 1 && $3 != "running" { $3 = "running"; if ($1 in h) $4 = h[$1] } { print }' "$CF" > "$D/c.tmp" && mv "$D/c.tmp" "$CF"
 }
 sock_back() { if [ -e "$D/docker.sock.down" ] || [ -L "$D/docker.sock.down" ]; then mv "$D/docker.sock.down" "$D/docker.sock"; fi; }
 no_daemon() { echo "Cannot connect to the Docker daemon at unix://$D/docker.sock. Is the docker daemon running?" >&2; }
@@ -136,10 +143,10 @@ act() {
   fi
   R=${R//"{{json ($1)}}"/"$js"}; R=${R//"{{json $1}}"/"$js"}; R=${R//"{{$1}}"/"$raw"}
 }
-# render FMT ID NAME AUTOREMOVE ONEOFF STARTED VOLS: FMT for that container (fields
-# as in containers) in R, its one {{range}} (.Mounts or .ExecIDs) included. Mounts:
-# a bind at bind-ID's text when present, VOLS, then a bind at /fsg-probe; exec ids
-# as execs and execs-once give them. RT is the part from the {{range}} on. 1, with
+# render FMT ID NAME AUTOREMOVE ONEOFF STARTED VOLS HEALTH: FMT for that container
+# (fields as in containers) in R, its one {{range}} (.Mounts or .ExecIDs) included.
+# Mounts: a bind at bind-ID's text when present, VOLS, then a bind at /fsg-probe;
+# exec ids as execs and execs-once give them. RT is the part from the {{range}} on. 1, with
 # the real run's error on stderr, when the template fails for it.
 render() {
   local fmt=$1 id=$2 name=$3 ar lab pre body="" post="" rng="" out="" v n i=0 x sep
@@ -158,6 +165,8 @@ render() {
   R=${R//'{{.State.StartedAt}}'/$(date -u -r "$v" +%Y-%m-%dT%H:%M:%S.123456789Z)}
   R=${R//'{{json (index .HostConfig "Binds")}}'/$(vol_binds "${7:-}")}
   R=${R//'{{json (index .HostConfig "Mounts")}}'/null}
+  if [ "${8:-none}" = none ]; then v=null; else v=$(json_str "$8"); fi
+  R=${R//'{{with index .State "Health"}}{{json (index . "Status")}}{{else}}null{{end}}'/$v}
   act .Id 1 "$id"; act .Name 1 "/$name"; act 'index .Config.Labels "com.docker.compose.oneoff"' 1 "$lab"
   pre=${R%%"$sep"*}; post=${R#*"$sep"}
   case $rng in
@@ -263,7 +272,7 @@ case $cmd in
         *ExecIDs*)
           [ -f "$D/work-text-$1" ] && { cat "$D/work-text-$1"; continue; }
           # A real container's line as the run printed it, then its exec ids.
-          render "$fmt" "$1" "$2" "${8:-0}" "${9:-0}" "${10:--}" "${11:-}" || { rc=1; continue; }
+          render "$fmt" "$1" "$2" "${8:-0}" "${9:-0}" "${10:--}" "${11:-}" "$4" || { rc=1; continue; }
           real=$(awk -v n="/$2" '$1 == n { print; exit }' "$D/inspect-real-work" 2>/dev/null)
           if [ -n "$real" ]; then printf '%s\n' "$real$RT"; else printf '%s\n' "$R"; fi ;;
         *AutoRemove*)
@@ -273,7 +282,7 @@ case $cmd in
           fi
           real=$(awk -F'\t' -v id="$1" '$1 == id { print; exit }' "$D/inspect-real" 2>/dev/null)
           if [ -n "$real" ]; then printf '%s\n' "$real"
-          else render "$fmt" "$1" "$2" "${8:-0}" "${9:-0}" "${10:--}" "${11:-}" && printf '%s\n' "$R" || rc=1; fi ;;
+          else render "$fmt" "$1" "$2" "${8:-0}" "${9:-0}" "${10:--}" "${11:-}" "$4" && printf '%s\n' "$R" || rc=1; fi ;;
         *Health*) echo "$3 $( [ "$3" = running ] && echo "$4" || echo none)" ;;
         *State.Status*) echo "${fmt%%\{\{*}$3" ;;
         *Config.Image*) echo "$5" ;;

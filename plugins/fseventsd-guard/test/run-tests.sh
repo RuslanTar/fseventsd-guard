@@ -192,7 +192,9 @@ docker_default() {
 # fsg-probe-named (--rm -v fsg-probe-vol:/data), fsg-probe-mount (--rm, --mount
 # type=volume,dst=/m2 and a named --mount at /m3), and four compose services, one
 # with a bind mount. The compose services' container, volume and bind-mount names
-# are anonymized (app-*, /host_mnt/Users/dev/app); nothing else in the lines changed.
+# are anonymized (app-*, /host_mnt/Users/dev/app); nothing else in the lines changed,
+# except the health field the record's template gained later, null in every line as
+# for the containers here (none has a health check).
 live_containers() {
   local F=$ROOT/tools/fixtures/docker-cli-29.9.2
   awk -F'\t' '{ n = $2; sub(/^\//, "", n); print $1, n, "running none img:1 no 0", ($3 == "true" ? 1 : 0), ($4 == "\"True\"" ? 1 : 0) }' \
@@ -2606,6 +2608,7 @@ if ! skip_case heal-rm-volumes; then
   has "$out" "not_restorable=fsg-probe-mount fsg-probe-named fsg-probe-anon" "the --rm containers"
   has "$out" "not_restored_oneoff=fsg-probe-oneoff" "a one-off; an unset label (null) and \"False\" are not"
   has "$out" "names=app-redis app-unleash app-postgres app-elasticsearch" "the restore set"
+  has "$out" "health=none none none none" "their health, in the same order"
 
   t "a heal refuses over a real engine's --rm containers with anonymous volumes"
   docker_default; install_fake; mem 600M; live_containers
@@ -2648,16 +2651,18 @@ if ! skip_case heal-rm-volumes; then
 
   t "a docker inspect line that is not a whole record leaves the listing incomplete"
   docker_default
-  printf 'c2\t/redis\tfalse\t"False"\tnullnull\t"bind"\tnull\n' > "$FSG_FAKE/docker/record-text-c2"
+  printf 'c2\t/redis\tfalse\t"False"\tnullnull\tnull\t"bind"\tnull\n' > "$FSG_FAKE/docker/record-text-c2"
   out=$(record)
   has "$out" "listed=0" "a mount cut short"; has "$out" "B unchecked" "so its --rm volumes count as not checked"
   has "$(cat "$FSG_LOG")" "DOCKER docker inspect printed 1 line(s) that are not a whole container record" "logged"
-  printf 'c2\t/redis\tfalse\t"False"\tnullnull\t"bind"\tnull\t"/host\ndata"\n' > "$FSG_FAKE/docker/record-text-c2"
+  printf 'c2\t/redis\tfalse\t"False"\tnullnull\tnull\t"bind"\tnull\t"/host\ndata"\n' > "$FSG_FAKE/docker/record-text-c2"
   out=$(record); has "$out" "listed=0" "a destination split by a newline"
-  printf 'c2\t/redis\tfalse\t"False"\tnullnull\t"bind"\tnull\t/host\n' > "$FSG_FAKE/docker/record-text-c2"
+  printf 'c2\t/redis\tfalse\t"False"\tnullnull\tnull\t"bind"\tnull\t/host\n' > "$FSG_FAKE/docker/record-text-c2"
   out=$(record); has "$out" "listed=0" "a destination that is not JSON"
-  printf 'c2\t/redis\tyes\t"False"\tnullnull\n' > "$FSG_FAKE/docker/record-text-c2"
+  printf 'c2\t/redis\tyes\t"False"\tnullnull\tnull\n' > "$FSG_FAKE/docker/record-text-c2"
   out=$(record); has "$out" "listed=0" "an AutoRemove that is neither true nor false"
+  printf 'c2\t/redis\tfalse\t"False"\tnullnull\thealthy\n' > "$FSG_FAKE/docker/record-text-c2"
+  out=$(record); has "$out" "listed=0" "a health status that is not JSON"
   : > "$FSG_FAKE/docker/record-text-c2"; : > "$FSG_LOG"
   out=$(record); has "$out" "listed=0" "no line for a running container, inspect still succeeding"
   has "$(cat "$FSG_LOG")" "of c2, which still run" "logged"
@@ -2676,7 +2681,7 @@ if ! skip_case heal-rm-volumes; then
   rm -f "$FSG_FAKE/docker/label-c3"
   # A named volume whose name has a tab, as the template prints it: matched to the
   # spec in its JSON form, so only the anonymous volume is at risk.
-  printf 'c3\t/devdb\ttrue\tnull\t["my\\tvol:/m"]null\t"volume"\t"my\\tvol"\t"/m"\t"volume"\t"%s"\t"/var/lib/postgresql/data"\n' \
+  printf 'c3\t/devdb\ttrue\tnull\t["my\\tvol:/m"]null\tnull\t"volume"\t"my\\tvol"\t"/m"\t"volume"\t"%s"\t"/var/lib/postgresql/data"\n' \
     "$(printf 'f%063d' 1)" > "$FSG_FAKE/docker/record-text-c3"
   out=$(record)
   has "$out" "listed=1" "read"; has "$out" "rm_anonymous_volumes=devdb (/var/lib/postgresql/data)" "the named volume is not at risk"
@@ -2685,7 +2690,7 @@ if ! skip_case heal-rm-volumes; then
     t "heal variant $v refuses when a docker inspect line is not a whole record"
     docker_default; install_fake; mem 600M
     agent_env FSG_UNLEASED_CAP_S=1
-    printf 'c2\t/redis\tfalse\t"False"\tnullnull\t"bind"\tnull\t/host\n' > "$FSG_FAKE/docker/record-text-c2"; : > "$FSG_FAKE/calls.log"
+    printf 'c2\t/redis\tfalse\t"False"\tnullnull\tnull\t"bind"\tnull\t/host\n' > "$FSG_FAKE/docker/record-text-c2"; : > "$FSG_FAKE/calls.log"
     heal --docker-variant $v --on-cap proceed > "$C/o" 2>&1; eq $? 14 "refused ($(tail -n 1 "$C/o"))"
     L=$(cat "$FSG_FAKE/calls.log")
     hasnt "$L" "docker stop" "no container stopped"; hasnt "$L" "docker desktop stop" "Docker Desktop not stopped"
@@ -2695,7 +2700,7 @@ if ! skip_case heal-rm-volumes; then
 
   t "variant C does not restart Docker Desktop when a docker inspect line is not a whole record"
   docker_default
-  printf 'c2\t/redis\tfalse\t"False"\tnullnull\t"bind"\tnull\n' > "$C/cut"
+  printf 'c2\t/redis\tfalse\t"False"\tnullnull\tnull\t"bind"\tnull\n' > "$C/cut"
   : > "$FSG_FAKE/calls.log"; out=$(c_after 'cp "$C/cut" "$FSG_FAKE/docker/record-text-c2"')
   has "$out" "record: listed=1" "the heal's own listing worked"
   has "$out" "rc=2 err=Docker Desktop not restarted: Docker answers but did not list its containers" "the fresh listing is incomplete"
@@ -3071,7 +3076,8 @@ if ! skip_case heal-signal; then
 
   t "a signal during the container wait does not release runs onto an unhealthy container"
   docker_default; install_fake; mem 3G
-  containers "c1 pg running starting postgres:17 unless-stopped 0"
+  containers "c1 pg running healthy postgres:17 unless-stopped 0"
+  echo "c1 starting" > "$FSG_FAKE/docker/health-after-start"
   export FSG_CONTAINER_TIMEOUT_S=8; agent_env FSG_CONTAINER_TIMEOUT_S=8
   term_agent "$FSG_FAKE/calls.log" 'State.Health'
   wait "$HP"; eq $? 130 "the request ends with 130"
@@ -3141,13 +3147,15 @@ if ! skip_case heal-signal; then
   absent "$FSG_STATE_DIR/docker-intent" "intent cleared"
 fi
 
-# dead_intent VARIANT [AFTER_DONE]: the Docker intent of a heal whose tick died
-# before its after-step (AFTER_DONE 1: after it, Docker not verified).
+# dead_intent VARIANT [AFTER_DONE [HEALTH]]: the Docker intent of a heal whose tick
+# died before its after-step (AFTER_DONE 1: after it, Docker not verified). HEALTH:
+# its restore_health; without it, an intent of a guard that did not record it.
 dead_intent() {
   local dead dl
   bg sleep 60; dead=$LAST_BG; dl=$(lstart "$dead"); killbg "$dead"
   printf 'state_version=1\nowner_pid=%s\nowner_lstart=%s\nstarted_epoch=%s\nrequest=\ntrigger=wave\nvariant=%s\nkind=desktop\nstate=running\nendpoint=unix://%s\nrestore_ids=c1 c2\nrestore_names=pg redis\nheal_dir=\nafter_done=%s\nhold_epoch=\n' \
     "$dead" "$dl" "$(date +%s)" "$1" "$FSG_FAKE/docker/docker.sock" "${2:-0}" > "$FSG_STATE_DIR/docker-intent"
+  [ -n "${3:-}" ] && echo "restore_health=$3" >> "$FSG_STATE_DIR/docker-intent"
   DEAD=$dead
 }
 # ======================================================================== heal-kill
@@ -3313,8 +3321,9 @@ if ! skip_case heal-kill; then
 
   t "a container that runs but is not healthy yet is never dropped"
   docker_default; install_fake; mem 3G
-  containers "c1 pg running starting postgres:17 unless-stopped 0" "c2 redis running none redis:7 unless-stopped 0"
-  heal --docker-variant B >/dev/null 2>&1; eq $? 8 "not verified: pg is not healthy"
+  echo "c1 starting" > "$FSG_FAKE/docker/health-after-start"
+  heal --docker-variant B >/dev/null 2>&1; eq $? 8 "not verified: pg was healthy and is not yet"
+  has "$(cat "$FSG_STATE_DIR/docker-intent" 2>/dev/null)" "restore_health=healthy none" "the intent keeps each one's health before the heal"
   hasnt "$(cat "$FSG_STATE_DIR/docker-intent" 2>/dev/null)" "pg:" "no failed pass counted"
   mem 5000K; : > "$FSG_FAKE/notifications.log"
   sleep 1; FSG_AGENT_INTERVAL_S=1 "$G" tick >/dev/null 2>&1
@@ -3327,6 +3336,45 @@ if ! skip_case heal-kill; then
   absent "$FSG_STATE_DIR/docker-intent" "verified once pg is healthy"
   FSG_RUN_MAX_WAIT_S=1 "$G" run -- true 2>/dev/null; eq $? 0 "released"
   hasnt "$(cat "$FSG_FAKE/notifications.log")" "Dropped" "nothing dropped"
+
+  t "a container already unhealthy before the heal does not fail its verify"
+  docker_default; install_fake; mem 3G
+  containers "c1 pg running unhealthy postgres:17 unless-stopped 0" "c2 redis running none redis:7 unless-stopped 0"
+  heal --docker-variant B >/dev/null 2>&1; eq $? 0 "healed: pg runs, unhealthy as before"
+  has "$(cat "$(cat "$FSG_STATE_DIR/last-heal-dir")/docker-before.txt")" "health=unhealthy none" "the record keeps each one's health"
+  absent "$FSG_STATE_DIR/docker-intent" "verified"
+  FSG_RUN_MAX_WAIT_S=1 "$G" run -- true 2>/dev/null; eq $? 0 "runs released"
+
+  t "a container healthy before the heal that stays unhealthy still fails the verify"
+  docker_default; install_fake; mem 3G
+  echo "c1 unhealthy" > "$FSG_FAKE/docker/health-after-start"
+  heal --docker-variant B >/dev/null 2>&1; eq $? 8 "not verified: pg was healthy"
+  has "$(grep 'heal incomplete' "$FSG_FAKE/notifications.log")" "containers: c1" "named"
+  FSG_RUN_MAX_WAIT_S=1 "$G" run -- true 2>/dev/null; eq $? 75 "runs held"
+
+  t "a dead heal's recovery needs healthy only where the intent recorded it"
+  docker_default; install_fake
+  containers "c1 pg running unhealthy postgres:17 unless-stopped 0" "c2 redis running none redis:7 unless-stopped 0"
+  dead_intent B 1 "unhealthy none"
+  FSG_CONTAINER_TIMEOUT_S=1 "$G" tick >/dev/null 2>&1
+  absent "$FSG_STATE_DIR/docker-intent" "verified: pg was unhealthy before the heal"
+  dead_intent B 1
+  FSG_CONTAINER_TIMEOUT_S=1 "$G" tick >/dev/null 2>&1
+  exists "$FSG_STATE_DIR/docker-intent" "an intent without restore_health needs pg healthy, as before"
+  FSG_RUN_MAX_WAIT_S=1 "$G" run -- true 2>/dev/null; eq $? 75 "runs held"
+
+  t "a hold is released over a container that was unhealthy before the heal, not one that was healthy"
+  docker_default; install_fake
+  containers "c1 pg running unhealthy postgres:17 unless-stopped 0" "c2 redis running none redis:7 unless-stopped 0"
+  for h in "" "healthy none" "unhealthy none"; do
+    mkdir -p "$FSG_STATE_DIR/drain/leases"
+    printf 'state_version=1\nowner_pid=0\nstarted_epoch=%s\nhold_until_epoch=%s\ntrigger=manual\nreason=test hold\nphase=held-docker-not-restored\nrestore_names=pg redis\n%s' \
+      "$(date +%s)" $(( $(date +%s) + 600 )) "${h:+restore_health=$h
+}" > "$FSG_STATE_DIR/drain/pending"
+    "$G" tick >/dev/null 2>&1
+    if [ "$h" = "unhealthy none" ]; then absent "$FSG_STATE_DIR/drain/pending" "released (restore_health=$h)"
+    else exists "$FSG_STATE_DIR/drain/pending" "kept (restore_health=${h:-absent})"; fi
+  done
 
   t "a container gone from a dead heal's restore set is named and dropped, not held for good"
   docker_default; install_fake

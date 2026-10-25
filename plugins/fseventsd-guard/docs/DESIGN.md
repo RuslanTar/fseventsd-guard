@@ -429,8 +429,8 @@ phase=docker-before (docker-intent written; cannot ──▶ 10, nothing stopped
 ```
 
 Held runs are released only onto a **verified** Docker: the engine answers, every
-recorded container runs (healthy when it has a check) and the bind-mount round trip
-works. That holds on every path: a restart, a failed restart, helper exit 73, and a
+recorded container runs (healthy when it was healthy before the heal) and the
+bind-mount round trip works. That holds on every path: a restart, a failed restart, helper exit 73, and a
 heal stopped part way. Running the after-step is not enough.
 
 The helper sends SIGKILL when the same genuine daemon still runs 10 s after
@@ -627,13 +627,19 @@ one was a trial's.
    by name (compose may have recreated it under the same name with a new id; the id
    is used only when no name was recorded or only the id still exists). A container
    that is not back within `FSG_CONTAINER_TIMEOUT_S` (running, and healthy when it
-   has a check) fails the verify. It counts a failure only when the engine answers
+   was healthy before the heal) fails the verify. It counts a failure only when the engine answers
    and says it is gone (`No such container`; `docker inspect` exits 1 for a daemon
    it cannot reach too) or not running, and at most one per `FSG_AGENT_INTERVAL_S`,
    because callers kick ticks seconds apart; the heal's own after-step can count the
-   first. A container that runs but is not healthy yet (postgres after a Docker
-   Desktop restart) never counts: it holds runs until it is healthy or the intent
-   expires. At 2 failures the container is dropped from the set and named in the
+   first. A container that was healthy before the heal and runs but is not healthy
+   yet (postgres after a Docker Desktop restart) never counts: it holds runs until
+   it is healthy or the intent expires. One that was unhealthy or starting before
+   the heal (a health check that fails for its own reasons) only needs to run: its
+   health is not the heal's to fix, and requiring it would hold runs for the whole
+   `FSG_FAILED_HOLD_S` after every heal. The record keeps each container's health
+   (`health=` in `docker-before.txt`, `restore_health=` in the intent and the
+   hold); an intent or hold without it, from an older guard, needs every container
+   healthy when it has a check. At 2 failures the container is dropped from the set and named in the
    notification (left as it is; start it by hand), so one container that will not
    start cannot hold runs until the expiry. A pass in which it is back resets its
    count. This replaces the `gone=` list.
@@ -818,8 +824,8 @@ one was a trial's.
   containers by name, bind mount), `fseventsd-guard release`, or
   `FSG_FAILED_HOLD_S` (60 min) passes. A trial's hold is released only by the
   operator (`release`), after recovering Docker by hand.
-- **Verify:** every recorded container running, and healthy when it has a health
-  check. Then a bind-mount round trip: the host writes a nonce, a throwaway
+- **Verify:** every recorded container running, and healthy when it was healthy
+  before the heal (§5.5). Then a bind-mount round trip: the host writes a nonce, a throwaway
   container (`--pull never --network none`, a local alpine/busybox/bash image, else a
   recorded container's image) reads it and writes a reply into the same file
   (`fsg-probe.txt`), and the host reads the reply and removes the file. The probe

@@ -186,6 +186,8 @@ fsg_intent_write() {
     echo "endpoint=$DK_ENDPOINT"
     echo "restore_ids=$DK_IDS"
     echo "restore_names=$DK_NAMES"
+    # Each one's health before the heal (fsg_docker_wait_containers).
+    echo "restore_health=$DK_HEALTH"
     echo "heal_dir=${HEAL_DIR:-}"
     echo "action_ran=0"
     echo "action_epoch="
@@ -247,11 +249,13 @@ fsg__container_exists() { [ "$(fsg__container_state "$1")" != gone ]; }
 
 # The intent's restore set as targets: each container by its recorded name (compose
 # recreates one under the same name with a new id), by id when no name was recorded
-# or only the id still exists. Sets DK_IDS (the targets) and DK_NAMES, in the
-# intent's order. Unless OFFLINE, the engine is asked which name or id exists.
+# or only the id still exists. Sets DK_IDS (the targets), DK_NAMES and DK_HEALTH, in
+# the intent's order. Unless OFFLINE, the engine is asked which name or id exists.
 fsg__recover_targets() { # [offline]
   local f=$FSG_DOCKER_INTENT ids names id name t up=0
   ids=$(fsg__kv "$f" restore_ids); names=$(fsg__kv "$f" restore_names)
+  # An intent of an older guard has none: each container then needs to be healthy.
+  DK_HEALTH=$(fsg__kv "$f" restore_health)
   [ -z "${1:-}" ] && ! fsg_docker_off && fsg_docker_answers && up=1
   DK_IDS=; DK_NAMES=
   # shellcheck disable=SC2086
@@ -268,9 +272,9 @@ fsg__recover_targets() { # [offline]
 }
 
 # 0 when a container that is not back counts as a failed pass: the engine says it
-# does not exist, or that it is not running. One that runs but is not healthy yet
-# (postgres after a Docker Desktop restart) and a query that timed out or did not
-# reach the engine do not count.
+# does not exist, or that it is not running. One that was healthy before the heal
+# and runs but is not healthy yet (postgres after a Docker Desktop restart) and a
+# query that timed out or did not reach the engine do not count.
 fsg__container_failed() { # target
   local st
   st=$(fsg__container_state "$1")
@@ -283,13 +287,13 @@ fsg__container_failed() { # target
 # seconds apart. At 2 failures it leaves the set, so one bad container cannot hold
 # runs until the intent expires. The intent keeps name:count:epoch per container.
 # DK_IDS and DK_NAMES are the targets (fsg__recover_targets, or the heal's own
-# record). Sets RC_DROPPED and RC_FAILING (names), and keeps DK_IDS/DK_NAMES to
-# what is left.
+# record). Sets RC_DROPPED and RC_FAILING (names), and keeps DK_IDS/DK_NAMES/
+# DK_HEALTH to what is left.
 fsg__recover_count() { # failed-targets
-  local f=$FSG_DOCKER_INTENT prev fails="" n e i id name now keep_ids="" keep_names="" keep_t="" keep_n=""
-  local -a I N T
+  local f=$FSG_DOCKER_INTENT prev fails="" n e i id name now keep_ids="" keep_names="" keep_t="" keep_n="" keep_h=""
+  local -a I N T H
   # shellcheck disable=SC2206
-  I=($(fsg__kv "$f" restore_ids)); N=($(fsg__kv "$f" restore_names)); T=($DK_IDS)
+  I=($(fsg__kv "$f" restore_ids)); N=($(fsg__kv "$f" restore_names)); T=($DK_IDS); H=($(fsg__kv "$f" restore_health))
   prev=" $(fsg__kv "$f" fails) "
   now=$(fsg_now)
   RC_DROPPED=; RC_FAILING=
@@ -314,13 +318,14 @@ fsg__recover_count() { # failed-targets
     esac
     keep_ids="${keep_ids:+$keep_ids }$id"; keep_names="${keep_names:+$keep_names }$name"
     keep_t="${keep_t:+$keep_t }${T[$i]:-$id}"; keep_n="${keep_n:+$keep_n }$name"
+    keep_h="${keep_h:+$keep_h }${H[$i]:--}"
     i=$((i + 1))
   done
   fsg_intent_set fails "$fails"
   [ -n "$RC_FAILING" ] && fsg_log "RECOVER containers not back: $RC_FAILING (now ${fails:-no failed passes}; gone or not running counts one per $(fsg_dur "$FSG_AGENT_INTERVAL_S"), dropped at the second)"
   [ -n "$RC_DROPPED" ] || return 0
-  fsg_intent_set restore_ids "$keep_ids"; fsg_intent_set restore_names "$keep_names"
-  DK_IDS=$keep_t; DK_NAMES=$keep_n
+  fsg_intent_set restore_ids "$keep_ids"; fsg_intent_set restore_names "$keep_names"; fsg_intent_set restore_health "$keep_h"
+  DK_IDS=$keep_t; DK_NAMES=$keep_n; DK_HEALTH=$keep_h
   fsg_log "RECOVER dropped from the restore set after 2 failed passes (left as they are): $RC_DROPPED"
 }
 
@@ -339,7 +344,7 @@ fsg_intent_recover() {
   local f=$FSG_DOCKER_INTENT rc
   [ -f "$f" ] || return 0
   fsg_intent_owner_alive && return 0
-  local HEAL_TRIGGER HEAL_VARIANT DK_KIND DK_STATE DK_IDS DK_NAMES DK_ERR="" DK_FAILED="" BM_RESULT="" BM_DETAIL=""
+  local HEAL_TRIGGER HEAL_VARIANT DK_KIND DK_STATE DK_IDS DK_NAMES DK_HEALTH="" DK_ERR="" DK_FAILED="" BM_RESULT="" BM_DETAIL=""
   local DK_ENDPOINT DK_EP_WHY="" DK_NOTE="" DK_STOP_DECISION="" DK_FOREIGN="" BM_NOTE=""
   local opid ran=0 released="" held="" what drc cut_n
   local cap=$FSG_DRAIN_CAP_S
@@ -453,7 +458,7 @@ fsg__recover_no_marker() { # tick-pid-of-the-heal
 # runs before C's Docker Desktop restart leaves the restart to the next tick, which
 # waits again.
 fsg_recover_interrupted() {
-  local f=$FSG_DOCKER_INTENT opid HEAL_TRIGGER HEAL_VARIANT DK_KIND DK_STATE DK_IDS DK_NAMES DK_ENDPOINT DK_EP_WHY=""
+  local f=$FSG_DOCKER_INTENT opid HEAL_TRIGGER HEAL_VARIANT DK_KIND DK_STATE DK_IDS DK_NAMES DK_HEALTH="" DK_ENDPOINT DK_EP_WHY=""
   local DK_ERR="" DK_FAILED="" BM_RESULT="" BM_DETAIL="" RC_DROPPED="" RC_FAILING="" PASS_RAN=0 DK_NOTE=""
   local DK_STOP_DECISION="" DK_FOREIGN="" BM_NOTE=""
   [ "${TICK_RECOVERING:-0}" = 1 ] || return 0
@@ -1121,7 +1126,8 @@ fsg_heal_run() { # t0 old_pid cap policy
 # --- Background agent -----------------------------------------------------------------
 # Releases a hold left by a heal that could not bring Docker back, once Docker
 # answers, the containers it was restoring run (by name: compose may recreate
-# them) and a bind mount works. Trial holds wait for the operator.
+# them; healthy when they were before the heal) and a bind mount works. Trial holds
+# wait for the operator.
 fsg_tick_hold_check() {
   # An intent left after the recovery means Docker was just checked and failed.
   [ -f "$FSG_DOCKER_INTENT" ] && return 0
@@ -1137,7 +1143,7 @@ fsg_tick_hold_check() {
   if [ -n "$hep" ] && ! fsg_docker_same_endpoint "$hep" "$DK_ENDPOINT"; then
     fsg_log "TICK hold: the Docker endpoint is now $DK_ENDPOINT, not the heal's $hep"; return 0
   fi
-  DK_IDS=$(fsg__kv "$FSG_PENDING" restore_names)
+  DK_IDS=$(fsg__kv "$FSG_PENDING" restore_names); DK_HEALTH=$(fsg__kv "$FSG_PENDING" restore_health)
   if ! FSG_CONTAINER_TIMEOUT_S=0 fsg_docker_wait_containers; then
     fsg_log "TICK hold: containers not back: $DK_FAILED"; return 0
   fi
