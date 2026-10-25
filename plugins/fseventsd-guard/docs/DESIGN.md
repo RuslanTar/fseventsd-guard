@@ -944,7 +944,7 @@ Reports behind the range (researched 2026-10-20 and 2026-10-25; no source claims
 | 26.7 (25G229) | 8.2 GB, and Claude Code fell back to polling: "native file watching is not delivering events" ([claude-code#98769](https://github.com/anthropics/claude-code/issues/98769)) |
 | 26.7.1 (25G241) | 26.6 MB to 2.31 GB in six minutes, FB25090184 ([Apple forum 849819](https://developer.apple.com/forums/thread/849819)) |
 | 27.0 (26A428) | 24 GB, FB25046068 ([talkstream/fseventsd-runaway](https://github.com/talkstream/fseventsd-runaway)); 0 events delivered at 2.3 GB ([gai-tools#62](https://github.com/Navibyte-Innovations-Pvt-Ltd/gai-tools/issues/62)) |
-| 27.0.1 (26A434) | The owner's Mac: 17.7 GB, a fresh watcher got 0 events for 50 writes; 36-37 GiB ([codex#34376](https://github.com/openai/codex/issues/34376)) |
+| 27.0.1 (26A434) | The owner's Mac: 17.7 GB, a fresh watcher got 0 events for 50 writes; 36-37 GiB ([codex#34376](https://github.com/openai/codex/issues/34376)); flat at 4-11 MB for a week, then 10, 52 and 558 MB within an hour after about 10k uniquely named temp files, 7.5 GB at 18 h and 14 GB at 26 h, no recovery (ww2283, 2026-10-20, [claude-code#98769](https://github.com/anthropics/claude-code/issues/98769)) |
 
 Not listed: reports that give only a Darwin version (25.3, 25.5, 25.6, 24.6) or no
 version at all, because they cannot be matched against `sw_vers`.
