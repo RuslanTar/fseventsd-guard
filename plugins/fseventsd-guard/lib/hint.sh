@@ -269,7 +269,13 @@ fsg_hint_heal_text() {
       out="fseventsd-guard is healing fseventsd on this Mac: a heal began at $at (trigger ${HN_TRIGGER:-?}; $(fsg_hint_step "$HN_VARIANT")) and is in its Docker step and fseventsd restart (phase ${HN_STEP:-docker})."
       [ $docker = 1 ] && out="$out Until it ends, docker, docker compose and test commands may fail, hang or find Docker stopped; a failure in this window is likely the heal, not the code, and is worth re-running once it ends." ;;
     held)
-      out="fseventsd-guard: a heal of fseventsd (trigger ${HN_TRIGGER:-?}; $(fsg_hint_step "$HN_VARIANT")) did not get Docker verified (since $at: $HN_WHY). Docker may still be stopped or partly up, so docker, docker compose and test commands may fail. New runs under a drain lease stay held until the guard's agent sees Docker back (it checks every 5 minutes), or until someone brings Docker back by hand (docker desktop start, docker compose up -d) and runs $g release. Details: $g status"
+      out="fseventsd-guard: a heal of fseventsd (trigger ${HN_TRIGGER:-?}; $(fsg_hint_step "$HN_VARIANT")) did not get Docker verified (since $at: $HN_WHY). Docker may still be stopped or partly up, so docker, docker compose and test commands may fail."
+      if [ "$HN_TRIGGER" = trial ]; then
+        # The agent never lifts a trial's hold: the operator confirms Docker.
+        out="$out New runs under a drain lease stay held until someone brings Docker back (docker desktop start, docker compose up -d) and runs $g release, or the hold expires (FSG_FAILED_HOLD_S, an hour by default). Details: $g status"
+      else
+        out="$out New runs under a drain lease stay held until the guard's agent sees Docker back (it checks every 5 minutes), or until someone brings Docker back by hand (docker desktop start, docker compose up -d) and runs $g release. Details: $g status"
+      fi
       printf '%s\n' "$out"; return 0 ;;
     ended)
       local restarted=0

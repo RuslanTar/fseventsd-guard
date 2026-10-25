@@ -4746,6 +4746,14 @@ if ! skip_case claude-hook-bash; then
   has "$x" "a heal began at $(/bin/date -r $((e - 60)) +%H:%M) (trigger" "draining: the start"
   killbg "$own"
 
+  t "claude-hook bash: a trial's hold is lifted by release, not by the agent"
+  app_copy; mkdir -p "$FSG_STATE_DIR/drain/leases"; e=$(date +%s)
+  printf 'state_version=1\nowner_pid=0\nstarted_epoch=%s\nhold_until_epoch=%s\ntrigger=trial\nreason=Docker not restored after a heal: containers: pg\nphase=held-docker-not-restored\nvariant=B\n' \
+    "$e" $((e + 600)) > "$FSG_STATE_DIR/drain/pending"
+  x=$(hook_ctx "$(hook bash PreToolUse s1)")
+  has "$x" "stay held until someone brings Docker back (docker desktop start, docker compose up -d) and runs $(appg) release, or the hold expires" "the way out for a trial"
+  hasnt "$x" "sees Docker back" "the agent is not said to lift it"
+
   t "claude-hook bash: a failed restart says what happened to Docker"
   app_copy; e=$(date +%s)
   echo "$e restart-failed manual skip 30 /x" > "$FSG_STATE_DIR/last-heal"
