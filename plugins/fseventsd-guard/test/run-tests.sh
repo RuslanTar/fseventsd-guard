@@ -4422,18 +4422,18 @@ if ! skip_case claude-hook-prompt; then
   m=$(hook_msg "$out"); x=$(hook_ctx "$out")
   has "$m" "fseventsd is running away: 3.0 GB, 102x Apple's 30 MB budget (up 1h02m)" "the user's line"
   has "$m" "On macOS 27.0.1 it can grow without limit and silently stop delivering file events" "why it matters"
-  has "$m" "new terminal window (it asks for sudo): [ -d ~/fseventsd-guard ] || git clone https://github.com/RuslanTar/fseventsd-guard.git ~/fseventsd-guard; ~/fseventsd-guard/plugins/fseventsd-guard/fseventsd-guard install." "the install command, from a clone of the public repo"
+  has "$m" "new terminal window (it asks for sudo): if [ -d ~/fseventsd-guard ]; then git -C ~/fseventsd-guard pull --ff-only; else git clone https://github.com/RuslanTar/fseventsd-guard.git ~/fseventsd-guard; fi && ~/fseventsd-guard/plugins/fseventsd-guard/fseventsd-guard install." "the install command, from an up-to-date clone of the public repo"
   has "$m" "Silence: FSG_HINT=0, or touch $FSG_HINT_DIR/off" "how to silence it"
   has "$x" "a footprint of 3072 MB (102x Apple's 30 MB budget), uptime 1h02m, level runaway (the guard warns at 500 MB and heals at 2048 MB)" "the facts"
   has "$x" "On macOS 27.0.1 fseventsd has a known bug" "the version"
   has "$x" "IDE, dev servers, Docker bind mounts and Claude Code stop seeing file changes" "the symptoms"
-  has "$x" "runs in a new terminal window, not through Claude: [ -d ~/fseventsd-guard ] || git clone https://github.com/RuslanTar/fseventsd-guard.git ~/fseventsd-guard; ~/fseventsd-guard/plugins/fseventsd-guard/fseventsd-guard install, then the same path with doctor." "install, then doctor"
+  has "$x" "runs in a new terminal window, not through Claude: if [ -d ~/fseventsd-guard ]; then git -C ~/fseventsd-guard pull --ff-only; else git clone https://github.com/RuslanTar/fseventsd-guard.git ~/fseventsd-guard; fi && ~/fseventsd-guard/plugins/fseventsd-guard/fseventsd-guard install, then the same path with doctor." "install, then doctor"
   has "$x" "Why and what it costs: https://github.com/RuslanTar/fseventsd-guard#readme." "the README"
   hasnt "$out" "$REPO" "no project checkout or its path assumed"
   has "$x" "once an hour at this level" "the cadence"
   has "$x" "FSG_HINT=0 in Claude Code's environment, or a file $FSG_HINT_DIR/off, silences it" "how to silence it"
   has "$x" "The user has not been told about this in the conversation yet." "to relay once"
-  [ ${#x} -lt 1300 ] && ok || bad "context under ~1,200 chars plus the test paths (${#x})"
+  [ ${#x} -lt 1400 ] && ok || bad "context under ~1,300 chars plus the test paths (${#x})"
   hasnt "$out" "permissionDecision" "never allows or denies"
   exists "$FSG_HINT_DIR/last-runaway" "stamped"
 
@@ -4495,10 +4495,27 @@ if ! skip_case claude-hook-prompt; then
   t "claude-hook prompt: the same nudge in any project, or none"
   d="$C/a \"quoted\" \\ dir"; mkdir -p "$d"; export CLAUDE_PROJECT_DIR="$d"
   mem 3G; out=$(hook prompt); json_ok "$out"
-  has "$(hook_msg "$out")" ": [ -d ~/fseventsd-guard ] || git clone https://github.com/RuslanTar/fseventsd-guard.git ~/fseventsd-guard; " "the clone command"
+  has "$(hook_msg "$out")" ": if [ -d ~/fseventsd-guard ]; then git -C ~/fseventsd-guard pull --ff-only; else git clone https://github.com/RuslanTar/fseventsd-guard.git " "the clone command"
   hasnt "$out" "quoted" "the project path is not used"
   unset CLAUDE_PROJECT_DIR; rm -rf "$FSG_HINT_DIR"
   eq "$(hook prompt)" "$out" "no project dir: the same nudge"
+
+  t "claude-hook prompt: the install command updates an existing clone before install"
+  mem 3G; m=$(hook_msg "$(hook prompt)")
+  cmd=${m#*it asks for sudo): }; cmd=${cmd%%. Why:*}
+  # A stand-in git that logs its call and fails when $C/git-fails exists; the clone's
+  # guard is a stand-in that logs its install.
+  mkdir -p "$C/gitbin" "$C/h"
+  printf '#!/bin/sh\necho "git $*" >> "%s/cmd.log"\n[ ! -e "%s/git-fails" ]\n' "$C" "$C" > "$C/gitbin/git"; chmod +x "$C/gitbin/git"
+  runcmd() { : > "$C/cmd.log"; HOME="$C/h" PATH="$C/gitbin:$PATH" bash -c "$cmd" >/dev/null 2>&1; cat "$C/cmd.log"; }
+  eq "$(runcmd)" "git clone https://github.com/RuslanTar/fseventsd-guard.git $C/h/fseventsd-guard" "no clone yet: it clones"
+  mkdir -p "$C/h/fseventsd-guard/plugins/fseventsd-guard"
+  printf '#!/bin/sh\necho "guard $*" >> "%s/cmd.log"\n' "$C" > "$C/h/fseventsd-guard/plugins/fseventsd-guard/fseventsd-guard"
+  chmod +x "$C/h/fseventsd-guard/plugins/fseventsd-guard/fseventsd-guard"
+  eq "$(runcmd)" "git -C $C/h/fseventsd-guard pull --ff-only
+guard install" "an existing clone: fast-forwarded, then install"
+  touch "$C/git-fails"
+  eq "$(runcmd)" "git -C $C/h/fseventsd-guard pull --ff-only" "a clone that cannot fast-forward: no install of the old release"
 fi
 
 # heal_state PHASE VARIANT OWNER-PID [STARTED]: the drain marker of a live emergency

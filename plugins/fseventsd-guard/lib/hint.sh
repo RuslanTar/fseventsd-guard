@@ -98,7 +98,8 @@ fsg_hint_nudge_json() {
     warn) lead="fseventsd is growing: $size, $x"; every="every 3 hours" ;;
     *) lead="fseventsd is fine now ($size, $x), but it can grow"; every="once a day" ;;
   esac
-  cmd="[ -d $FSG_HINT_CLONE ] || git clone $FSG_HINT_REPO.git $FSG_HINT_CLONE; $g install"
+  # An older clone is brought up to date first: install would install its release.
+  cmd="if [ -d $FSG_HINT_CLONE ]; then git -C $FSG_HINT_CLONE pull --ff-only; else git clone $FSG_HINT_REPO.git $FSG_HINT_CLONE; fi && $g install"
   doc="$FSG_HINT_REPO#readme"
   off="$FSG_HINT_DIR/off"
   case $off in "$HOME"/*) off="~${off#"$HOME"}" ;; esac
