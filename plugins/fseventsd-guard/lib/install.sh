@@ -887,13 +887,13 @@ fsg_uninstall_disabled() {
 fsg_uninstall_keep_records() {
   local f dst="" any=""
   U_RECORDS=
-  for f in heals trials last-heal last-heal-dir config; do [ -e "$FSG_STATE_DIR/$f" ] && any=1; done
+  for f in heals trials last-heal last-heal-dir daily config; do [ -e "$FSG_STATE_DIR/$f" ] && any=1; done
   [ -n "$any" ] || return 0
   if [ $U_LOG_OK = 1 ]; then dst=$(dirname "$FSG_LOG"); else dst="$HOME/Library/Logs"; fi
   dst="$dst/fseventsd-guard-records-$(date +%Y%m%d-%H%M%S)"
   mkdir -p "$dst" || return 1
   U_RECORDS=$dst
-  for f in heals trials last-heal last-heal-dir config; do
+  for f in heals trials last-heal last-heal-dir daily config; do
     [ -e "$FSG_STATE_DIR/$f" ] || continue
     mv "$FSG_STATE_DIR/$f" "$dst/" || return 1
   done

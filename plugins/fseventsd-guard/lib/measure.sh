@@ -97,6 +97,28 @@ fsg_tick_sample() {
     "$T_CPU_STREAK" "$boot" "$P_EID" > "$f.new.$$" 2>/dev/null && mv -f "$f.new.$$" "$f" 2>/dev/null
 }
 
+# The per-day summary, $FSG_STATE_DIR/daily: one line per local day, rewritten as
+# the day goes on, with the ticks, the largest footprint and CPU share, the heals
+# that restarted fseventsd and the event rate's median and 95th percentile. The
+# day's own samples are in day-samples.
+fsg_daily_add() { # tick MB CPU_PCT EV_S | heal (- for unknown)
+  local f="$FSG_STATE_DIR/day-samples" d="$FSG_STATE_DIR/daily" day evs line
+  day=$(date +%Y-%m-%d)
+  mkdir -p "$FSG_STATE_DIR" 2>/dev/null
+  [ "$(head -n 1 "$f" 2>/dev/null)" = "day $day" ] || echo "day $day" > "$f" 2>/dev/null || return 0
+  echo "$*" >> "$f"
+  evs=$(awk '$1 == "tick" && $4 ~ /^[0-9]+$/ { print $4 }' "$f" | sort -n | tr '\n' ' ')
+  line=$(awk -v day="$day" -v evs="$evs" '
+    function pct(p,  i) { if (n == 0) return "-"; i = int(p * n); if (i < p * n) i++; if (i < 1) i = 1; return e[i] }
+    BEGIN { n = split(evs, e, " ") }
+    $1 == "tick" { t++
+      if ($2 ~ /^[0-9]+$/ && (m == 0 || $2 + 0 > mb)) { mb = $2 + 0; m = 1 }
+      if ($3 ~ /^[0-9]+$/ && (c == 0 || $3 + 0 > cpu)) { cpu = $3 + 0; c = 1 } }
+    $1 == "heal" { h++ }
+    END { printf "%s ticks=%d max_mb=%s max_cpu_pct=%s heals=%d ev_s_p50=%s ev_s_p95=%s\n", day, t, (m ? mb : "-"), (c ? cpu : "-"), h, pct(0.5), pct(0.95) }' "$f")
+  { grep -v "^$day " "$d" 2>/dev/null | tail -n 399; echo "$line"; } > "$d.new.$$" 2>/dev/null && mv -f "$d.new.$$" "$d" 2>/dev/null
+}
+
 # 0 when the agent's last FSG_CPU_ESCALATE_TICKS ticks in a row found this fseventsd
 # at or above warn and FSG_CPU_ESCALATE_PCT of a core. Sets C_PCT and C_STREAK. A
 # record older than two agent intervals does not count.

@@ -3801,6 +3801,28 @@ if ! skip_case tick; then
   cpu_step 0; rm -f "$FSG_FAKE/probe-eid"; "$G" tick; eq $? 0 "a probe without an event id still parses"
   has "$(grep ' TICK level=' "$FSG_LOG" | tail -n 1)" "start_ms=0 eid= ev_s=" "no id, no rate"
 
+  t "tick keeps a per-day summary"
+  docker_default; install_fake --no-agent; mem 600M; day=$(date +%Y-%m-%d)
+  echo 5000000 > "$FSG_FAKE/probe-eid"; "$G" tick
+  has "$(cat "$FSG_STATE_DIR/daily")" "$day ticks=1 max_mb=600 max_cpu_pct=- heals=0 ev_s_p50=- ev_s_p95=-" "first tick: nothing to rate yet"
+  cpu_step 60; echo 5030000 > "$FSG_FAKE/probe-eid"; "$G" tick
+  cpu_step 10; echo 5090000 > "$FSG_FAKE/probe-eid"; mem 700M; "$G" tick
+  eq "$(wc -l < "$FSG_STATE_DIR/daily" | tr -d ' ')" 1 "one line per day, rewritten"
+  line=$(cat "$FSG_STATE_DIR/daily")
+  has "$line" "$day ticks=3 max_mb=700 max_cpu_pct=" "ticks and the largest footprint"
+  case $line in *"max_cpu_pct=59 "*|*"max_cpu_pct=60 "*) ok ;; *) bad "largest CPU share: $line" ;; esac
+  case $line in *"ev_s_p50=98 "*|*"ev_s_p50=99 "*|*"ev_s_p50=100 "*) ok ;; *) bad "median rate: $line" ;; esac
+  case $line in *"ev_s_p95=198"|*"ev_s_p95=199"|*"ev_s_p95=200") ok ;; *) bad "95th percentile rate: $line" ;; esac
+  mem 3G; "$G" tick >/dev/null 2>&1; eq $? 0 "an emergency heal"
+  has "$(cat "$FSG_STATE_DIR/daily")" "$day ticks=4 max_mb=3072" "the heal's tick"
+  has "$(cat "$FSG_STATE_DIR/daily")" " heals=1 " "the heal counted"
+  { echo "day 2000-01-01"; echo "tick 5 1 100"; } > "$FSG_STATE_DIR/day-samples"
+  printf '2000-01-01 ticks=1 max_mb=5 max_cpu_pct=1 heals=0 ev_s_p50=100 ev_s_p95=100\n%s\n' "$(cat "$FSG_STATE_DIR/daily")" > "$FSG_STATE_DIR/daily"
+  "$G" tick
+  eq "$(head -n 1 "$FSG_STATE_DIR/daily")" "2000-01-01 ticks=1 max_mb=5 max_cpu_pct=1 heals=0 ev_s_p50=100 ev_s_p95=100" "an earlier day stays"
+  has "$(tail -n 1 "$FSG_STATE_DIR/daily")" "$day ticks=1 " "a new day's samples start over"
+  eq "$(wc -l < "$FSG_STATE_DIR/daily" | tr -d ' ')" 2 "today's line replaced, not added"
+
   t "tick stall confirmation"
   docker_default; install_fake --no-agent
   printf 'stalled\nok\n' > "$FSG_FAKE/probe-seq"; "$G" tick; eq $? 0 "one slow probe is not a stall"
@@ -4309,6 +4331,7 @@ if ! skip_case uninstall; then
     echo "variant=B" > "$FSG_STATE_DIR/trials/20261023T000000-B-t1/summary.txt"
     echo "1 healed manual B 60" > "$FSG_STATE_DIR/last-heal"; echo "$FSG_STATE_DIR/heals/20261023T000000Z-1" > "$FSG_STATE_DIR/last-heal-dir"
     echo "FSG_WARN_MB=600" >> "$FSG_STATE_DIR/config"
+    echo "2026-10-23 ticks=288 max_mb=5 max_cpu_pct=1 heals=0 ev_s_p50=120 ev_s_p95=900" > "$FSG_STATE_DIR/daily"
   }
 
   t "uninstall --keep-logs keeps the logs and moves the records and the config out"
@@ -4317,7 +4340,7 @@ if ! skip_case uninstall; then
   R=$(ls -d "$C/home/Logs"/fseventsd-guard-records-* 2>/dev/null)
   [ -n "$R" ] && [ -d "$R" ] && ok || bad "a dated records dir next to the user log"
   exists "$R/heals/20261023T000000Z-1/result.txt" "heal record"; exists "$R/trials/20261023T000000-B-t1/summary.txt" "trial record"
-  exists "$R/last-heal" "last-heal"; exists "$R/last-heal-dir" "last-heal-dir"
+  exists "$R/last-heal" "last-heal"; exists "$R/last-heal-dir" "last-heal-dir"; exists "$R/daily" "the per-day summary"
   has "$(cat "$R/config" 2>/dev/null)" "FSG_WARN_MB=600" "the config"
   exists "$FSG_LOG" "user log"; exists "$FSG_AGENT_LOG" "agent log"; exists "$FSG_PREFIX/Library/Logs/fseventsd-guard" "root logs"
   absent "$FSG_STATE_DIR" "the rest of the state dir goes"

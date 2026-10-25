@@ -639,6 +639,7 @@ fsg_wait_healthy() { # old pid
 # returns that heal's result and record, fsg_req_join).
 fsg_heal_record() { # result wall_s
   echo "$(fsg_now) $1 $HEAL_TRIGGER $HEAL_VARIANT $2 ${HEAL_DIR:-}" > "$FSG_STATE_DIR/last-heal"
+  case $1 in healed|restored-partly) fsg_daily_add heal ;; esac
   [ -n "${HEAL_DIR:-}" ] && {
     echo "result=$1"
     echo "trigger=$HEAL_TRIGGER"
@@ -1335,6 +1336,7 @@ fsg_tick_check() {
   fsg_classify 0
   TICK_LEVEL=$S_LEVEL
   fsg_log "TICK level=$S_LEVEL pid=$M_PID mb=$M_MB cmprs_mb=${M_CMPRS_MB:-} ports=${M_PORTS:-} cpu=${M_CPU:-} cpu_avg_pct=${T_CPU_PCT:-} cpu_streak=$T_CPU_STREAK up_s=${M_UP:-} swap_used_mb=$(fsg_parse_swap_mb "$(sysctl -n vm.swapusage 2>/dev/null)") probe=${P_RESULT:-skipped}${P_LATENCY_MS:+/${P_LATENCY_MS}ms}${P_START_MS:+ start_ms=$P_START_MS} eid=$P_EID ev_s=$T_EV_S"
+  fsg_daily_add tick "$M_MB" "${T_CPU_PCT:--}" "${T_EV_S:--}"
   [ "$S_LEVEL" = ok ] && return 0
   [ -n "$C_STREAK" ] && fsg_log "TICK runaway by the cpu escalator: ${C_PCT}% of a core for $C_STREAK ticks at $M_MB MB"
 

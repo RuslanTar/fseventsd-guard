@@ -375,7 +375,9 @@ If the install created `/usr/local/libexec` and it is now empty,
 Logs: `~/Library/Logs/fseventsd-guard.log` (user side, one line per check),
 `/Library/Logs/fseventsd-guard/` (helper log and small evidence records),
 `~/Library/Application Support/fseventsd-guard/heals/` (per-heal records with
-phase timings; `docker-stop.txt` has variant B's stop and each poll).
+phase timings; `docker-stop.txt` has variant B's stop and each poll), and `daily`
+next to it (one line per day: checks, the largest footprint and CPU share, heals
+that restarted fseventsd, and the median and 95th percentile of the event rate).
 
 ## Everyday commands
 

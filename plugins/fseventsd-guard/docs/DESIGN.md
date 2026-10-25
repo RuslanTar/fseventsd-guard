@@ -924,7 +924,10 @@ physical footprint, the figure Apple's budget refers to), bounded by
 `TICK` log line also carries the compressed memory (`cmprs_mb`) and Mach ports
 (`ports`) from that sample and the swap in use (`swap_used_mb`, from `sysctl
 vm.swapusage`); they are logged only. Ports tell many live clients apart from
-internal state, and swap shows what the runaway costs the machine. CPU is
+internal state, and swap shows what the runaway costs the machine. The state dir's
+`daily` keeps one line per day (ticks, the largest footprint and CPU share, heals
+that restarted fseventsd, the event rate's median and 95th percentile), so the
+thresholds can be checked against weeks of data once the log has been trimmed. CPU is
 `ps -o %cpu`, a decayed average; one `top` sample cannot give CPU. The tick also
 logs `cpu_avg_pct`, the share of one core since the previous tick, and
 `cpu_streak` (§4). Uptime is `ps -o etime`. No root needed.
