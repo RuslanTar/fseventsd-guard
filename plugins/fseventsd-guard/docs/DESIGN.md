@@ -650,7 +650,7 @@ one was a trial's.
 | Variant | Before the restart | After the restart |
 |---|---|---|
 | A containers only | record running IDs; `docker stop -t 30` them | `docker start` the same IDs |
-| B quit Docker (default until the trials) | record IDs; `docker desktop stop` (wait for `stopped`) | `docker desktop start`; wait for the engine; start recorded IDs not already running |
+| B quit Docker (default until the trials) | record IDs; `docker desktop stop` (wait until it stopped, below) | `docker desktop start`; wait for the engine; start recorded IDs not already running |
 | C restart Docker after | nothing | `docker desktop restart`; wait for the engine; start recorded IDs not running |
 | none | nothing | nothing (the naive restart; trial step 0) |
 
@@ -659,6 +659,18 @@ one was a trial's.
   Docker first is the variant most likely to avoid both, because no file-sharing
   process holds FSEvents streams across the restart. Change `FSG_DOCKER_VARIANT`
   after the trials.
+- **B's stop check.** Docker Desktop counts as stopped when no Desktop process runs
+  and its backend socket (`~/Library/Containers/com.docker.docker/Data/backend.sock`)
+  and user socket are gone, or when `docker desktop status` says `stopped`. Once
+  Desktop has quit, status fails only after ~16 s (it dials the missing backend
+  socket), so processes and sockets are polled every second and status, bounded to
+  3 s, only when they do not decide. The wait is `FSG_DESKTOP_STOP_WAIT_S` (60 s)
+  counted from the stop call, which itself takes 13-18 s. The stop's exit code and
+  time, every poll and the decision go to the heal record (`docker-stop.txt`,
+  `docker_stop=` in `result.txt`). A backend that appears with a new pid during the
+  heal was started by something else (another session's `open -a Docker`): the
+  guard says so in the record and the notice instead of reporting a failed stop,
+  does not stop it again, and restores as usual.
 - `--rm` containers (`HostConfig.AutoRemove`) are recorded but left out of the
   restore set: Docker deletes them when they stop, so `docker start` would fail and
   every such heal would end in exit 8. The drain waits for them first, like other
@@ -796,8 +808,16 @@ one was a trial's.
 - **Verify:** every recorded container running, and healthy when it has a health
   check. Then a bind-mount round trip: the host writes a nonce, a throwaway
   container (`--pull never --network none`, a local alpine/busybox/bash image, else a
-  recorded container's image) reads it and writes a reply, and the host reads the
-  reply. Watching inside a container is checked by hand in the trials (no stock
+  recorded container's image) reads it and writes a reply into the same file
+  (`fsg-probe.txt`), and the host reads the reply and removes the file. The probe
+  dir must be in Docker Desktop's File Sharing list (`FilesharingDirectories` in
+  its `settings-store.json`, read only; absent = default sharing, which covers
+  `/Users`): the state dir's `mountprobe` when shared, else a dir in the first
+  shared folder under your home, or `FSG_PROBE_DIR`. A `docker run` that fails with
+  "Mounts denied" / "not shared" marks the check **skipped**, not failed, and the
+  notice says so: an unshared probe dir is a setup issue, not a broken Docker, and
+  must not hold runs or refuse heals. Doctor warns when the probe dir is not
+  shared. Watching inside a container is checked by hand in the trials (no stock
   image ships inotify tools).
 - If the engine is wedged and `docker ps` cannot list the containers, the restore set
   is empty. B and C still restart Docker Desktop, and containers with an

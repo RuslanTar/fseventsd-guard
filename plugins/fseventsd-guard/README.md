@@ -102,6 +102,15 @@ Your machine is never idle, so a heal cannot wait for a free moment. Instead:
    container runs by then, or when the listing fails while Docker still answers
    `docker info`.
 
+Variant B counts Docker Desktop as stopped once its processes and sockets are gone
+(or its status says `stopped`), within `FSG_DESKTOP_STOP_WAIT_S` of the stop. If
+something else starts Docker Desktop during the heal (another session's
+`open -a Docker`), the notice and the heal record say so; the guard leaves it
+running and restores as usual. The bind-mount check needs its probe dir in Docker
+Desktop's File Sharing list: the guard picks one there (or set `FSG_PROBE_DIR`),
+and a probe Docker refuses ("Mounts denied") is reported as skipped, not as a
+broken Docker. `doctor` warns when the probe dir is not shared.
+
 The `healing` notification and `status` name what the drain waits for (command,
 pid, age). At a cap a manual or wave-boundary heal gives up and tells you what was
 still running. An emergency heal goes ahead, because by then file watching is
@@ -362,7 +371,7 @@ If the install created `/usr/local/libexec` and it is now empty,
 Logs: `~/Library/Logs/fseventsd-guard.log` (user side, one line per check),
 `/Library/Logs/fseventsd-guard/` (helper log and small evidence records),
 `~/Library/Application Support/fseventsd-guard/heals/` (per-heal records with
-phase timings).
+phase timings; `docker-stop.txt` has variant B's stop and each poll).
 
 ## Everyday commands
 
@@ -447,6 +456,9 @@ None of them lets a non-root user gain root.
   empty stamp. The root-owned directory keeps users out otherwise. Fix later: write
   a temp file and `mv` it, refuse on failure, and treat an unreadable stamp as
   "restarted now".
+- **Stale Docker Desktop sockets.** A Docker Desktop that crashed and left its
+  socket files behind is seen as stopped only through its status; otherwise B's
+  stop wait runs out (logged; the heal goes on). Accepted.
 - **PID reuse between the re-check and the kill.** Tens of milliseconds; macOS
   hands out pids in sequence, so reuse there is not practical, and a respawn in
   that window makes `kill` fail with ESRCH (exit 71). Accepted.

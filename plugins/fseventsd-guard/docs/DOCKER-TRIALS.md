@@ -65,7 +65,7 @@ Every trial writes a folder under
 |---|---|
 | `before.txt` / `after.txt` | `docker desktop status`, `docker ps -a`, Docker processes with their uptimes, fseventsd status with a probe (`after.txt` adds `docker info`) |
 | `heal.out` | the heal's own output: drain progress, result line |
-| `result.txt` | phase timings (`drain_s`, `docker_before_s`, `restart_s`, `healthy_s`, `docker_after_s`, `containers_s`, `verify_s`, `heal_s_after_drain`), helper exit code, containers not back, bind-mount result |
+| `result.txt` | phase timings (`drain_s`, `docker_before_s`, `restart_s`, `healthy_s`, `docker_after_s`, `containers_s`, `verify_s`, `heal_s_after_drain`), helper exit code, containers not back, bind-mount result, B's stop (`docker_stop=`: exit code, time, decision) and `docker_started_by_other=` when something else started Docker Desktop during the heal |
 | `desktop-logs-warn.txt` | `docker desktop logs` at warning level and above since the trial started |
 | `summary.txt` | the variant, the heal exit code and `result.txt` |
 
@@ -83,7 +83,9 @@ usual way. Then record:
    Compare the `com.docker.backend` uptime in `before.txt` and `after.txt`.
 2. Which part failed:
    - **The VM / engine**: `docker info` errors in `after.txt`.
-   - **File sharing / bind mounts**: `bind_mount=failed` in `result.txt`. Or check by
+   - **File sharing / bind mounts**: `bind_mount=failed` in `result.txt`
+     (`bind_mount=skipped ... not shared` means the probe dir is not in Docker
+     Desktop's File Sharing list: set `FSG_PROBE_DIR`, see `doctor`). Or check by
      hand: `docker run --rm -v "$PWD:/w" alpine:3 ls /w` (use any local image that
      has `/bin/sh`).
    - **Containers**: `containers_failed=` in `result.txt`, `docker ps -a`.
