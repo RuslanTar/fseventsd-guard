@@ -35,7 +35,8 @@ fsg_helper_meaning() {
     69) echo "the helper found no genuine fseventsd" ;;
     70) echo "the helper could not measure fseventsd" ;;
     71) echo "kill -TERM failed" ;;
-    72) echo "SIGTERM sent but launchd did not respawn fseventsd within 15 s" ;;
+    72) echo "restarted, but fseventsd ignored SIGTERM for 10 s and needed SIGKILL" ;;
+    73) echo "the helper signalled fseventsd but saw no new one (launchd did not respawn it while it waited)" ;;
     124) echo "the helper did not finish within FSG_HELPER_TIMEOUT_S" ;;
     75) echo "another restart was in progress" ;;
     77) echo "the helper did not run as root" ;;
@@ -881,9 +882,7 @@ fsg__heal_refuse() { # result t0 subtitle body what
 # Logs the root helper's outcome (HELPER_RC) and stamps a restart it made.
 fsg__heal_helper_done() {
   fsg_log "HEAL helper rc=$HELPER_RC ($(fsg_helper_meaning "$HELPER_RC")) $(tr '\n' ' ' < "$HEAL_DIR/helper.out" 2>/dev/null | cut -c1-200)"
-  if [ "$HELPER_RC" -eq 0 ] || [ "$HELPER_RC" -eq 72 ]; then
-    fsg_now > "$FSG_STATE_DIR/last-restart"
-  fi
+  case $HELPER_RC in 0|72|73) fsg_now > "$FSG_STATE_DIR/last-restart" ;; esac
 }
 
 # The part of a heal past the precheck: drain, Docker before-step, restart, Docker
@@ -1015,17 +1014,19 @@ fsg_heal_run() { # t0 old_pid cap policy
   T_RESTART=$(( $(fsg_now) - ts ))
   fsg__heal_helper_done
 
-  # 72: SIGTERM went out but the helper saw no respawn within its 15 s. launchd may
-  # still respawn it, so wait for a new daemon before Docker is brought back.
+  # 72: restarted with SIGKILL after SIGTERM was ignored. 73: the signal went out
+  # but the helper saw no respawn while it waited. launchd may still respawn it, so
+  # wait for a new daemon before Docker is brought back.
   local healthy=0 restarted=0
-  if [ $HELPER_RC -eq 0 ] || [ $HELPER_RC -eq 72 ]; then
-    ts=$(fsg_now)
-    fsg_drain_phase waiting-healthy
-    fsg_wait_healthy "$old_pid" && healthy=1
-    T_HEALTHY=$(( $(fsg_now) - ts ))
-  fi
-  [ $HELPER_RC -eq 0 ] && restarted=1
-  if [ $HELPER_RC -eq 72 ] && [ $healthy = 1 ]; then
+  case $HELPER_RC in
+    0|72|73)
+      ts=$(fsg_now)
+      fsg_drain_phase waiting-healthy
+      fsg_wait_healthy "$old_pid" && healthy=1
+      T_HEALTHY=$(( $(fsg_now) - ts )) ;;
+  esac
+  case $HELPER_RC in 0|72) restarted=1 ;; esac
+  if [ $HELPER_RC -eq 73 ] && [ $healthy = 1 ]; then
     restarted=1
     fsg_log "HEAL fseventsd respawned after the helper stopped waiting (pid $M_PID)"
   fi
@@ -1071,6 +1072,7 @@ fsg_heal_run() { # t0 old_pid cap policy
   local dk_note="" nr_note="${DK_EPHEMERAL:+ Not restored (--rm, removed when stopped): $DK_EPHEMERAL.}"
   nr_note="$nr_note${DK_ONEOFF:+ Not restored (one-off, docker compose run: a start would run its command again): $DK_ONEOFF.}${DK_NOTE:+ $DK_NOTE.}"
   nr_note="$nr_note${DK_FOREIGN:+ Note: $DK_FOREIGN.}${BM_NOTE:+ $BM_NOTE}"
+  [ "$HELPER_RC" = 72 ] && nr_note="$nr_note Note: fseventsd ignored SIGTERM for 10 s; the helper restarted it with SIGKILL."
   # A Docker that is not local was never touched nor checked: a hold in place
   # before the heal comes back.
   [ "$DK_STATE" = notlocal ] && dk_note=" Docker step skipped: not a local Docker engine ($DK_EP_WHY); no container was stopped, started or checked."

@@ -46,7 +46,7 @@ you at each step.
 | `fseventsd-guard status [--json] [--probe]` | you | Footprint vs the 30 MB budget, CPU, uptime, optional delivery probe. Exit 0 ok, 1 warn, 2 runaway, 3 cannot measure. |
 | `fseventsd-guard heal [--dry-run]` | you | Asks the agent to heal and waits for its result, showing its progress: drains running test runs, runs the Docker step, restarts fseventsd through the root helper, restores Docker and its containers, checks a bind mount round trip, notifies, logs. Stopping the command (Ctrl-C, a timeout) only stops the wait. |
 | `fseventsd-guard run -- CMD` | you | Runs a Docker-dependent command under a lease, so a heal waits for it and it waits for a heal. |
-| root helper `/usr/local/libexec/fseventsd-guard-restart` | root, via one sudoers rule, no arguments | Re-checks for itself that the target is the real fseventsd, that it is over the floor and not rate limited, saves a small evidence record, then sends SIGTERM. launchd respawns the daemon at once. |
+| root helper `/usr/local/libexec/fseventsd-guard-restart` | root, via one sudoers rule, no arguments | Re-checks for itself that the target is the real fseventsd, that it is over the floor and not rate limited, saves a small evidence record, then sends SIGTERM (SIGKILL if the same daemon still runs 10 s later). launchd respawns the daemon at once. |
 | launchd agent `io.github.ruslantar.fseventsd-guard` | you | The only process that heals. Every 5 minutes, and at once when `heal` or `trial` asks: runs the queued heal requests in order; warns at 500 MB (notification only); at 2 GB, a stalled probe, or 500 MB with fseventsd using half a core or more for 3 checks in a row, an emergency heal at most once per 3 hours. |
 | `install` / `uninstall` / `doctor` | you, one sudo prompt | Sets everything up, removes every trace, checks every piece. |
 | `claude-hook prompt\|bash` (run by the Claude Code plugin's `hooks/fseventsd-guard-hook.sh`) | you, from Claude Code, macOS only | Not installed: suggests installing, with fseventsd's footprint. Installed: tells Claude sessions when a heal stops Docker ("Claude Code hooks" below). |
@@ -534,7 +534,7 @@ None of them lets a non-root user gain root.
   `docker info` and container listing (up to 100 s) variant C runs before its
   restart.
 - **Smaller inaccuracies.** `heal --dry-run` exits 0 when it cannot measure (a real
-  heal exits 3). After helper exit 72 (SIGTERM sent, no respawn seen) the suggested
+  heal exits 3). After helper exit 73 (signal sent, no respawn seen) the suggested
   manual fix `sudo kill -TERM $(pgrep -x fseventsd)` finds no process.
 - **Open minor items (review of 2026-10-20).** Not fixed on purpose:
   - Helper refusals are not predicted by the precheck: it lacks the helper's comm and
@@ -699,7 +699,7 @@ None of them lets a non-root user gain root.
   after a signal to the agent (it waits for the Docker Desktop stop or root helper
   call the signal cut into), an agent killed outright or during that restore (the
   next tick recovers its Docker intent), a Docker Desktop that runs but does not answer,
-  helper exit 72 with a late respawn, leases and drains across TZ/locale, a helper that
+  helper exit 73 with a late respawn, helper exit 72 (SIGKILL needed), leases and drains across TZ/locale, a helper that
   keeps failing under the agent, drain-marker write failure and a slow restore,
   reinstall then uninstall, `--rm` and one-off containers, install during a heal, planted temp
   names and pre-existing unsafe dirs (test mode), the simulated-root refusals, tools

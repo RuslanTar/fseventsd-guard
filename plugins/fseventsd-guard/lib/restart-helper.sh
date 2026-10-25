@@ -21,12 +21,14 @@
 # is ignored.
 # Every refusal and every restart is logged to $EVIDENCE_DIR/helper.log; before a
 # restart it writes a small evidence record next to it. launchd respawns fseventsd
-# at once after SIGTERM (`launchctl kickstart -k` is refused by SIP).
+# at once after SIGTERM (`launchctl kickstart -k` is refused by SIP). A daemon that
+# is still the same genuine process 10 s after SIGTERM gets SIGKILL.
 #
 # Exit codes: 0 restarted (a new fseventsd pid appeared)
 #   64 arguments given        65 footprint below the floor   66 rate limited
 #   69 no genuine fseventsd   70 cannot measure              71 kill failed
-#   72 no respawn seen        75 another restart running     77 not root
+#   72 restarted, but only after SIGKILL                     73 no respawn seen
+#   75 another restart running                               77 not root
 
 # @@SETTINGS-BEGIN@@ (install rewrites these lines; do not edit the installed copy)
 EVIDENCE_DIR=/Library/Logs/fseventsd-guard
@@ -47,7 +49,11 @@ umask 022
 ARGC=$#
 
 FSEVENTSD=/System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/FSEvents.framework/Versions/A/Support/fseventsd
+# After SIGTERM: a daemon still running after TERM_WAIT_S gets SIGKILL; launchd
+# respawns within RESPAWN_WAIT_S of a TERM, and may throttle the respawn after a KILL.
+TERM_WAIT_S=10
 RESPAWN_WAIT_S=15
+KILL_WAIT_S=30
 KEEP_RECORDS=20
 # Wall-time bounds on top and on the scan of the history directory.
 TOP_LIMIT_S=15
@@ -235,14 +241,28 @@ echo "$NOW" > "$STAMP"; chmod 0644 "$STAMP" 2>/dev/null
 log "RESTARTING pid=$PID footprint_mb=$MB mode=$MODE evidence=$REC"
 "$KILL" -TERM "$PID" || refuse 71 "kill -TERM $PID failed"
 
-i=0
-NEW=
-while [ $i -lt "$RESPAWN_WAIT_S" ]; do
-  "$SLEEP" 1; i=$((i + 1))
-  NEW=$(genuine_pid) || NEW=
-  if [ -n "$NEW" ] && [ "$NEW" != "$PID" ]; then break; fi
-  NEW=
-done
+# wait_new SECONDS: sets NEW to a new genuine fseventsd. 0 found; 1 the old pid is
+# still the genuine daemon at the end; 2 none runs.
+wait_new() {
+  w=0; NEW=
+  while [ $w -lt "$1" ]; do
+    "$SLEEP" 1; w=$((w + 1))
+    NEW=$(genuine_pid) || NEW=
+    if [ -n "$NEW" ] && [ "$NEW" != "$PID" ]; then return 0; fi
+  done
+  [ "$NEW" = "$PID" ] && { NEW=; return 1; }
+  NEW=; return 2
+}
+
+KILLED=0
+wait_new "$TERM_WAIT_S"; W=$?
+[ $W -eq 2 ] && { wait_new $((RESPAWN_WAIT_S - TERM_WAIT_S)); W=$?; }
+if [ $W -eq 1 ]; then
+  log "KILL pid=$PID still running ${TERM_WAIT_S}s after SIGTERM"
+  "$KILL" -KILL "$PID" || log "NOTE kill -KILL $PID failed"
+  KILLED=1
+  wait_new "$KILL_WAIT_S"; W=$?
+fi
 
 # Housekeeping: keep the newest records and a bounded log. The helper names the
 # records itself (restart-<UTC stamp>.txt), so ls | grep is safe and orders by age.
@@ -253,11 +273,14 @@ if [ "$(wc -l < "$LOG" | tr -d ' ')" -gt 2000 ]; then
   tail -n 1000 "$LOG" > "$LOG.tmp" && mv -f "$LOG.tmp" "$LOG"
 fi
 
+SIG=TERM; [ $KILLED = 1 ] && SIG=KILL
 if [ -z "$NEW" ]; then
-  log "NO-RESPAWN old=$PID waited_s=$RESPAWN_WAIT_S"
-  echo "fseventsd-guard-restart: sent SIGTERM to $PID but saw no new fseventsd within $RESPAWN_WAIT_S s" >&2
-  exit 72
+  if [ $W -eq 1 ]; then WHY="pid $PID still runs after SIGKILL"; else WHY="no new fseventsd appeared"; fi
+  log "NO-RESPAWN old=$PID signal=$SIG ($WHY)"
+  echo "fseventsd-guard-restart: sent SIG$SIG to $PID, but $WHY" >&2
+  exit 73
 fi
-log "RESTARTED old=$PID new=$NEW footprint_mb_before=$MB mode=$MODE"
-echo "restarted old=$PID new=$NEW footprint_mb_before=$MB mode=$MODE evidence=$REC"
+log "RESTARTED old=$PID new=$NEW footprint_mb_before=$MB mode=$MODE signal=$SIG"
+echo "restarted old=$PID new=$NEW footprint_mb_before=$MB mode=$MODE signal=$SIG evidence=$REC"
+[ $KILLED = 1 ] && exit 72
 exit 0

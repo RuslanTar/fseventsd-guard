@@ -430,10 +430,16 @@ phase=docker-before (docker-intent written; cannot ──▶ 10, nothing stopped
 
 Held runs are released only onto a **verified** Docker: the engine answers, every
 recorded container runs (healthy when it has a check) and the bind-mount round trip
-works. That holds on every path: a restart, a failed restart, helper exit 72, and a
+works. That holds on every path: a restart, a failed restart, helper exit 73, and a
 heal stopped part way. Running the after-step is not enough.
 
-On helper exit 72 (SIGTERM sent, no new daemon within its 15 s) the heal keeps
+The helper sends SIGKILL when the same genuine daemon still runs 10 s after
+SIGTERM (identity checked again first), then waits up to 30 s, as launchd may
+throttle the respawn after a KILL. A restart that needed it exits 72: the heal goes
+on as after exit 0, and logs, records and notifies that SIGKILL was needed. Not seen
+yet: on the reports so far SIGTERM was enough.
+
+On helper exit 73 (signal sent, no new daemon within its wait) the heal keeps
 waiting for a new, healthy fseventsd (`FSG_HEALTHY_TIMEOUT_S`) before the Docker
 after-step. If one appears, the heal goes on as after a restart and can end healed;
 if not, it ends as a failed restart (exit 7), with Docker verified or runs held.
@@ -844,7 +850,7 @@ one was a trial's.
 | `run` | the command's own code; 75 when it gave up waiting for a drain |
 | `release` | 0 released or nothing held; 1 a running heal holds the drain (it releases it itself) |
 | `doctor` | 0 all ok, 1 warnings, 2 failures; `--affected`: 0 affected, 1 not affected, 3 unknown |
-| helper | 0 restarted, 64 arguments, 65 below the floor, 66 rate limited, 69 no genuine fseventsd, 70 cannot measure, 71 kill failed, 72 no respawn, 75 another restart running, 77 not root |
+| helper | 0 restarted, 64 arguments, 65 below the floor, 66 rate limited, 69 no genuine fseventsd, 70 cannot measure, 71 kill failed, 72 restarted but only after SIGKILL (SIGTERM ignored for 10 s), 73 no respawn, 75 another restart running, 77 not root |
 
 The heal codes that callers handle (`WORKFLOW-INTEGRATION.md` §1, `DOCKER-TRIALS.md`)
 keep their meaning now that the agent runs the heal:

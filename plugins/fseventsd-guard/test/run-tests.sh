@@ -407,8 +407,18 @@ if ! skip_case helper; then
   mem 3G; /bin/sh "$H" 2>/dev/null; eq $? 66 "rate limited"
   n=$(grep -c REFUSED "$EV/helper.log"); [ "$n" -ge 10 ] && ok || bad "every refusal logged ($n)"
   has "$(cat "$EV/helper.log")" "REFUSED code=64" "argument refusal logged"
-  rm -f "$EV/last-restart"; touch "$FSG_FAKE/no-respawn"; /bin/sh "$H" 2>/dev/null; eq $? 72 "no respawn"
+  rm -f "$EV/last-restart"; touch "$FSG_FAKE/no-respawn"; /bin/sh "$H" 2> "$C/err"; eq $? 73 "no respawn"
+  has "$(cat "$C/err")" "sent SIGTERM to 4243, but no new fseventsd appeared" "says so"
   rm -f "$FSG_FAKE/no-respawn"; echo 4242 > "$FSG_FAKE/fsev/pids"; mem 3G; rm -f "$EV/last-restart"
+  touch "$FSG_FAKE/ignore-term"; : > "$FSG_FAKE/calls.log"
+  out=$(/bin/sh "$H"); eq $? 72 "SIGTERM ignored: restarted with SIGKILL"
+  has "$out" "restarted old=4242 new=4243" "new pid"; has "$out" "signal=KILL" "output names the signal"
+  before "$FSG_FAKE/calls.log" "kill -TERM 4242" "kill -KILL 4242"
+  has "$(cat "$EV/helper.log")" "KILL pid=4242 still running 10s after SIGTERM" "logged"
+  echo 4242 > "$FSG_FAKE/fsev/pids"; mem 3G; rm -f "$EV/last-restart"; touch "$FSG_FAKE/no-respawn"
+  /bin/sh "$H" 2> "$C/err"; eq $? 73 "SIGKILL and no respawn"
+  has "$(cat "$C/err")" "sent SIGKILL to 4242, but no new fseventsd appeared" "says so"
+  rm -f "$FSG_FAKE/ignore-term" "$FSG_FAKE/no-respawn"; echo 4242 > "$FSG_FAKE/fsev/pids"; mem 3G; rm -f "$EV/last-restart"
   touch "$FSG_FAKE/kill-fail"; /bin/sh "$H" 2>/dev/null; eq $? 71 "kill failed"; rm -f "$FSG_FAKE/kill-fail"
 
   t "helper bounds top, find and du"
@@ -3667,11 +3677,11 @@ if ! skip_case docker-endpoint; then
   done
 fi
 
-# ======================================================================== helper-72
-if ! skip_case helper-72; then
-  t "helper exit 72: the heal waits for the respawn, then restores and verifies Docker"
+# ======================================================================== helper-73
+if ! skip_case helper-73; then
+  t "helper exit 73: the heal waits for the respawn, then restores and verifies Docker"
   docker_default; install_fake; mem 3G
-  echo 72 > "$FSG_FAKE/sudo-rc"
+  echo 73 > "$FSG_FAKE/sudo-rc"
   respawn_late() {
     waitfor 30 grep -q "sudo -n $FSG_PREFIX" "$FSG_FAKE/calls.log" || return 1
     sleep 2; echo 3000K > "$FSG_FAKE/fsev/4343.mem"; echo 4343 > "$FSG_FAKE/fsev/pids"
@@ -3682,13 +3692,21 @@ if ! skip_case helper-72; then
   has "$(cat "$FSG_FAKE/calls.log")" "docker run --rm" "bind mount checked"
   absent "$FSG_STATE_DIR/drain/pending" "released"
 
-  t "helper exit 72 with a broken bind mount keeps runs held"
+  t "helper exit 73 with a broken bind mount keeps runs held"
   docker_default; install_fake; mem 3G
-  echo 72 > "$FSG_FAKE/sudo-rc"; touch "$FSG_FAKE/docker/bind-broken"
+  echo 73 > "$FSG_FAKE/sudo-rc"; touch "$FSG_FAKE/docker/bind-broken"
   heal --docker-variant B > "$C/o" 2>&1; eq $? 7 "no respawn: restart failed"
   has "$(cat "$FSG_FAKE/calls.log")" "docker run --rm" "bind mount checked"
   FSG_RUN_MAX_WAIT_S=1 "$G" run -- true 2>/dev/null; eq $? 75 "new runs held"
   has "$(cat "$FSG_FAKE/notifications.log")" "fseventsd-guard release" "the notification says how to release"
+
+  t "helper exit 72: fseventsd needed SIGKILL; the heal reports it"
+  docker_default; install_fake; mem 3G; touch "$FSG_FAKE/ignore-term"
+  heal --docker-variant B > "$C/o" 2>&1; eq $? 0 "healed ($(tail -n 1 "$C/o"))"
+  has "$(cat "$FSG_LOG")" "HEAL helper rc=72 (restarted, but fseventsd ignored SIGTERM for 10 s and needed SIGKILL)" "logged"
+  has "$(grep healed "$FSG_FAKE/notifications.log")" "the helper restarted it with SIGKILL" "the notice says so"
+  has "$(cat "$(sed -n 's/.* //p' "$FSG_STATE_DIR/last-heal")/result.txt")" "helper_rc=72" "recorded"
+  exists "$FSG_STATE_DIR/last-restart" "counts as a restart"
 fi
 
 # ======================================================================== tick
