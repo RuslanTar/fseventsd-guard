@@ -4,9 +4,13 @@
 //
 // Watches <dir> with an FSEvents stream, writes one uniquely named file into it and
 // times how long the event for that file takes to arrive.
-//   exit 0, prints "result=ok latency_ms=N"     the event arrived
-//   exit 2, prints "result=stalled timeout_s=N" no event within the timeout
-//   exit 3, prints "result=error ..."           the probe itself could not run
+//   exit 0, prints "result=ok latency_ms=N start_ms=S eid=E"     the event arrived
+//   exit 2, prints "result=stalled timeout_s=N start_ms=S eid=E" no event within the timeout
+//   exit 3, prints "result=error ..."                            the probe itself could not run
+// start_ms is how long FSEventStreamStart took (a healthy daemon: 0-1 ms); eid is
+// FSEventsGetCurrentEventId() right after it, so callers can rate events between
+// probes. A stalled line has neither when the start itself had not returned by the
+// timeout.
 //
 // A watchdog on a separate queue enforces the timeout even if the FSEvents calls
 // block inside a wedged daemon. Built by `fseventsd-guard install` with swiftc.
@@ -34,9 +38,13 @@ let target = dir + "/" + name
 
 func cleanup() { try? fm.removeItem(atPath: target) }
 
+var startMs: Int? = nil
+var eventId: UInt64? = nil
+func startField() -> String { (startMs.map { " start_ms=\($0)" } ?? "") + (eventId.map { " eid=\($0)" } ?? "") }
+
 DispatchQueue.global().asyncAfter(deadline: .now() + timeout) {
     cleanup()
-    print(String(format: "result=stalled timeout_s=%.0f", timeout))
+    print(String(format: "result=stalled timeout_s=%.0f", timeout) + startField())
     exit(2)
 }
 
@@ -46,7 +54,7 @@ let callback: FSEventStreamCallback = { _, _, count, paths, _, _ in
     for i in 0..<min(count, list.count) where list[i] == target || list[i].hasSuffix("/" + name) {
         let ms = Int((Date().timeIntervalSince(written ?? Date())) * 1000)
         cleanup()
-        print("result=ok latency_ms=\(ms)")
+        print("result=ok latency_ms=\(ms)" + startField())
         exit(0)
     }
 }
@@ -59,10 +67,14 @@ guard let stream = FSEventStreamCreate(nil, callback, nil, [dir] as CFArray,
 }
 let queue = DispatchQueue(label: "fsprobe.events")
 FSEventStreamSetDispatchQueue(stream, queue)
-guard FSEventStreamStart(stream) else {
+let startBegan = DispatchTime.now().uptimeNanoseconds
+let started = FSEventStreamStart(stream)
+startMs = Int((DispatchTime.now().uptimeNanoseconds - startBegan) / 1_000_000)
+guard started else {
     print("result=error FSEventStreamStart failed")
     exit(3)
 }
+eventId = FSEventsGetCurrentEventId()
 // Give the stream a moment to attach before the write.
 DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
     queue.sync { written = Date() }

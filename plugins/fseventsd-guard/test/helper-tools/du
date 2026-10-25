@@ -1,0 +1,5 @@
+#!/bin/bash
+# Test stand-in for /usr/bin/du inside the root helper: the real one, after
+# $FSG_FAKE/du-delay seconds when that file exists.
+[ -f "$FSG_FAKE/du-delay" ] && /bin/sleep "$(cat "$FSG_FAKE/du-delay")"
+exec /usr/bin/du "$@"

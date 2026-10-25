@@ -22,7 +22,7 @@
 #     did not list its containers, so none could be checked (nothing was stopped)
 # 130 the agent was stopped during the heal                          64 usage
 
-FSG_COSTS="Restart costs: every FSEvents client rescans (Spotlight, IDEs, Docker file sharing, file watchers); Time Machine may run a longer backup next time."
+FSG_COSTS="Restart costs: every FSEvents client rescans (Spotlight, IDEs, Docker file sharing, file watchers); Time Machine may run a longer backup next time. If a session stops seeing file changes after the heal, restart it."
 FSG_MANUAL_FIX='sudo kill -TERM $(pgrep -x fseventsd)'
 
 fsg_helper_meaning() {
@@ -35,7 +35,8 @@ fsg_helper_meaning() {
     69) echo "the helper found no genuine fseventsd" ;;
     70) echo "the helper could not measure fseventsd" ;;
     71) echo "kill -TERM failed" ;;
-    72) echo "SIGTERM sent but launchd did not respawn fseventsd within 15 s" ;;
+    72) echo "restarted, but fseventsd ignored SIGTERM for 10 s and needed SIGKILL" ;;
+    73) echo "the helper signalled fseventsd but saw no new one (launchd did not respawn it while it waited)" ;;
     124) echo "the helper did not finish within FSG_HELPER_TIMEOUT_S" ;;
     75) echo "another restart was in progress" ;;
     77) echo "the helper did not run as root" ;;
@@ -185,6 +186,8 @@ fsg_intent_write() {
     echo "endpoint=$DK_ENDPOINT"
     echo "restore_ids=$DK_IDS"
     echo "restore_names=$DK_NAMES"
+    # Each one's health before the heal (fsg_docker_wait_containers).
+    echo "restore_health=$DK_HEALTH"
     echo "heal_dir=${HEAL_DIR:-}"
     echo "action_ran=0"
     echo "action_epoch="
@@ -246,11 +249,13 @@ fsg__container_exists() { [ "$(fsg__container_state "$1")" != gone ]; }
 
 # The intent's restore set as targets: each container by its recorded name (compose
 # recreates one under the same name with a new id), by id when no name was recorded
-# or only the id still exists. Sets DK_IDS (the targets) and DK_NAMES, in the
-# intent's order. Unless OFFLINE, the engine is asked which name or id exists.
+# or only the id still exists. Sets DK_IDS (the targets), DK_NAMES and DK_HEALTH, in
+# the intent's order. Unless OFFLINE, the engine is asked which name or id exists.
 fsg__recover_targets() { # [offline]
   local f=$FSG_DOCKER_INTENT ids names id name t up=0
   ids=$(fsg__kv "$f" restore_ids); names=$(fsg__kv "$f" restore_names)
+  # An intent of an older guard has none: each container then needs to be healthy.
+  DK_HEALTH=$(fsg__kv "$f" restore_health)
   [ -z "${1:-}" ] && ! fsg_docker_off && fsg_docker_answers && up=1
   DK_IDS=; DK_NAMES=
   # shellcheck disable=SC2086
@@ -267,9 +272,9 @@ fsg__recover_targets() { # [offline]
 }
 
 # 0 when a container that is not back counts as a failed pass: the engine says it
-# does not exist, or that it is not running. One that runs but is not healthy yet
-# (postgres after a Docker Desktop restart) and a query that timed out or did not
-# reach the engine do not count.
+# does not exist, or that it is not running. One that was healthy before the heal
+# and runs but is not healthy yet (postgres after a Docker Desktop restart) and a
+# query that timed out or did not reach the engine do not count.
 fsg__container_failed() { # target
   local st
   st=$(fsg__container_state "$1")
@@ -282,13 +287,13 @@ fsg__container_failed() { # target
 # seconds apart. At 2 failures it leaves the set, so one bad container cannot hold
 # runs until the intent expires. The intent keeps name:count:epoch per container.
 # DK_IDS and DK_NAMES are the targets (fsg__recover_targets, or the heal's own
-# record). Sets RC_DROPPED and RC_FAILING (names), and keeps DK_IDS/DK_NAMES to
-# what is left.
+# record). Sets RC_DROPPED and RC_FAILING (names), and keeps DK_IDS/DK_NAMES/
+# DK_HEALTH to what is left.
 fsg__recover_count() { # failed-targets
-  local f=$FSG_DOCKER_INTENT prev fails="" n e i id name now keep_ids="" keep_names="" keep_t="" keep_n=""
-  local -a I N T
+  local f=$FSG_DOCKER_INTENT prev fails="" n e i id name now keep_ids="" keep_names="" keep_t="" keep_n="" keep_h=""
+  local -a I N T H
   # shellcheck disable=SC2206
-  I=($(fsg__kv "$f" restore_ids)); N=($(fsg__kv "$f" restore_names)); T=($DK_IDS)
+  I=($(fsg__kv "$f" restore_ids)); N=($(fsg__kv "$f" restore_names)); T=($DK_IDS); H=($(fsg__kv "$f" restore_health))
   prev=" $(fsg__kv "$f" fails) "
   now=$(fsg_now)
   RC_DROPPED=; RC_FAILING=
@@ -313,13 +318,14 @@ fsg__recover_count() { # failed-targets
     esac
     keep_ids="${keep_ids:+$keep_ids }$id"; keep_names="${keep_names:+$keep_names }$name"
     keep_t="${keep_t:+$keep_t }${T[$i]:-$id}"; keep_n="${keep_n:+$keep_n }$name"
+    keep_h="${keep_h:+$keep_h }${H[$i]:--}"
     i=$((i + 1))
   done
   fsg_intent_set fails "$fails"
   [ -n "$RC_FAILING" ] && fsg_log "RECOVER containers not back: $RC_FAILING (now ${fails:-no failed passes}; gone or not running counts one per $(fsg_dur "$FSG_AGENT_INTERVAL_S"), dropped at the second)"
   [ -n "$RC_DROPPED" ] || return 0
-  fsg_intent_set restore_ids "$keep_ids"; fsg_intent_set restore_names "$keep_names"
-  DK_IDS=$keep_t; DK_NAMES=$keep_n
+  fsg_intent_set restore_ids "$keep_ids"; fsg_intent_set restore_names "$keep_names"; fsg_intent_set restore_health "$keep_h"
+  DK_IDS=$keep_t; DK_NAMES=$keep_n; DK_HEALTH=$keep_h
   fsg_log "RECOVER dropped from the restore set after 2 failed passes (left as they are): $RC_DROPPED"
 }
 
@@ -338,8 +344,8 @@ fsg_intent_recover() {
   local f=$FSG_DOCKER_INTENT rc
   [ -f "$f" ] || return 0
   fsg_intent_owner_alive && return 0
-  local HEAL_TRIGGER HEAL_VARIANT DK_KIND DK_STATE DK_IDS DK_NAMES DK_ERR="" DK_FAILED="" BM_RESULT="" BM_DETAIL=""
-  local DK_ENDPOINT DK_EP_WHY="" DK_NOTE=""
+  local HEAL_TRIGGER HEAL_VARIANT DK_KIND DK_STATE DK_IDS DK_NAMES DK_HEALTH="" DK_ERR="" DK_FAILED="" BM_RESULT="" BM_DETAIL=""
+  local DK_ENDPOINT DK_EP_WHY="" DK_NOTE="" DK_STOP_DECISION="" DK_FOREIGN="" BM_NOTE=""
   local opid ran=0 released="" held="" what drc cut_n
   local cap=$FSG_DRAIN_CAP_S
   local RC_DROPPED="" RC_FAILING="" gone_note="" PASS_RAN=0
@@ -424,7 +430,7 @@ fsg_intent_recover() {
     fi
     return 0
   fi
-  what="${DK_ERR:-}${DK_FAILED:+ containers: $DK_FAILED}${BM_DETAIL:+; bind mount: $BM_DETAIL}"
+  what="$(fsg_docker_why)"
   fsg_drain_end
   if [ $ran = 1 ] || [ -n "$held" ] || [ -n "$RC_DROPPED" ]; then
     fsg_log "RECOVER Docker not verified after heal pid $opid: $what"
@@ -452,8 +458,9 @@ fsg__recover_no_marker() { # tick-pid-of-the-heal
 # runs before C's Docker Desktop restart leaves the restart to the next tick, which
 # waits again.
 fsg_recover_interrupted() {
-  local f=$FSG_DOCKER_INTENT opid HEAL_TRIGGER HEAL_VARIANT DK_KIND DK_STATE DK_IDS DK_NAMES DK_ENDPOINT DK_EP_WHY=""
+  local f=$FSG_DOCKER_INTENT opid HEAL_TRIGGER HEAL_VARIANT DK_KIND DK_STATE DK_IDS DK_NAMES DK_HEALTH="" DK_ENDPOINT DK_EP_WHY=""
   local DK_ERR="" DK_FAILED="" BM_RESULT="" BM_DETAIL="" RC_DROPPED="" RC_FAILING="" PASS_RAN=0 DK_NOTE=""
+  local DK_STOP_DECISION="" DK_FOREIGN="" BM_NOTE=""
   [ "${TICK_RECOVERING:-0}" = 1 ] || return 0
   TICK_RECOVERING=0
   fsg_drain_end
@@ -479,9 +486,9 @@ fsg_recover_interrupted() {
     [ -n "$DK_NOTE" ] && fsg_notify "fseventsd-guard: Docker restored" "after an interrupted heal" \
       "The agent was stopped while it restored Docker after an earlier heal (tick pid $opid, $HEAL_TRIGGER); it finished the pass and Docker verified. $DK_NOTE."
   else
-    fsg_log "RECOVER interrupted; Docker not verified: ${DK_ERR:-}${DK_FAILED:+ containers: $DK_FAILED}${BM_DETAIL:+; bind mount: $BM_DETAIL}"
+    fsg_log "RECOVER interrupted; Docker not verified: $(fsg_docker_why)"
     fsg_notify "fseventsd-guard: heal interrupted" "Docker not verified" \
-      "The agent was stopped while it restored Docker after an earlier heal (tick pid $opid, $HEAL_TRIGGER), and Docker is not fully back (${DK_ERR:-}${DK_FAILED:+ containers: $DK_FAILED}).${DK_NOTE:+ $DK_NOTE.} $FSG_HOLD_NEXT. Next: docker desktop status; docker ps."
+      "The agent was stopped while it restored Docker after an earlier heal (tick pid $opid, $HEAL_TRIGGER), and Docker is not fully back ($(fsg_docker_why nobind)).${DK_NOTE:+ $DK_NOTE.} $FSG_HOLD_NEXT. Next: docker desktop status; docker ps."
   fi
   return 0
 }
@@ -611,9 +618,9 @@ fsg_heal_cleanup() {
       [ -n "${DK_NOTE:-}" ] && fsg_notify "fseventsd-guard: Docker restored" "after an interrupted heal" \
         "The heal was stopped part way; it restored Docker and Docker verified. $DK_NOTE."
     else
-      fsg_log "HEAL interrupted; Docker not verified: ${DK_ERR:-}${DK_FAILED:+ containers: $DK_FAILED}${BM_DETAIL:+; bind mount: $BM_DETAIL}"
+      fsg_log "HEAL interrupted; Docker not verified: $(fsg_docker_why)"
       fsg_notify "fseventsd-guard: heal interrupted" "Docker not verified" \
-        "The heal was stopped part way and Docker is not fully back (${DK_ERR:-}${DK_FAILED:+ containers: $DK_FAILED}).${DK_NOTE:+ $DK_NOTE.}$( [ "$HEAL_DK_HELD" = 1 ] && echo " $FSG_HOLD_NEXT.") Next: docker desktop status; docker ps."
+        "The heal was stopped part way and Docker is not fully back ($(fsg_docker_why nobind)).${DK_NOTE:+ $DK_NOTE.}$( [ "$HEAL_DK_HELD" = 1 ] && echo " $FSG_HOLD_NEXT.") Next: docker desktop status; docker ps."
     fi
   fi
   fsg_drain_end
@@ -637,6 +644,7 @@ fsg_wait_healthy() { # old pid
 # returns that heal's result and record, fsg_req_join).
 fsg_heal_record() { # result wall_s
   echo "$(fsg_now) $1 $HEAL_TRIGGER $HEAL_VARIANT $2 ${HEAL_DIR:-}" > "$FSG_STATE_DIR/last-heal"
+  case $1 in healed|restored-partly) fsg_daily_add heal ;; esac
   [ -n "${HEAL_DIR:-}" ] && {
     echo "result=$1"
     echo "trigger=$HEAL_TRIGGER"
@@ -659,6 +667,8 @@ fsg_heal_record() { # result wall_s
     echo "containers_not_restored_oneoff=${DK_ONEOFF:-}"
     echo "containers_rm_anonymous_volumes=${DK_AT_RISK:-}"
     echo "docker_restart_unchecked=${DK_NOTE:-}"
+    echo "docker_stop=${DK_STOP_DECISION:+rc=$DK_STOP_RC in ${DK_STOP_S}s: $DK_STOP_DECISION ($DK_STOP_WHY)}"
+    echo "docker_started_by_other=${DK_FOREIGN:-}"
     echo "bind_mount=${BM_RESULT:-} ${BM_DETAIL:-}"
     echo "docker_endpoint=${DK_ENDPOINT:-}${DK_EP_WHY:+ (not local, Docker step skipped: $DK_EP_WHY)}"
     echo "docker_engine=${DK_ENGINE:-}"
@@ -878,9 +888,7 @@ fsg__heal_refuse() { # result t0 subtitle body what
 # Logs the root helper's outcome (HELPER_RC) and stamps a restart it made.
 fsg__heal_helper_done() {
   fsg_log "HEAL helper rc=$HELPER_RC ($(fsg_helper_meaning "$HELPER_RC")) $(tr '\n' ' ' < "$HEAL_DIR/helper.out" 2>/dev/null | cut -c1-200)"
-  if [ "$HELPER_RC" -eq 0 ] || [ "$HELPER_RC" -eq 72 ]; then
-    fsg_now > "$FSG_STATE_DIR/last-restart"
-  fi
+  case $HELPER_RC in 0|72|73) fsg_now > "$FSG_STATE_DIR/last-restart" ;; esac
 }
 
 # The part of a heal past the precheck: drain, Docker before-step, restart, Docker
@@ -889,6 +897,7 @@ fsg_heal_run() { # t0 old_pid cap policy
   local t0=$1 old_pid=$2 cap=$3 policy=$4
   HEAL_DK_PRE_DONE=0; HEAL_DK_POST_DONE=0; HEAL_DK_VERIFIED=0; HEAL_DK_HELD=0; HEAL_DK_RESTORE=0; HELPER_RC=
   T_DRAIN=; T_DPRE=; T_RESTART=; T_HEALTHY=; T_DPOST=; T_CONT=; T_VERIFY=; T_AFTER_DRAIN=; DK_FAILED=; DRAIN_CUT=; DK_NOTE=
+  DK_STOP_DECISION=; DK_STOP_RC=; DK_STOP_S=; DK_STOP_WHY=; DK_FOREIGN=; BM_NOTE=
   # One tick can run several heals within a second.
   HEAL_DIR="$FSG_STATE_DIR/heals/$(date -u +%Y%m%dT%H%M%SZ)-$$"
   [ -e "$HEAL_DIR" ] && HEAL_DIR="$HEAL_DIR-$RANDOM"
@@ -944,9 +953,12 @@ fsg_heal_run() { # t0 old_pid cap policy
   # --- Docker before-step ---
   fsg_drain_phase docker-before
   fsg_docker_record
+  local pre_variant=$HEAL_VARIANT
   HEAL_VARIANT=$(fsg_docker_effective_variant "$HEAL_VARIANT_REQ")
   fsg_docker_record_text > "$HEAL_DIR/docker-before.txt"
   [ "$HEAL_VARIANT" != "$HEAL_VARIANT_REQ" ] && fsg_log "HEAL docker variant $HEAL_VARIANT_REQ -> $HEAL_VARIANT (kind=$DK_KIND state=$DK_STATE)"
+  # The marker went out with the precheck's variant; the hooks name the step from it.
+  [ "$HEAL_VARIANT" != "$pre_variant" ] && [ "${DRAIN_HELD:-0}" = 1 ] && fsg_drain_write docker-before 2>/dev/null
   if [ -n "$DK_AT_RISK" ] && fsg_docker_stops_containers "$HEAL_VARIANT"; then
     fsg__heal_refuse refused-anonymous-volumes "$t0" "a --rm container would lose its data" \
       "Docker step $HEAL_VARIANT would stop these --rm containers, and Docker deletes a --rm container's anonymous volumes with it: $DK_AT_RISK. Nothing was stopped or restarted. Next: stop it yourself once its data is safe, or start it again with a named volume (-v NAME:PATH), then run: fseventsd-guard heal" \
@@ -1011,17 +1023,19 @@ fsg_heal_run() { # t0 old_pid cap policy
   T_RESTART=$(( $(fsg_now) - ts ))
   fsg__heal_helper_done
 
-  # 72: SIGTERM went out but the helper saw no respawn within its 15 s. launchd may
-  # still respawn it, so wait for a new daemon before Docker is brought back.
+  # 72: restarted with SIGKILL after SIGTERM was ignored. 73: the signal went out
+  # but the helper saw no respawn while it waited. launchd may still respawn it, so
+  # wait for a new daemon before Docker is brought back.
   local healthy=0 restarted=0
-  if [ $HELPER_RC -eq 0 ] || [ $HELPER_RC -eq 72 ]; then
-    ts=$(fsg_now)
-    fsg_drain_phase waiting-healthy
-    fsg_wait_healthy "$old_pid" && healthy=1
-    T_HEALTHY=$(( $(fsg_now) - ts ))
-  fi
-  [ $HELPER_RC -eq 0 ] && restarted=1
-  if [ $HELPER_RC -eq 72 ] && [ $healthy = 1 ]; then
+  case $HELPER_RC in
+    0|72|73)
+      ts=$(fsg_now)
+      fsg_drain_phase waiting-healthy
+      fsg_wait_healthy "$old_pid" && healthy=1
+      T_HEALTHY=$(( $(fsg_now) - ts )) ;;
+  esac
+  case $HELPER_RC in 0|72) restarted=1 ;; esac
+  if [ $HELPER_RC -eq 73 ] && [ $healthy = 1 ]; then
     restarted=1
     fsg_log "HEAL fseventsd respawned after the helper stopped waiting (pid $M_PID)"
   fi
@@ -1066,6 +1080,8 @@ fsg_heal_run() { # t0 old_pid cap policy
   T_AFTER_DRAIN=$((wall - T_DRAIN))
   local dk_note="" nr_note="${DK_EPHEMERAL:+ Not restored (--rm, removed when stopped): $DK_EPHEMERAL.}"
   nr_note="$nr_note${DK_ONEOFF:+ Not restored (one-off, docker compose run: a start would run its command again): $DK_ONEOFF.}${DK_NOTE:+ $DK_NOTE.}"
+  nr_note="$nr_note${DK_FOREIGN:+ Note: $DK_FOREIGN.}${BM_NOTE:+ $BM_NOTE}"
+  [ "$HELPER_RC" = 72 ] && nr_note="$nr_note Note: fseventsd ignored SIGTERM for 10 s; the helper restarted it with SIGKILL."
   # A Docker that is not local was never touched nor checked: a hold in place
   # before the heal comes back.
   [ "$DK_STATE" = notlocal ] && dk_note=" Docker step skipped: not a local Docker engine ($DK_EP_WHY); no container was stopped, started or checked."
@@ -1073,7 +1089,7 @@ fsg_heal_run() { # t0 old_pid cap policy
     HEAL_DK_VERIFIED=1
     rm -f "$FSG_DOCKER_INTENT"
     if [ "$DK_STATE" = notlocal ]; then fsg_drain_end; else fsg_drain_end verified; fi
-  elif fsg_drain_hold "${DK_ERR:-}${DK_FAILED:+ containers: $DK_FAILED}${BM_DETAIL:+; bind mount: $BM_DETAIL}"; then
+  elif fsg_drain_hold "$(fsg_docker_why)"; then
     # The intent stays until the agent sees Docker verified.
     HEAL_DK_HELD=1
     fsg_intent_set hold_epoch "$(fsg_now)"
@@ -1099,7 +1115,7 @@ fsg_heal_run() { # t0 old_pid cap policy
   fi
   local what=""
   [ $healthy = 1 ] || what="fseventsd did not come back healthy within ${FSG_HEALTHY_TIMEOUT_S}s"
-  [ $dk_ok = 1 ] || what="${what:+$what; }Docker not fully restored (${DK_ERR:-}${DK_FAILED:+ containers: $DK_FAILED}${BM_DETAIL:+; bind mount: $BM_DETAIL})"
+  [ $dk_ok = 1 ] || what="${what:+$what; }Docker not fully restored ($(fsg_docker_why))"
   fsg_heal_record restored-partly "$wall"
   fsg_notify "fseventsd restarted, check needed" "heal incomplete" \
     "$what.$nr_note$held Next: fseventsd-guard status; docker desktop status; restart Docker Desktop if containers misbehave. Record: $HEAL_DIR"
@@ -1110,7 +1126,8 @@ fsg_heal_run() { # t0 old_pid cap policy
 # --- Background agent -----------------------------------------------------------------
 # Releases a hold left by a heal that could not bring Docker back, once Docker
 # answers, the containers it was restoring run (by name: compose may recreate
-# them) and a bind mount works. Trial holds wait for the operator.
+# them; healthy when they were before the heal) and a bind mount works. Trial holds
+# wait for the operator.
 fsg_tick_hold_check() {
   # An intent left after the recovery means Docker was just checked and failed.
   [ -f "$FSG_DOCKER_INTENT" ] && return 0
@@ -1126,7 +1143,7 @@ fsg_tick_hold_check() {
   if [ -n "$hep" ] && ! fsg_docker_same_endpoint "$hep" "$DK_ENDPOINT"; then
     fsg_log "TICK hold: the Docker endpoint is now $DK_ENDPOINT, not the heal's $hep"; return 0
   fi
-  DK_IDS=$(fsg__kv "$FSG_PENDING" restore_names)
+  DK_IDS=$(fsg__kv "$FSG_PENDING" restore_names); DK_HEALTH=$(fsg__kv "$FSG_PENDING" restore_health)
   if ! FSG_CONTAINER_TIMEOUT_S=0 fsg_docker_wait_containers; then
     fsg_log "TICK hold: containers not back: $DK_FAILED"; return 0
   fi
@@ -1315,7 +1332,7 @@ fsg_tick_check() {
   fi
   rm -f "$FSG_STATE_DIR/blind-ticks"
   DO_PROBE=$FSG_AGENT_PROBE
-  P_RESULT=; P_LATENCY_MS=; P_DETAIL=
+  P_RESULT=; P_LATENCY_MS=; P_START_MS=; P_DETAIL=; P_EID=
   if [ "$DO_PROBE" = 1 ]; then
     fsg_probe
     if [ "$P_RESULT" = stalled ]; then
@@ -1324,10 +1341,13 @@ fsg_tick_check() {
       [ "$P_RESULT" = stalled ] || fsg_log "TICK probe stalled once, then $P_RESULT (not counted)"
     fi
   fi
+  fsg_tick_sample
   fsg_classify 0
   TICK_LEVEL=$S_LEVEL
-  fsg_log "TICK level=$S_LEVEL pid=$M_PID mb=$M_MB cpu=${M_CPU:-} up_s=${M_UP:-} probe=${P_RESULT:-skipped}${P_LATENCY_MS:+/${P_LATENCY_MS}ms}"
+  fsg_log "TICK level=$S_LEVEL pid=$M_PID mb=$M_MB cmprs_mb=${M_CMPRS_MB:-} ports=${M_PORTS:-} cpu=${M_CPU:-} cpu_avg_pct=${T_CPU_PCT:-} cpu_streak=$T_CPU_STREAK up_s=${M_UP:-} swap_used_mb=$(fsg_parse_swap_mb "$(sysctl -n vm.swapusage 2>/dev/null)") probe=${P_RESULT:-skipped}${P_LATENCY_MS:+/${P_LATENCY_MS}ms}${P_START_MS:+ start_ms=$P_START_MS} eid=$P_EID ev_s=$T_EV_S"
+  fsg_daily_add tick "$M_MB" "${T_CPU_PCT:--}" "${T_EV_S:--}"
   [ "$S_LEVEL" = ok ] && return 0
+  [ -n "$C_STREAK" ] && fsg_log "TICK runaway by the cpu escalator: ${C_PCT}% of a core for $C_STREAK ticks at $M_MB MB"
 
   local now last_t=0 last_mb=0 renotify=0
   now=$(fsg_now)
@@ -1340,7 +1360,7 @@ fsg_tick_check() {
     if [ $renotify = 1 ]; then
       mkdir -p "$FSG_STATE_DIR"; echo "$now $M_MB" > "$FSG_STATE_DIR/last-notice"
       fsg_notify "fseventsd at $(fsg_size "$M_MB")" "warn (budget $FSG_BUDGET_MB MB)" \
-        "File watching may degrade. Next: run fseventsd-guard heal at a convenient point (it waits for running tests), or let the next wave boundary do it."
+        "File watching may degrade. Next: run fseventsd-guard heal at a convenient point, such as before a long test run (it waits for running tests)."
     fi
     return 1
   fi

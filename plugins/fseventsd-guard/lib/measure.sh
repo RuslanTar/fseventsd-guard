@@ -10,6 +10,17 @@ fsg_etime_s() {
     else print "" }'
 }
 
+# ps time ([dd-][hh:]mm:ss.cc, cumulative CPU time) -> whole milliseconds.
+fsg_cputime_ms() {
+  echo "$1" | tr -d ' ' | awk '{
+    d = 0; s = $0; i = index(s, "-")
+    if (i) { d = substr(s, 1, i - 1); s = substr(s, i + 1) }
+    if (s == "" || d !~ /^[0-9]+$/) exit 1
+    n = split(s, f, ":"); t = 0
+    for (k = 1; k <= n; k++) { if (f[k] !~ /^[0-9]+(\.[0-9]+)?$/) exit 1; t = t * 60 + f[k] }
+    printf "%d\n", (d * 86400 + t) * 1000 }'
+}
+
 # top's MEM column (5504K, 612M, 17G, 1.5G, with an optional +/- trend) -> whole MB.
 fsg_parse_mem_mb() {
   echo "$1" | awk '{ v = $1; sub(/[+-]$/, "", v); u = substr(v, length(v), 1); n = substr(v, 1, length(v) - 1)
@@ -20,12 +31,20 @@ fsg_parse_mem_mb() {
     printf "%d\n", mb }'
 }
 
-# Measures fseventsd. Sets M_PID M_MB M_CPU M_UP M_ERR. Returns 0, or 3 when it
-# cannot measure (M_ERR says why).
+# Swap in use in whole MB, from `sysctl -n vm.swapusage` ("total = 3072.00M  used =
+# 2051.00M  free = ...").
+fsg_parse_swap_mb() {
+  fsg_parse_mem_mb "$(printf '%s\n' "$1" | awk '{ for (i = 1; i < NF - 1; i++) if ($i == "used" && $(i + 1) == "=") { print $(i + 2); exit } }')"
+}
+
+# Measures fseventsd. Sets M_PID M_MB M_CPU M_UP M_ERR, M_CPU_MS (its CPU time so
+# far, for fsg_tick_sample), and M_CMPRS_MB (compressed memory) and M_PORTS (Mach
+# ports), which are logged only. Returns 0, or 3 when it cannot measure (M_ERR says
+# why).
 fsg_measure() {
-  M_PID=; M_MB=; M_CPU=; M_UP=; M_ERR=
+  M_PID=; M_MB=; M_CPU=; M_UP=; M_ERR=; M_CMPRS_MB=; M_PORTS=; M_CPU_MS=
   if [ "$(uname -s)" != Darwin ]; then M_ERR="not macOS"; return 3; fi
-  local pids n raw
+  local pids n raw row
   # Root-owned only: any user can start a process named fseventsd, and two
   # matches would make the guard blind.
   pids=$(pgrep -x -u 0 fseventsd 2>/dev/null)
@@ -33,19 +52,93 @@ fsg_measure() {
   n=$(printf '%s\n' "$pids" | wc -l | tr -d ' ')
   if [ "$n" != 1 ]; then M_ERR="$n root-owned processes are named fseventsd"; return 3; fi
   M_PID=$pids
-  raw=$(top -l 1 -pid "$M_PID" -stats mem 2>/dev/null | tail -n 1)
-  M_MB=$(fsg_parse_mem_mb "$raw") || M_MB=
-  if [ -z "$M_MB" ]; then M_ERR="cannot read the footprint of pid $M_PID (top said: ${raw:-nothing})"; return 3; fi
+  # top takes a second or two; bounded, so a wedged system cannot hang a tick or a hook.
+  raw=$(fsg_timeout "$FSG_TOP_TIMEOUT_S" top -l 1 -pid "$M_PID" -stats pid,mem,cmprs,ports 2>/dev/null)
+  if [ $? -eq 124 ]; then M_ERR="top did not answer within ${FSG_TOP_TIMEOUT_S}s"; return 3; fi
+  row=$(printf '%s\n' "$raw" | awk -v p="$M_PID" '$1 == p { print; exit }')
+  M_MB=$(fsg_parse_mem_mb "$(printf '%s\n' "$row" | awk '{ print $2 }')") || M_MB=
+  if [ -z "$M_MB" ]; then M_ERR="cannot read the footprint of pid $M_PID (top said: ${row:-$(printf '%s\n' "$raw" | tail -n 1)})"; return 3; fi
+  M_CMPRS_MB=$(fsg_parse_mem_mb "$(printf '%s\n' "$row" | awk '{ print $3 }')") || M_CMPRS_MB=
+  M_PORTS=$(printf '%s\n' "$row" | awk '{ v = $4; sub(/[+-]$/, "", v); if (v ~ /^[0-9]+$/) print v }')
   M_CPU=$(ps -o %cpu= -p "$M_PID" 2>/dev/null | tr -d ' ')
   M_UP=$(fsg_etime_s "$(ps -o etime= -p "$M_PID" 2>/dev/null)")
+  M_CPU_MS=$(fsg_cputime_ms "$(ps -o time= -p "$M_PID" 2>/dev/null)") || M_CPU_MS=
   return 0
 }
 
-# Runs the delivery probe once. Sets P_RESULT (ok|stalled|error|unavailable) and
-# P_LATENCY_MS. The probe has its own watchdog; the outer bound catches a probe
-# wedged inside the FSEvents framework.
+# The agent's record between ticks (docs/DESIGN.md §4), in $FSG_STATE_DIR/tick-sample:
+# fseventsd's share of one core from the CPU time it used since the last tick (an
+# exact average, unlike the decayed ps %cpu), how many ticks in a row found it at or
+# above FSG_CPU_ESCALATE_PCT with the footprint at or above warn, and the system's
+# FSEvents rate from the probe's event ids. A new pid starts over; so does the rate
+# after a reboot, as event ids jump then. Sets T_CPU_PCT and T_EV_S (empty when
+# unknown) and T_CPU_STREAK.
+fsg_tick_sample() {
+  local f="$FSG_STATE_DIR/tick-sample" now pe pc pst pi boot same=0
+  T_CPU_PCT=; T_CPU_STREAK=0; T_EV_S=
+  now=$(fsg_now)
+  boot=$(sysctl -n kern.boottime 2>/dev/null | sed -n 's/^{ sec = \([0-9]*\),.*/\1/p')
+  pe=$(fsg__kv "$f" epoch); pc=$(fsg__kv "$f" cpu_ms); pst=$(fsg__kv "$f" streak); pi=$(fsg__kv "$f" eid)
+  [ "$(fsg__kv "$f" pid)" = "$M_PID" ] && fsg_is_uint "$pe" && [ "$now" -gt "$pe" ] && same=1
+  if [ $same = 1 ] && fsg_is_uint "$pc" && fsg_is_uint "$M_CPU_MS" && [ "$M_CPU_MS" -ge "$pc" ]; then
+    T_CPU_PCT=$(( (M_CPU_MS - pc) / ((now - pe) * 10) ))
+  fi
+  if [ $same = 1 ] && [ -n "$boot" ] && [ "$(fsg__kv "$f" boot)" = "$boot" ] &&
+     fsg_is_uint "$pi" && fsg_is_uint "$P_EID" && [ "$P_EID" -ge "$pi" ]; then
+    T_EV_S=$(( (P_EID - pi) / (now - pe) ))
+  fi
+  fsg_is_uint "$pst" || pst=0
+  if [ -n "$T_CPU_PCT" ] && [ "$FSG_CPU_ESCALATE_PCT" -gt 0 ] && [ "$T_CPU_PCT" -ge "$FSG_CPU_ESCALATE_PCT" ] &&
+     [ "$M_MB" -ge "$FSG_WARN_MB" ]; then
+    T_CPU_STREAK=$((pst + 1))
+  fi
+  mkdir -p "$FSG_STATE_DIR" 2>/dev/null
+  printf 'epoch=%s\npid=%s\ncpu_ms=%s\ncpu_pct=%s\nstreak=%s\nboot=%s\neid=%s\n' "$now" "$M_PID" "$M_CPU_MS" "$T_CPU_PCT" \
+    "$T_CPU_STREAK" "$boot" "$P_EID" > "$f.new.$$" 2>/dev/null && mv -f "$f.new.$$" "$f" 2>/dev/null
+}
+
+# The per-day summary, $FSG_STATE_DIR/daily: one line per local day, rewritten as
+# the day goes on, with the ticks, the largest footprint and CPU share, the heals
+# that restarted fseventsd and the event rate's median and 95th percentile. The
+# day's own samples are in day-samples.
+fsg_daily_add() { # tick MB CPU_PCT EV_S | heal (- for unknown)
+  local f="$FSG_STATE_DIR/day-samples" d="$FSG_STATE_DIR/daily" day evs line
+  day=$(date +%Y-%m-%d)
+  mkdir -p "$FSG_STATE_DIR" 2>/dev/null
+  [ "$(head -n 1 "$f" 2>/dev/null)" = "day $day" ] || echo "day $day" > "$f" 2>/dev/null || return 0
+  echo "$*" >> "$f"
+  evs=$(awk '$1 == "tick" && $4 ~ /^[0-9]+$/ { print $4 }' "$f" | sort -n | tr '\n' ' ')
+  line=$(awk -v day="$day" -v evs="$evs" '
+    function pct(p,  i) { if (n == 0) return "-"; i = int(p * n); if (i < p * n) i++; if (i < 1) i = 1; return e[i] }
+    BEGIN { n = split(evs, e, " ") }
+    $1 == "tick" { t++
+      if ($2 ~ /^[0-9]+$/ && (m == 0 || $2 + 0 > mb)) { mb = $2 + 0; m = 1 }
+      if ($3 ~ /^[0-9]+$/ && (c == 0 || $3 + 0 > cpu)) { cpu = $3 + 0; c = 1 } }
+    $1 == "heal" { h++ }
+    END { printf "%s ticks=%d max_mb=%s max_cpu_pct=%s heals=%d ev_s_p50=%s ev_s_p95=%s\n", day, t, (m ? mb : "-"), (c ? cpu : "-"), h, pct(0.5), pct(0.95) }' "$f")
+  { grep -v "^$day " "$d" 2>/dev/null | tail -n 399; echo "$line"; } > "$d.new.$$" 2>/dev/null && mv -f "$d.new.$$" "$d" 2>/dev/null
+}
+
+# 0 when the agent's last FSG_CPU_ESCALATE_TICKS ticks in a row found this fseventsd
+# at or above warn and FSG_CPU_ESCALATE_PCT of a core. Sets C_PCT and C_STREAK. A
+# record older than two agent intervals does not count.
+fsg_cpu_escalated() {
+  local f="$FSG_STATE_DIR/tick-sample" e
+  C_PCT=; C_STREAK=
+  [ "$FSG_CPU_ESCALATE_PCT" -gt 0 ] && [ -f "$f" ] && [ "$(fsg__kv "$f" pid)" = "$M_PID" ] || return 1
+  e=$(fsg__kv "$f" epoch)
+  fsg_is_uint "$e" && [ $(( $(fsg_now) - e )) -le $((2 * FSG_AGENT_INTERVAL_S)) ] || return 1
+  C_PCT=$(fsg__kv "$f" cpu_pct); C_STREAK=$(fsg__kv "$f" streak)
+  fsg_is_uint "$C_STREAK" && [ "$C_STREAK" -gt 0 ] && [ "$C_STREAK" -ge "$FSG_CPU_ESCALATE_TICKS" ]
+}
+
+# Runs the delivery probe once. Sets P_RESULT (ok|stalled|error|unavailable),
+# P_LATENCY_MS, P_START_MS (how long FSEventStreamStart took; logged only) and P_EID
+# (the system's current FSEvents event id, for the tick's event rate). The probe has
+# its own watchdog; the outer bound catches a probe wedged inside the FSEvents
+# framework.
 fsg_probe() {
-  P_RESULT=unavailable; P_LATENCY_MS=; P_DETAIL=
+  P_RESULT=unavailable; P_LATENCY_MS=; P_START_MS=; P_DETAIL=; P_EID=
   if [ ! -x "$FSG_PROBE_BIN" ]; then P_DETAIL="probe not built (run: fseventsd-guard install)"; return 0; fi
   local dir out rc
   dir="$FSG_STATE_DIR/probe-dir"
@@ -57,6 +150,11 @@ fsg_probe() {
     2|124) P_RESULT=stalled; P_DETAIL="no event within ${FSG_PROBE_TIMEOUT_S}s" ;;
     *) P_RESULT=error; P_DETAIL=$(printf '%s' "$out" | tr '\n' ' ' | cut -c1-200) ;;
   esac
+  case $P_RESULT in
+    ok|stalled)
+      P_START_MS=$(printf '%s\n' "$out" | sed -n 's/.*start_ms=\([0-9]*\).*/\1/p' | head -n 1)
+      P_EID=$(printf '%s\n' "$out" | sed -n 's/.* eid=\([0-9]*\).*/\1/p' | head -n 1) ;;
+  esac
   return 0
 }
 
@@ -64,13 +162,19 @@ fsg_probe() {
 # and S_REASONS (one per line).
 fsg_classify() {
   local mrc=$1
-  S_REASONS=
+  S_REASONS=; C_STREAK=
   if [ "$mrc" -ne 0 ]; then S_LEVEL=unknown; S_EXIT=3; S_REASONS=$M_ERR; return; fi
   S_LEVEL=ok; S_EXIT=0
   if [ "$M_MB" -ge "$FSG_ACT_MB" ]; then
     S_LEVEL=runaway; S_EXIT=2; S_REASONS="footprint $M_MB MB >= act threshold $FSG_ACT_MB MB"
   elif [ "$M_MB" -ge "$FSG_WARN_MB" ]; then
     S_LEVEL=warn; S_EXIT=1; S_REASONS="footprint $M_MB MB >= warn threshold $FSG_WARN_MB MB"
+    if fsg_cpu_escalated; then
+      S_LEVEL=runaway; S_EXIT=2
+      S_REASONS="$S_REASONS, and cpu ${C_PCT}% of a core for $C_STREAK ticks in a row (>= $FSG_CPU_ESCALATE_PCT% for $FSG_CPU_ESCALATE_TICKS ticks counts as runaway)"
+    else
+      C_STREAK=
+    fi
   fi
   if [ "${P_RESULT:-}" = stalled ]; then
     S_LEVEL=runaway; S_EXIT=2
@@ -197,9 +301,9 @@ EOF
   reasons_json="$reasons_json]"
   local probe_json
   if [ "$DO_PROBE" = 1 ]; then
-    probe_json="{\"ran\":true,\"result\":$(fsg_json_str "$P_RESULT"),\"latency_ms\":$(fsg_json_num "$P_LATENCY_MS"),\"timeout_s\":$FSG_PROBE_TIMEOUT_S}"
+    probe_json="{\"ran\":true,\"result\":$(fsg_json_str "$P_RESULT"),\"latency_ms\":$(fsg_json_num "$P_LATENCY_MS"),\"timeout_s\":$FSG_PROBE_TIMEOUT_S,\"start_ms\":$(fsg_json_num "$P_START_MS")}"
   else
-    probe_json="{\"ran\":false,\"result\":\"skipped\",\"latency_ms\":null,\"timeout_s\":$FSG_PROBE_TIMEOUT_S}"
+    probe_json="{\"ran\":false,\"result\":\"skipped\",\"latency_ms\":null,\"timeout_s\":$FSG_PROBE_TIMEOUT_S,\"start_ms\":null}"
   fi
   local last_json=null lh
   lh=$(cat "$FSG_STATE_DIR/last-heal" 2>/dev/null)
@@ -257,7 +361,7 @@ fsg_cmd_status() {
   done
   local mrc
   fsg_measure; mrc=$?
-  P_RESULT=; P_LATENCY_MS=; P_DETAIL=
+  P_RESULT=; P_LATENCY_MS=; P_START_MS=; P_DETAIL=; P_EID=
   if [ "$DO_PROBE" = 1 ] && [ $mrc -eq 0 ]; then fsg_probe; fi
   fsg_classify $mrc
   fsg_affected
@@ -274,6 +378,7 @@ fsg_cmd_status() {
     else
       echo "fseventsd: $S_LEVEL - pid $M_PID, footprint $(fsg_size "$M_MB") (budget $FSG_BUDGET_MB MB, warn $FSG_WARN_MB, act $FSG_ACT_MB), cpu ${M_CPU:-?}%, up $(fsg_dur "${M_UP:-0}")"
       [ "$DO_PROBE" = 1 ] && echo "delivery probe: $P_RESULT${P_LATENCY_MS:+ (${P_LATENCY_MS} ms)}${P_DETAIL:+ - $P_DETAIL}"
+      [ -n "$P_START_MS" ] && echo "probe stream start: $P_START_MS ms (a healthy fseventsd takes 0-1 ms; logged only, no heal acts on it)"
     fi
     [ -n "$S_REASONS" ] && [ $mrc -eq 0 ] && printf '%s\n' "$S_REASONS" | sed 's/^/  reason: /'
     if [ "$D_PENDING" = true ]; then echo "drain: pending (phase $D_PHASE; $D_REASON); live leases: $D_LEASES"
@@ -287,7 +392,7 @@ fsg_cmd_status() {
       echo "heal requests: $RQ_QUEUED queued${RQ_ID:+; running: $RQ_ID ($RQ_TRIGGER, phase $RQ_PHASE, requester pid $RQ_PID$( [ "$RQ_ALIVE" = true ] || echo ', gone'))}"
     fsg_helper_limits
     if [ "$FSG_H_TRIAL" = 1 ]; then
-      echo "helper: trial window open until $(date -r "$(fsg_helper_setting TRIAL_UNTIL)" '+%Y-%m-%d %H:%M') (floor $FSG_H_MIN_MB MB, interval ${FSG_H_INTERVAL_S}s)"
+      echo "helper: trial window open until $(/bin/date -r "$(fsg_helper_setting TRIAL_UNTIL)" '+%Y-%m-%d %H:%M') (floor $FSG_H_MIN_MB MB, interval ${FSG_H_INTERVAL_S}s)"
     fi
     echo "agent: $A_TEXT"
     fsg_status_install_text

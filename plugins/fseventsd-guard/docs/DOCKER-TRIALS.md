@@ -65,7 +65,7 @@ Every trial writes a folder under
 |---|---|
 | `before.txt` / `after.txt` | `docker desktop status`, `docker ps -a`, Docker processes with their uptimes, fseventsd status with a probe (`after.txt` adds `docker info`) |
 | `heal.out` | the heal's own output: drain progress, result line |
-| `result.txt` | phase timings (`drain_s`, `docker_before_s`, `restart_s`, `healthy_s`, `docker_after_s`, `containers_s`, `verify_s`, `heal_s_after_drain`), helper exit code, containers not back, bind-mount result |
+| `result.txt` | phase timings (`drain_s`, `docker_before_s`, `restart_s`, `healthy_s`, `docker_after_s`, `containers_s`, `verify_s`, `heal_s_after_drain`), helper exit code, containers not back, bind-mount result, B's stop (`docker_stop=`: exit code, time, decision) and `docker_started_by_other=` when something else started Docker Desktop during the heal |
 | `desktop-logs-warn.txt` | `docker desktop logs` at warning level and above since the trial started |
 | `summary.txt` | the variant, the heal exit code and `result.txt` |
 
@@ -83,7 +83,9 @@ usual way. Then record:
    Compare the `com.docker.backend` uptime in `before.txt` and `after.txt`.
 2. Which part failed:
    - **The VM / engine**: `docker info` errors in `after.txt`.
-   - **File sharing / bind mounts**: `bind_mount=failed` in `result.txt`. Or check by
+   - **File sharing / bind mounts**: `bind_mount=failed` in `result.txt`
+     (`bind_mount=skipped ... not shared` means the probe dir is not in Docker
+     Desktop's File Sharing list: set `FSG_PROBE_DIR`, see `doctor`). Or check by
      hand: `docker run --rm -v "$PWD:/w" alpine:3 ls /w` (use any local image that
      has `/bin/sh`).
    - **Containers**: `containers_failed=` in `result.txt`, `docker ps -a`.
@@ -130,8 +132,8 @@ Docker answered but did not list its containers, so none could be checked
 `docker ps` working again, then run the trial again), `130` the agent was stopped during the trial. After each trial, before the next one, check:
 
 1. **Healed?** `summary.txt` says `result=healed` and `heal_exit=0`. That means
-   Docker is running, every container the heal restores (not `--rm` or one-off ones) is running (and healthy where it
-   has a health check), and the bind-mount round trip worked both ways.
+   Docker is running, every container the heal restores (not `--rm` or one-off ones) is running (and healthy if it was
+   healthy before the heal), and the bind-mount round trip worked both ways.
 2. **Wall time.** `heal_s_after_drain` is the figure to compare. The drain time
    depends on other sessions' runs, not on the variant.
 3. **Workarounds.** Anything you had to do by hand to get Docker or a container
@@ -165,7 +167,32 @@ Fine: no Docker process has the tick's pid as its pgid (second column), and
 `docker desktop status` still says `running`. If one does, or Docker Desktop is gone
 although the trial verified it, stop the trials and note it here: the agent then
 needs `AbandonProcessGroup` in its plist or to start Docker Desktop with
-`open -a Docker` (an owner decision).
+`open -a Docker` (a design decision to make then).
+
+Result: _not checked yet._
+
+**During one trial: do running sessions see file changes after the heal?** One
+report saw file watchers not recover after fseventsd restarted, so the heal
+notices say to restart a session that stops seeing file changes. That is a guess
+until checked. Check it once, with any variant:
+
+1. Before the trial, make a scratch dir and a file:
+   `D=$(mktemp -d); echo one > "$D/a.txt"; echo "$D"`. Start a Claude Code
+   session in `$D`, ask it to read `a.txt`, and leave it open. Optional: open `$D`
+   in your IDE too.
+2. Control, still before the trial: from another terminal, `echo two >> "$D/a.txt"`,
+   then send the session a short prompt that does not name the file ("ok?"). Note
+   whether it mentions that `a.txt` changed and whether the IDE shows the new line
+   without a manual refresh. A watcher that misses this change now tells you nothing
+   below.
+3. Run the trial. After it ends, `echo three >> "$D/a.txt"` and repeat step 2's
+   prompt and IDE check.
+4. If the old session misses it, start a new session in `$D`, have it read
+   `a.txt`, append a fourth line and ask again. New sees it, old does not: the old
+   session's watcher did not come back.
+5. Record the Claude Code version, the variant, and seen or missed for each
+   watcher. If running sessions do see the change, remove the line from
+   `lib/heal.sh` (`FSG_COSTS`), `lib/hint.sh` and the README.
 
 Result: _not checked yet._
 

@@ -7,7 +7,7 @@ you at each step.
 
 - Install, the Claude Code plugin and team settings: [`README.md`](../../README.md) at the repo root
 - Design decisions, drain protocol, JSON schema, affected versions: [`docs/DESIGN.md`](docs/DESIGN.md)
-- Workflow and runner integration (pre-wave call, leases): [`docs/WORKFLOW-INTEGRATION.md`](docs/WORKFLOW-INTEGRATION.md)
+- Workflow and runner integration (a check before long test runs, leases): [`docs/WORKFLOW-INTEGRATION.md`](docs/WORKFLOW-INTEGRATION.md)
 - Docker trials runbook (picks the Docker step): [`docs/DOCKER-TRIALS.md`](docs/DOCKER-TRIALS.md)
 
 ## Why you may need it
@@ -15,9 +15,8 @@ you at each step.
 - **fseventsd** is the system daemon that delivers file events to Spotlight, IDEs,
   the Next.js dev server, Docker Desktop's file sharing and every other file watcher
   (Claude Code's included).
-- **The bug.** On the macOS versions listed in
-  [`docs/DESIGN.md` §9](docs/DESIGN.md#9-affected-versions) (15.7.9, 26.4.1, 26.5.1,
-  26.5.2, 26.6, 26.6.1, 26.6.2, 26.7, 26.7.1, 27.0, 27.0.1), a sustained file-event
+- **The bug.** On macOS 15.6.1 and later (the reports are in
+  [`docs/DESIGN.md` §9](docs/DESIGN.md#9-affected-versions)), a sustained file-event
   flood makes its memory grow without limit (17.7 GB measured on one affected
   Mac against Apple's own 30 MB budget) and it **stops delivering events**,
   silently. It never recovers by itself: only a restart helps, and a restart needs
@@ -29,7 +28,8 @@ you at each step.
   bind-mounted containers and Claude Code stop seeing file changes, and Spotlight
   goes stale. `fseventsd-guard status` shows the footprint far above 30 MB.
 - **Who should install it.** Whoever's `fseventsd-guard doctor --affected` exits 0.
-  On other versions nobody has reported the runaway; `install` refuses there
+  Before 15.6.1 nobody has reported the runaway, and a version at or past a known
+  fix (`FSG_AFFECTED_FIXED`, none yet) counts as fixed; `install` refuses there
   without `--force`.
 - **What it costs.** One sudo prompt at install; then a notification on each heal,
   IDE and Spotlight rescans after it, and a Docker restart during it (by the Docker
@@ -46,15 +46,16 @@ you at each step.
 | `fseventsd-guard status [--json] [--probe]` | you | Footprint vs the 30 MB budget, CPU, uptime, optional delivery probe. Exit 0 ok, 1 warn, 2 runaway, 3 cannot measure. |
 | `fseventsd-guard heal [--dry-run]` | you | Asks the agent to heal and waits for its result, showing its progress: drains running test runs, runs the Docker step, restarts fseventsd through the root helper, restores Docker and its containers, checks a bind mount round trip, notifies, logs. Stopping the command (Ctrl-C, a timeout) only stops the wait. |
 | `fseventsd-guard run -- CMD` | you | Runs a Docker-dependent command under a lease, so a heal waits for it and it waits for a heal. |
-| root helper `/usr/local/libexec/fseventsd-guard-restart` | root, via one sudoers rule, no arguments | Re-checks for itself that the target is the real fseventsd, that it is over the floor and not rate limited, saves a small evidence record, then sends SIGTERM. launchd respawns the daemon at once. |
-| launchd agent `io.github.ruslantar.fseventsd-guard` | you | The only process that heals. Every 5 minutes, and at once when `heal` or `trial` asks: runs the queued heal requests in order; warns at 500 MB (notification only); at 2 GB or a stalled probe, an emergency heal at most once per 3 hours. |
+| root helper `/usr/local/libexec/fseventsd-guard-restart` | root, via one sudoers rule, no arguments | Re-checks for itself that the target is the real fseventsd, that it is over the floor and not rate limited, saves a small evidence record, then sends SIGTERM (SIGKILL if the same daemon still runs 10 s later). launchd respawns the daemon at once. |
+| launchd agent `io.github.ruslantar.fseventsd-guard` | you | The only process that heals. Every 5 minutes, and at once when `heal` or `trial` asks: runs the queued heal requests in order; warns at 500 MB (notification only); at 2 GB, a stalled probe, or 500 MB with fseventsd using half a core or more for 3 checks in a row, an emergency heal at most once per 3 hours. |
 | `install` / `uninstall` / `doctor` | you, one sudo prompt | Sets everything up, removes every trace, checks every piece. |
 | `claude-hook prompt\|bash` (run by the Claude Code plugin's `hooks/fseventsd-guard-hook.sh`) | you, from Claude Code, macOS only | Not installed: suggests installing, with fseventsd's footprint. Installed: tells Claude sessions when a heal stops Docker ("Claude Code hooks" below). |
 
 Two tiers act:
 
-- **Wave boundary (preferred).** The parallel workflow calls `status` before each
-  wave and `heal` on warn or runaway; the agent runs that heal. See
+- **Before a long test run (preferred).** A script or workflow calls `status`
+  before a long or parallel test run (a workflow that runs in waves: before each
+  wave) and `heal` on warn or runaway; the agent runs that heal. See
   `docs/WORKFLOW-INTEGRATION.md`.
 - **Emergency (the agent).** It acts only when the daemon is clearly broken. It still
   drains first: it waits for leased runs up to 60 minutes and for other detected
@@ -85,7 +86,9 @@ Your machine is never idle, so a heal cannot wait for a free moment. Instead:
    waited for; they lose their connection. A TTY exec of anything else, such as
    `docker compose exec api bundle exec rspec`, is work.
 3. Then it stops Docker as the chosen variant requires, restarts fseventsd, restores
-   Docker and the containers that were running, verifies, and releases the drain.
+   Docker and the containers that were running, verifies (each container runs, and is
+   healthy again if it was healthy before; one already unhealthy only needs to run),
+   and releases the drain.
    While Docker answers, it stops no container and no Docker Desktop unless it
    listed every running container and none is a `--rm` container with an anonymous
    volume (Docker would delete the volume with the container). So when the drain
@@ -102,8 +105,17 @@ Your machine is never idle, so a heal cannot wait for a free moment. Instead:
    container runs by then, or when the listing fails while Docker still answers
    `docker info`.
 
+Variant B counts Docker Desktop as stopped once its processes and sockets are gone
+(or its status says `stopped`), within `FSG_DESKTOP_STOP_WAIT_S` of the stop. If
+something else starts Docker Desktop during the heal (another session's
+`open -a Docker`), the notice and the heal record say so; the guard leaves it
+running and restores as usual. The bind-mount check needs its probe dir in Docker
+Desktop's File Sharing list: the guard picks one there (or set `FSG_PROBE_DIR`),
+and a probe Docker refuses ("Mounts denied") is reported as skipped, not as a
+broken Docker. `doctor` warns when the probe dir is not shared.
+
 The `healing` notification and `status` name what the drain waits for (command,
-pid, age). At a cap a manual or wave-boundary heal gives up and tells you what was
+pid, age). At a cap a manual or pre-run (`--trigger wave`) heal gives up and tells you what was
 still running. An emergency heal goes ahead, because by then file watching is
 already broken, and names what it cut, including runs that started mid-drain.
 
@@ -139,11 +151,36 @@ Say this out loud before you heal by hand; the notifications repeat it.
   limitations" ([`docs/DESIGN.md` §6](docs/DESIGN.md#6-docker-step)).
 - Dev servers (a Rails server, background workers) reconnect to Postgres and Redis
   on the next request. Restart one if it logs connection errors.
+- Running Claude Code sessions may keep a file watcher that does not come back
+  after the restart (one report of watchers not recovering; not tested yet, see
+  [`docs/DOCKER-TRIALS.md`](docs/DOCKER-TRIALS.md)). If a session stops seeing file
+  changes after the heal, restart it.
+
+## Reduce the trigger
+
+The guard heals the runaway; fewer file events make it rarer. What seems to feed
+it (the cause is not proven):
+
+- **Temp-file churn in watched trees.** Every file created, renamed or deleted is
+  an event. One runaway started after about 10k uniquely named temp files
+  ([`docs/DESIGN.md` §9](docs/DESIGN.md#9-affected-versions), the 27.0.1 row).
+- **Test suites that create thousands of uniquely named files**, such as a fresh
+  `mktemp` dir or git repo per test. Reuse a fixed dir per worker and empty it.
+- **Throwaway dirs inside watched roots.** Keep them outside the trees your IDE,
+  dev servers and agents watch, or on a volume none of them watches.
+- **Docker bind mounts.** Writes inside a container become events on the Mac.
+  Bind-mount only the folders a container needs, not your home directory.
+
+Prior work: [talkstream/fseventsd-runaway@78396ba](https://github.com/talkstream/fseventsd-runaway/tree/78396ba),
+a case study of one Mac with a check script, a manual restart script and a Claude
+Code plugin; its author calls the causes unproven. Do not follow its plugin's
+advice to run `sudo kill -TERM $(pgrep -x fseventsd)` while this guard is
+installed: two healers race, and the raw kill skips the drain and the Docker step.
 
 ## Install
 
-macOS only, and only on the versions where the runaway is reported
-(`fseventsd-guard doctor --affected`; the list is in `config.defaults`).
+macOS only, and only on affected versions
+(`fseventsd-guard doctor --affected`; the range is in `config.defaults`).
 Needs the Command Line Tools (`xcode-select --install`) for the probe.
 
 ```sh
@@ -270,8 +307,8 @@ the root logs, the root-owned copy of the root steps (last, so an uninstall cut
 short runs again from it), every directory an install
 created (such as `/usr/local/libexec`) once it is empty, the user state (app copy,
 probe, config, heal and trial records), the user logs, the Claude Code install
-hint's stamps and its `off` file (`~/Library/Caches/fseventsd-guard-hint`, which
-`install` removes too; "Claude Code hooks" below), and the temp files an
+hint's stamps (in `~/Library/Caches/fseventsd-guard-hint`, which `install` clears
+too; its `off` file stays; "Claude Code hooks" below), and the temp files an
 interrupted guard command left (those over an hour old, so a guard command
 running in another terminal keeps its own). It takes the state and log paths from
 the agent's plist, and removes nothing until no tick or root helper runs any more.
@@ -304,8 +341,8 @@ still keeps the agent switched off from Login Items, it prints the
   and keeps the rest. Run it again to finish (the root-steps copy goes last, so it
   can finish from that copy).
 - Remove what you added yourself: lease snippets in runner scripts
-  ([`docs/WORKFLOW-INTEGRATION.md`](docs/WORKFLOW-INTEGRATION.md)), the pre-wave
-  `status`/`heal` call, `FSG_*` exports. Leases do nothing once the guard is gone,
+  ([`docs/WORKFLOW-INTEGRATION.md`](docs/WORKFLOW-INTEGRATION.md)), the
+  `status`/`heal` call before test runs, `FSG_*` exports. Leases do nothing once the guard is gone,
   and `heal` exits 9.
 
 An install made before the root-steps copy existed (no
@@ -328,7 +365,7 @@ sudo rm -rf /Library/Logs/fseventsd-guard
 rm -rf "$HOME/Library/Application Support/fseventsd-guard"
 rm -f "$HOME/Library/LaunchAgents/io.github.ruslantar.fseventsd-guard.plist"
 rm -f "$HOME/Library/Logs/fseventsd-guard.log" "$HOME/Library/Logs/fseventsd-guard.agent.log"
-rm -rf "$HOME/Library/Caches/fseventsd-guard-hint"    # the Claude Code hint's stamps
+rm -rf "$HOME/Library/Caches/fseventsd-guard-hint"    # the Claude Code hint's stamps and off file
 ```
 
 If the install created `/usr/local/libexec` and it is now empty,
@@ -338,7 +375,7 @@ If the install created `/usr/local/libexec` and it is now empty,
 
 | You see | Meaning | Do |
 |---|---|---|
-| `fseventsd at 612 MB` (warn) | Growing past its budget; watching may degrade | Nothing urgent. Run `fseventsd-guard heal` at a convenient point, or let the next wave boundary do it. |
+| `fseventsd at 612 MB` (warn) | Growing past its budget; watching may degrade | Nothing urgent. Run `fseventsd-guard heal` at a convenient point, such as before a long test run. |
 | `fseventsd: healing (2.3 GB)` | A heal started; it names what it waits for, the interactive sessions it leaves alone, the `--rm` containers the Docker step would remove, and those with an anonymous volume that would make it refuse. New leased runs wait; other new runs are not held | Nothing for leased runs: they resume by themselves. Hold off starting unleased runs until `fseventsd healed`. |
 | `fseventsd: cutting running work` | A heal proceeds with work still running: an emergency heal at a cap, or runs that started mid-drain; or the Docker Desktop restart that restores a killed heal's variant C step does. It says so when Docker's exec sessions and containers were still unknown (not listed) at the cap, names the `--rm` containers the Docker step now removes, and says when a wedged Docker (no answer to `docker info`) did not list its containers, so their volumes could not be checked | Re-run the listed test runs after the heal. |
 | `fseventsd: heal refused` (a --rm container would lose its data) | The drain ended with a running `--rm` container that has an anonymous volume, and the Docker step would stop it: Docker would delete the volume with it. Nothing was stopped or restarted (heal exit 14). An emergency heal refused this way waits out the 3-hour emergency interval | Stop the container yourself once its data is safe, or start it again with a named volume (`-v NAME:PATH`), then `fseventsd-guard heal`. |
@@ -362,7 +399,9 @@ If the install created `/usr/local/libexec` and it is now empty,
 Logs: `~/Library/Logs/fseventsd-guard.log` (user side, one line per check),
 `/Library/Logs/fseventsd-guard/` (helper log and small evidence records),
 `~/Library/Application Support/fseventsd-guard/heals/` (per-heal records with
-phase timings).
+phase timings; `docker-stop.txt` has variant B's stop and each poll), and `daily`
+next to it (one line per day: checks, the largest footprint and CPU share, heals
+that restarted fseventsd, and the median and 95th percentile of the event rate).
 
 ## Everyday commands
 
@@ -411,15 +450,20 @@ root `README.md`.
 
 | Hook | Speaks when | Says | How often, at what cost |
 |---|---|---|---|
-| `UserPromptSubmit` (`prompt`): the install nudge | The guard is not installed (no agent plist, no app copy) on an affected macOS version | fseventsd's footprint in MB and as a multiple of the 30 MB budget, its uptime and level, why that matters, and what to run in a new terminal window (install asks for sudo): `[ -d ~/fseventsd-guard ] \|\| git clone https://github.com/RuslanTar/fseventsd-guard.git ~/fseventsd-guard; ~/fseventsd-guard/plugins/fseventsd-guard/fseventsd-guard install`, then the same path with `doctor`. A short warning for you (`systemMessage`) and the facts for Claude, which says that you have not been told yet | At most hourly at runaway (2 GB and up), every 3 hours at warn (500 MB and up), daily below that; the stamps in `~/Library/Caches/fseventsd-guard-hint` are shared by every session. It measures (`top`, about 2 s) at most once an hour; any other prompt costs a file read (about 25 ms in all, through the wrapper) |
-| `PreToolUse` and `PostToolUse` on Bash (`bash`): the heal notice | The guard is installed and a heal is draining, in its Docker step, holding runs because Docker did not verify, or ended in the last 10 minutes | To Claude only: since when, the trigger, what the heal's Docker step does to Docker, that `docker`, `docker compose` and test commands may fail or hang until it ends, that leased runs resume by themselves, that restarting Docker by hand interferes, and `status`; once it ended, the result and that a failure in that window is likely the heal | Once per heal, phase (draining, Docker step, held, ended) and session; a subagent that Claude Code names (`agent_id`) gets its own. Stamps in `$TMPDIR/fseventsd-guard-hook`, removed after a day. It reads the guard's state files only, never Docker or fseventsd: about 15-20 ms per Bash call with no heal, through the wrapper |
+| `UserPromptSubmit` (`prompt`): the install nudge | The guard is not installed (no agent plist, no root helper: an install stopped at the root question or at sudo does not count) on an affected macOS version | fseventsd's footprint in MB and as a multiple of the 30 MB budget, its uptime and level, why that matters, and what to run in a new terminal window (install asks for sudo): `if [ -d ~/fseventsd-guard ]; then git -C ~/fseventsd-guard pull --ff-only; else git clone https://github.com/RuslanTar/fseventsd-guard.git ~/fseventsd-guard; fi && ~/fseventsd-guard/plugins/fseventsd-guard/fseventsd-guard install` (an existing clone is updated first), then the same path with `doctor`. A short warning for you (`systemMessage`) and the facts for Claude, which says that you have not been told yet | At most hourly at runaway (2 GB and up), every 3 hours at warn (500 MB and up), daily below that; the stamps in `~/Library/Caches/fseventsd-guard-hint` are shared by every session. It measures (`top`, about 2 s) at most once an hour; any other prompt costs a file read (about 25 ms in all, through the wrapper) |
+| `PreToolUse` and `PostToolUse` on Bash (`bash`): the heal notice | The guard is installed and a heal is draining, in its Docker step, holding runs because Docker did not verify, or ended in the last 10 minutes | To Claude only: since when, the trigger, what the heal's Docker step does to Docker, that `docker`, `docker compose` and test commands may fail or hang until it ends, that leased runs resume by themselves, that restarting Docker by hand interferes, and `status`; once it ended, the result, that a failure in that window is likely the heal, and (when fseventsd restarted) to restart a session that stops seeing file changes | Once per heal, phase (draining, Docker step, held, ended) and session; a subagent that Claude Code names (`agent_id`) gets its own. Stamps in `$TMPDIR/fseventsd-guard-hook`, removed after a day. It reads the guard's state files only, never Docker or fseventsd: about 15-20 ms per Bash call with no heal, through the wrapper |
 
 Once the guard is installed the nudge stops, and the agent heals unattended.
 To silence both hooks, set `FSG_HINT=0` in the environment Claude Code starts with
 (an `export` in your shell profile, or `"env": {"FSG_HINT": "0"}` in
-`.claude/settings.local.json`), or create `~/Library/Caches/fseventsd-guard-hint/off`.
-`install` and `uninstall` remove that directory, the `off` file included;
-`FSG_HINT=0` stays.
+`.claude/settings.local.json`), or create the `off` file:
+
+```sh
+mkdir -p ~/Library/Caches/fseventsd-guard-hint && touch ~/Library/Caches/fseventsd-guard-hint/off
+```
+
+`install` and `uninstall` remove the nudge's stamps from that directory, not the
+`off` file.
 
 ## Replacing an older watcher
 
@@ -447,14 +491,15 @@ None of them lets a non-root user gain root.
   empty stamp. The root-owned directory keeps users out otherwise. Fix later: write
   a temp file and `mv` it, refuse on failure, and treat an unreadable stamp as
   "restarted now".
+- **Stale Docker Desktop sockets.** A Docker Desktop that crashed and left its
+  socket files behind is seen as stopped only through its status; otherwise B's
+  stop wait runs out (logged; the heal goes on). Accepted.
 - **PID reuse between the re-check and the kill.** Tens of milliseconds; macOS
   hands out pids in sequence, so reuse there is not practical, and a respawn in
   that window makes `kill` fail with ESRCH (exit 71). Accepted.
 - **Helper environment.** macOS `sudo` keeps `LANG`, `LC_*`, `TZ` and `HOME`. None is
   used in a security-relevant way, but tool output could vary with the locale. Fix
-  later: `LC_ALL=C; export LC_ALL` in the helper. Its `find` and `du` on the history
-  directory before the kill have no time bound, while its stale-lock window is 5
-  minutes (the heal bounds the whole helper call with `FSG_HELPER_TIMEOUT_S`).
+  later: `LC_ALL=C; export LC_ALL` in the helper.
 - **Heal lock put-back window.** The heal lock appears only with its owner record
   inside (built under a private name, then renamed into place), and a stale lock is
   renamed aside and deleted only if it is the one judged stale. If it turns out to
@@ -520,7 +565,7 @@ None of them lets a non-root user gain root.
   `docker info` and container listing (up to 100 s) variant C runs before its
   restart.
 - **Smaller inaccuracies.** `heal --dry-run` exits 0 when it cannot measure (a real
-  heal exits 3). After helper exit 72 (SIGTERM sent, no respawn seen) the suggested
+  heal exits 3). After helper exit 73 (signal sent, no respawn seen) the suggested
   manual fix `sudo kill -TERM $(pgrep -x fseventsd)` finds no process.
 - **Open minor items (review of 2026-10-20).** Not fixed on purpose:
   - Helper refusals are not predicted by the precheck: it lacks the helper's comm and
@@ -570,8 +615,7 @@ None of them lets a non-root user gain root.
     request, trial collection), because the heartbeat is written only at tick start
     and end.
   - Timing-flaky tests: a 1 s `FSG_RUN_MAX_WAIT_S` can give up before the first
-    "holding" line, the pty tests answer after a fixed `sleep 2`, and a real process
-    with pid 4242 looks like the fake fseventsd.
+    "holding" line, and a real process with pid 4242 looks like the fake fseventsd.
 - **Open minor items (review of 2026-10-22).** Not fixed yet:
   - `install` replaces the loaded agent's app copy and rebuilds the probe before it
     asks `Run this as root?`, and does not put them back on `N` or when a root step
@@ -649,11 +693,15 @@ None of them lets a non-root user gain root.
   `PreToolUse` and `PostToolUse` reaches the model, and whether a subagent's hook
   input carries `agent_id` (without one, a subagent shares its session's notice),
   or that `FSG_HINT` set in a settings file's `env` reaches the hooks.
-  The nudge's `top` sample (about 2 s on the owner's Mac) has no bound of its own,
-  only the hook's 10 s timeout; its stamp is written first, so a hang costs one
-  prompt an hour. An agent installed before the drain marker named its Docker step
+  The nudge's `top` sample (about 2 s on the author's Mac) is bounded at
+  `FSG_TOP_TIMEOUT_S` (15 s), so the hook's 10 s timeout comes first; its stamp is
+  written first, so a hang costs one prompt an hour. An agent installed before the drain marker named its Docker step
   writes none, so until `install` is re-run, the notice for a draining heal lists
   the three steps instead of naming one.
+- **Heal notice costs and keys.** While a heal runs, each Bash call checks the
+  drain's owner (a `ps` and a few reads) before the once-per-phase stamp, as the
+  stamp's name comes from that check. A session id with JSON escapes reads as
+  empty, so such sessions share one notice; Claude Code's ids are UUIDs. Accepted.
 - **Native Windows without Git for Windows.** The hooks need `bash`. Where Claude
   Code finds none, it may show a hook error on each prompt and Bash call before
   the `uname` check runs. Turn the plugin off there with `enabledPlugins` false in
@@ -685,7 +733,7 @@ None of them lets a non-root user gain root.
   after a signal to the agent (it waits for the Docker Desktop stop or root helper
   call the signal cut into), an agent killed outright or during that restore (the
   next tick recovers its Docker intent), a Docker Desktop that runs but does not answer,
-  helper exit 72 with a late respawn, leases and drains across TZ/locale, a helper that
+  helper exit 73 with a late respawn, helper exit 72 (SIGKILL needed), leases and drains across TZ/locale, a helper that
   keeps failing under the agent, drain-marker write failure and a slow restore,
   reinstall then uninstall, `--rm` and one-off containers, install during a heal, planted temp
   names and pre-existing unsafe dirs (test mode), the simulated-root refusals, tools

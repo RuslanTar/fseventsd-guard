@@ -15,7 +15,7 @@ decision from an accident. The user-facing summary is `../README.md`.
 | Drain sketch: a lock that runners respect, running specs finish (cap ~60 min, configurable), then stop Docker, restart, start again, release | owner, 2026-10-16 (improved on, §5) |
 | Emergency tier: stop and heal, but through the drain | owner, 2026-10-16 |
 | Suggest the guard only on affected macOS versions | owner, 2026-10-16 (§9) |
-| Affected = an explicit list of versions with a reported reproduction, not a range | owner, 2026-10-20 (§9) |
+| Affected = a range: from the first version with a reported runaway (15.6.1) up to the first fixed version of each major line (replaces an explicit list, 2026-10-20) | owner, 2026-10-25 (§9) |
 | Only the launchd agent runs heals; wave, manual and trial callers write a request and wait for its result | owner, 2026-10-20 (§5.3) |
 
 ## 2. Parts and where they live
@@ -30,7 +30,7 @@ decision from an accident. The user-facing summary is `../README.md`.
 | Sudoers drop-in | `/etc/sudoers.d/fseventsd-guard` (root:wheel 0440) | Standard include dir. No dot in the name (sudo skips dotted names; the installer's temp file uses that). |
 | Root evidence | `/Library/Logs/fseventsd-guard/` | Root writes its evidence where the user cannot alter it. |
 | User log | `~/Library/Logs/fseventsd-guard.log` | The standard per-user log dir; bounded to 5000 lines. |
-| launchd agent | `~/Library/LaunchAgents/io.github.ruslantar.fseventsd-guard.plist` | Per-user, no root. The only process that heals (§5.3). It runs the app copy's `fseventsd-guard` script directly (`#!/bin/bash`), so Background Items lists it by the guard's name, not as "bash". `doctor` reports launchctl's last exit status for it: a tick exits 0-3 (its level), 4-11 (an emergency heal's code, or 10 when it cannot take its lock) or 130 (stopped by a signal, after its trap cleaned up), so any other code is a warning. Another plist in the LaunchAgents dir that runs the app copy under another label (an install left under an older label) would heal next to it: `install` refuses before it changes anything, and `doctor` fails, naming the plist, its label and the fix. |
+| launchd agent | `~/Library/LaunchAgents/io.github.ruslantar.fseventsd-guard.plist` | Per-user, no root. The only process that heals (§5.3). It runs the app copy's `fseventsd-guard` script directly (`#!/bin/bash`), so Background Items lists it by the guard's name, not as "bash". `doctor` reports launchctl's last exit status for it: a tick exits 0-3 (its level), 4-11 (an emergency heal's code, or 10 when it cannot take its lock), 14 (its emergency heal refused to stop Docker for data safety, §6: `doctor` names the last heal's result and record, with no reinstall advice) or 130 (stopped by a signal, after its trap cleaned up), so any other code is a warning. Another plist in the LaunchAgents dir that runs the app copy under another label (an install left under an older label) would heal next to it: `install` refuses before it changes anything, and `doctor` fails, naming the plist, its label and the fix. |
 
 The runner-side lease code (`lib/lease.sh`) is POSIX sh so that sh, bash and zsh
 scripts can source it. The root helper is `/bin/sh` with absolute tool paths.
@@ -210,10 +210,17 @@ scripts can source it. The root helper is `/bin/sh` with absolute tool paths.
 | wave boundary | workflow calls `status` → 1 or 2 | `heal --trigger wave`: a request the agent runs (cap policy abort) | n/a | preferred tier |
 | wave back-off | a wave heal gave up at the drain cap < 60 min ago | wave heals exit 11 without draining | 60 min | a never-free machine would otherwise get an hour-long hold at every wave boundary; whether a warn alone should drain at all is an open question (§12) |
 | emergency | footprint ≥ `FSG_ACT_MB`, or a **confirmed** stalled probe | the tick's own emergency heal (cap policy proceed) | 2 GB | well above warn, before the machine suffers |
+| CPU escalator | footprint ≥ `FSG_WARN_MB` and fseventsd at ≥ `FSG_CPU_ESCALATE_PCT` of one core for `FSG_CPU_ESCALATE_TICKS` ticks in a row | counts as runaway, so as emergency above; `status` says runaway too (a wave boundary drains with the full cap) | 50%, 3 ticks | a runaway pins a core: 1.2 GB at 100% CPU ([claude-code#96008](https://github.com/anthropics/claude-code/issues/96008)) sat between warn and act. macOS's own CPU report fires at 50% over 180 s ([talkstream/fseventsd-runaway@78396ba](https://github.com/talkstream/fseventsd-runaway/tree/78396ba)) |
 | emergency interval | last guard restart, last heal attempt that reached the Docker step (or an emergency heal refused there, exit 14), or the helper's root stamp < 3 h ago | notify only | 10800 s | the original requirements: "at most once per ~3 h", "no restart loops". Counted from the newest of the three, so a wave heal plus an emergency heal cannot loop, and neither can a helper that keeps failing after Docker was stopped, nor a drain repeated every tick for a `--rm` container that keeps running (§6) |
 | helper floor | helper refuses below | n/a | 150 MB | above healthy (≤ 90 MB), below warn |
 | helper interval | helper refuses within | n/a | 1800 s | hard backstop under every tier |
 | emergency ceiling | footprint ≥ `FSG_EMERGENCY_CUT_MB` during an emergency drain | stop waiting, proceed | 8 GB | the daemon reached 17 GB on a 96%-full disk; waiting 60 min more risks the machine |
+
+The CPU share is the CPU time fseventsd used since the previous tick divided by the
+wall time between the two (`ps -o time`, kept in `tick-sample` in the state dir), an
+exact average over the 5 minutes rather than the decayed `ps -o %cpu`. A new pid
+starts over, so a restart resets the count. `status` honours the agent's count
+only for the same pid and a record younger than two agent intervals.
 
 A stall counts only if a second probe, run right away, also stalls. At load
 average 100-300 one slow probe is not evidence. All values are config knobs, to be
@@ -422,11 +429,17 @@ phase=docker-before (docker-intent written; cannot ──▶ 10, nothing stopped
 ```
 
 Held runs are released only onto a **verified** Docker: the engine answers, every
-recorded container runs (healthy when it has a check) and the bind-mount round trip
-works. That holds on every path: a restart, a failed restart, helper exit 72, and a
+recorded container runs (healthy when it was healthy before the heal) and the
+bind-mount round trip works. That holds on every path: a restart, a failed restart, helper exit 73, and a
 heal stopped part way. Running the after-step is not enough.
 
-On helper exit 72 (SIGTERM sent, no new daemon within its 15 s) the heal keeps
+The helper sends SIGKILL when the same genuine daemon still runs 10 s after
+SIGTERM (identity checked again first), then waits up to 30 s, as launchd may
+throttle the respawn after a KILL. A restart that needed it exits 72: the heal goes
+on as after exit 0, and logs, records and notifies that SIGKILL was needed. Not seen
+yet: on the reports so far SIGTERM was enough.
+
+On helper exit 73 (signal sent, no new daemon within its wait) the heal keeps
 waiting for a new, healthy fseventsd (`FSG_HEALTHY_TIMEOUT_S`) before the Docker
 after-step. If one appears, the heal goes on as after a restart and can end healed;
 if not, it ends as a failed restart (exit 7), with Docker verified or runs held.
@@ -614,13 +627,19 @@ one was a trial's.
    by name (compose may have recreated it under the same name with a new id; the id
    is used only when no name was recorded or only the id still exists). A container
    that is not back within `FSG_CONTAINER_TIMEOUT_S` (running, and healthy when it
-   has a check) fails the verify. It counts a failure only when the engine answers
+   was healthy before the heal) fails the verify. It counts a failure only when the engine answers
    and says it is gone (`No such container`; `docker inspect` exits 1 for a daemon
    it cannot reach too) or not running, and at most one per `FSG_AGENT_INTERVAL_S`,
    because callers kick ticks seconds apart; the heal's own after-step can count the
-   first. A container that runs but is not healthy yet (postgres after a Docker
-   Desktop restart) never counts: it holds runs until it is healthy or the intent
-   expires. At 2 failures the container is dropped from the set and named in the
+   first. A container that was healthy before the heal and runs but is not healthy
+   yet (postgres after a Docker Desktop restart) never counts: it holds runs until
+   it is healthy or the intent expires. One that was unhealthy or starting before
+   the heal (a health check that fails for its own reasons) only needs to run: its
+   health is not the heal's to fix, and requiring it would hold runs for the whole
+   `FSG_FAILED_HOLD_S` after every heal. The record keeps each container's health
+   (`health=` in `docker-before.txt`, `restore_health=` in the intent and the
+   hold); an intent or hold without it, from an older guard, needs every container
+   healthy when it has a check. At 2 failures the container is dropped from the set and named in the
    notification (left as it is; start it by hand), so one container that will not
    start cannot hold runs until the expiry. A pass in which it is back resets its
    count. This replaces the `gone=` list.
@@ -650,7 +669,7 @@ one was a trial's.
 | Variant | Before the restart | After the restart |
 |---|---|---|
 | A containers only | record running IDs; `docker stop -t 30` them | `docker start` the same IDs |
-| B quit Docker (default until the trials) | record IDs; `docker desktop stop` (wait for `stopped`) | `docker desktop start`; wait for the engine; start recorded IDs not already running |
+| B quit Docker (default until the trials) | record IDs; `docker desktop stop` (wait until it stopped, below) | `docker desktop start`; wait for the engine; start recorded IDs not already running |
 | C restart Docker after | nothing | `docker desktop restart`; wait for the engine; start recorded IDs not running |
 | none | nothing | nothing (the naive restart; trial step 0) |
 
@@ -659,6 +678,18 @@ one was a trial's.
   Docker first is the variant most likely to avoid both, because no file-sharing
   process holds FSEvents streams across the restart. Change `FSG_DOCKER_VARIANT`
   after the trials.
+- **B's stop check.** Docker Desktop counts as stopped when no Desktop process runs
+  and its backend socket (`~/Library/Containers/com.docker.docker/Data/backend.sock`)
+  and user socket are gone, or when `docker desktop status` says `stopped`. Once
+  Desktop has quit, status fails only after ~16 s (it dials the missing backend
+  socket), so processes and sockets are polled every second and status, bounded to
+  3 s, only when they do not decide. The wait is `FSG_DESKTOP_STOP_WAIT_S` (60 s)
+  counted from the stop call, which itself takes 13-18 s. The stop's exit code and
+  time, every poll and the decision go to the heal record (`docker-stop.txt`,
+  `docker_stop=` in `result.txt`). A backend that appears with a new pid during the
+  heal was started by something else (another session's `open -a Docker`): the
+  guard says so in the record and the notice instead of reporting a failed stop,
+  does not stop it again, and restores as usual.
 - `--rm` containers (`HostConfig.AutoRemove`) are recorded but left out of the
   restore set: Docker deletes them when they stop, so `docker start` would fail and
   every such heal would end in exit 8. The drain waits for them first, like other
@@ -793,11 +824,19 @@ one was a trial's.
   containers by name, bind mount), `fseventsd-guard release`, or
   `FSG_FAILED_HOLD_S` (60 min) passes. A trial's hold is released only by the
   operator (`release`), after recovering Docker by hand.
-- **Verify:** every recorded container running, and healthy when it has a health
-  check. Then a bind-mount round trip: the host writes a nonce, a throwaway
+- **Verify:** every recorded container running, and healthy when it was healthy
+  before the heal (§5.5). Then a bind-mount round trip: the host writes a nonce, a throwaway
   container (`--pull never --network none`, a local alpine/busybox/bash image, else a
-  recorded container's image) reads it and writes a reply, and the host reads the
-  reply. Watching inside a container is checked by hand in the trials (no stock
+  recorded container's image) reads it and writes a reply into the same file
+  (`fsg-probe.txt`), and the host reads the reply and removes the file. The probe
+  dir must be in Docker Desktop's File Sharing list (`FilesharingDirectories` in
+  its `settings-store.json`, read only; absent = default sharing, which covers
+  `/Users`): the state dir's `mountprobe` when shared, else a dir in the first
+  shared folder under your home, or `FSG_PROBE_DIR`. A `docker run` that fails with
+  "Mounts denied" / "not shared" marks the check **skipped**, not failed, and the
+  notice says so: an unshared probe dir is a setup issue, not a broken Docker, and
+  must not hold runs or refuse heals. Doctor warns when the probe dir is not
+  shared. Watching inside a container is checked by hand in the trials (no stock
   image ships inotify tools).
 - If the engine is wedged and `docker ps` cannot list the containers, the restore set
   is empty. B and C still restart Docker Desktop, and containers with an
@@ -817,7 +856,7 @@ one was a trial's.
 | `run` | the command's own code; 75 when it gave up waiting for a drain |
 | `release` | 0 released or nothing held; 1 a running heal holds the drain (it releases it itself) |
 | `doctor` | 0 all ok, 1 warnings, 2 failures; `--affected`: 0 affected, 1 not affected, 3 unknown |
-| helper | 0 restarted, 64 arguments, 65 below the floor, 66 rate limited, 69 no genuine fseventsd, 70 cannot measure, 71 kill failed, 72 no respawn, 75 another restart running, 77 not root |
+| helper | 0 restarted, 64 arguments, 65 below the floor, 66 rate limited, 69 no genuine fseventsd, 70 cannot measure, 71 kill failed, 72 restarted but only after SIGKILL (SIGTERM ignored for 10 s), 73 no respawn, 75 another restart running, 77 not root |
 
 The heal codes that callers handle (`WORKFLOW-INTEGRATION.md` §1, `DOCKER-TRIALS.md`)
 keep their meaning now that the agent runs the heal:
@@ -850,7 +889,7 @@ change. New fields may be added. A breaking change bumps the schema to `/2`.
   "cpu_pct": 4.2,
   "uptime_s": 8821,
   "thresholds": {"budget_mb": 30, "warn_mb": 500, "act_mb": 2048},
-  "probe": {"ran": true, "result": "ok|stalled|error|unavailable|skipped", "latency_ms": 11, "timeout_s": 10},
+  "probe": {"ran": true, "result": "ok|stalled|error|unavailable|skipped", "latency_ms": 11, "timeout_s": 10, "start_ms": 0},
   "drain": {"pending": false, "phase": null, "reason": null, "live_leases": 0},
   "last_heal": null,
   "docker_intent": null,
@@ -863,7 +902,7 @@ change. New fields may be added. A breaking change bumps the schema to `/2`.
 ```
 
 - `pid`, `footprint_mb`, `cpu_pct`, `uptime_s` are `null` when level is `unknown`.
-- `last_heal`, when present, is `{"epoch", "result" (healed|restart-failed|restored-partly|aborted-at-cap|refused-anonymous-volumes|refused-unlisted|drain-not-marked|lock-not-taken|intent-not-written), "trigger", "docker_variant", "wall_s"}`.
+- `last_heal`, when present, is `{"epoch", "result" (healed|restart-failed|restored-partly|aborted-at-cap|refused-anonymous-volumes|refused-unlisted|drain-not-marked|intent-not-written), "trigger", "docker_variant", "wall_s"}`.
 - `docker_intent` is `null`, or `{"owner_pid", "owner_alive", "trigger", "docker_variant", "since_epoch", "after_step_done"}` while a heal's Docker step has not verified (§5.5). `owner_alive` is true while the tick that wrote it is still in that heal; false means that heal is gone, Docker may be down and the next tick recovers it. `after_step_done` is true once the after-step ran and every container in the restore set was started.
 - `requests` is the agent's queue (§5.3): `queued`, the number of requests not yet claimed, and `running`, `null` or `{"id", "trigger", "requester_pid", "requester_alive", "phase"}`.
 - `agent` is the background agent's heartbeat (`heartbeat` in the state dir), which
@@ -880,37 +919,52 @@ change. New fields may be added. A breaking change bumps the schema to `/2`.
   is judged by its `TICK` lines only, and not at all without one (§13). `requests`
   is true when the installed app copy serves heal requests (`FSG_REQUEST_PROTOCOL`
   matches the caller's).
+- `probe.start_ms` is how long the probe's `FSEventStreamStart` took (§10), `null`
+  when no probe ran or the probe did not report it.
 - `reasons` lists why the level is not ok; `error` says why it could not measure.
 - `os.affected` is `true`, `false` or `null` (unknown).
 
-Footprint comes from `top -l 1 -pid P -stats mem` (the physical footprint, the
-figure Apple's budget refers to). CPU is `ps -o %cpu`, a decayed average; one `top`
-sample cannot give CPU. Uptime is `ps -o etime`. No root needed.
+Footprint comes from `top -l 1 -pid P -stats pid,mem,cmprs,ports` (MEM is the
+physical footprint, the figure Apple's budget refers to), bounded by
+`FSG_TOP_TIMEOUT_S` (15 s; a slower sample counts as cannot measure). Each tick's
+`TICK` log line also carries the compressed memory (`cmprs_mb`) and Mach ports
+(`ports`) from that sample and the swap in use (`swap_used_mb`, from `sysctl
+vm.swapusage`); they are logged only. Ports tell many live clients apart from
+internal state, and swap shows what the runaway costs the machine. The state dir's
+`daily` keeps one line per day (ticks, the largest footprint and CPU share, heals
+that restarted fseventsd, the event rate's median and 95th percentile), so the
+thresholds can be checked against weeks of data once the log has been trimmed. CPU is
+`ps -o %cpu`, a decayed average; one `top` sample cannot give CPU. The tick also
+logs `cpu_avg_pct`, the share of one core since the previous tick, and
+`cpu_streak` (§4). Uptime is `ps -o etime`. No root needed.
 
 ## 9. Affected versions
 
-- The guard is suggested only on the macOS versions in `FSG_AFFECTED_VERSIONS`
-  (`config.defaults`): an explicit list, not a range (owner, 2026-10-20: "limit it
-  to the macOS versions where the bug reproduces"). A version is on the list when a
-  first-hand report states it and shows the runaway (multi-GB footprint against the
-  30 MB budget that a restart clears, often with events no longer delivered).
-- Every other version counts as not affected, including releases newer than the
-  list: none has a report yet. That is not proof that they are clean. The bug looks
-  long-standing (the same defect was found in fseventsd 1400.100.1 on 15.7.9 and
-  1413.160.2 on 26.7.1), no fix is claimed anywhere, and healthy readings after a
-  few days without a file-event flood say nothing (27.0.1 has both). The list
-  therefore goes stale on each release: when the runaway shows on an unlisted
-  version, add it to `FSG_AFFECTED_VERSIONS` and its report to the table below,
-  in one pull request. Until then `install --force` installs there.
+- The guard is suggested only on affected macOS versions (owner, 2026-10-25): from
+  `FSG_AFFECTED_MIN` (15.6.1, the earliest version with a first-hand report) up to,
+  not including, the first fixed version of the same major line, listed in
+  `FSG_AFFECTED_FIXED` (`config.defaults`; `"26.8 27.1"` would mean 26.x is fixed
+  from 26.8 and 27.x from 27.1). A major line with no entry counts as affected from
+  the minimum on, newer lines included. No fix is known, so the list is empty.
+- This replaces an explicit list of reported versions (owner, 2026-10-20), which
+  went stale on every release: the bug looks long-standing (the same defect was
+  found in fseventsd 1400.100.1 on 15.7.9 and 1413.160.2 on 26.7.1), no source
+  claims a fix, and healthy readings after a few days without a file-event flood
+  say nothing (27.0.1 has both). Versions in the range without a report of their
+  own (26.0, 27.2) are treated as affected for the same reason.
+- When Apple ships a fix, add that line's first fixed version to
+  `FSG_AFFECTED_FIXED` with its evidence below, in one pull request. A report on a
+  version older than 15.6.1 moves `FSG_AFFECTED_MIN` down.
 - `fseventsd-guard doctor --affected` (exit 0/1/3) and the `os.affected` field in
-  `status --json` expose the answer. `install` refuses on an unlisted version
-  unless `--force`. `FSG_AFFECTED=yes|no` overrides it on one machine. Versions
-  compare numerically, so `27.0` also matches `27.0.0`.
+  `status --json` expose the answer. `install` refuses outside the range unless
+  `--force`. `FSG_AFFECTED=yes|no` overrides it on one machine. Versions compare
+  numerically, component by component (15.10 is after 15.6.1, 27.0 equals 27.0.0).
 
-Reports behind the list (researched 2026-10-20; no source claims a fix):
+Reports behind the range (researched 2026-10-20 and 2026-10-25; no source claims a fix):
 
 | macOS (build) | Report |
 |---|---|
+| 15.6.1 (24G90) | The earliest version with a report, by mikirejf ([bun#43870](https://github.com/oven-sh/bun/issues/43870)) |
 | 15.7.9 (24G830) | 2.9 GiB, back to 4.5 MB after a restart, FB25224901; the reporter hedges only on the cause ([Apple forum 849819](https://developer.apple.com/forums/thread/849819)) |
 | 26.4.1 | ~62 GB resident at 193% CPU ([remotion#7207](https://github.com/remotion-dev/remotion/issues/7207)) |
 | 26.5.1 (25F80) | ~19 GB in `top` (~2.5-3 GB resident), ~100% CPU, ~160 CPU-hours over 36 days ([Kiro#9742](https://github.com/kirodotdev/Kiro/issues/9742)) |
@@ -920,8 +974,8 @@ Reports behind the list (researched 2026-10-20; no source claims a fix):
 | 26.6.2 (25G83) | 42 GiB ([claude-code#98769](https://github.com/anthropics/claude-code/issues/98769)); 67 GB ([agent-legion#637](https://github.com/LuciusCao/agent-legion/issues/637)); 19.8 GB ([atrium-issues#104](https://github.com/jonnyasmar/atrium-issues/issues/104)) |
 | 26.7 (25G229) | 8.2 GB, and Claude Code fell back to polling: "native file watching is not delivering events" ([claude-code#98769](https://github.com/anthropics/claude-code/issues/98769)) |
 | 26.7.1 (25G241) | 26.6 MB to 2.31 GB in six minutes, FB25090184 ([Apple forum 849819](https://developer.apple.com/forums/thread/849819)) |
-| 27.0 (26A428) | 24 GB, FB25046068 ([talkstream/fseventsd-runaway](https://github.com/talkstream/fseventsd-runaway)); 0 events delivered at 2.3 GB ([gai-tools#62](https://github.com/Navibyte-Innovations-Pvt-Ltd/gai-tools/issues/62)) |
-| 27.0.1 (26A434) | The owner's Mac: 17.7 GB, a fresh watcher got 0 events for 50 writes; 36-37 GiB ([codex#34376](https://github.com/openai/codex/issues/34376)) |
+| 27.0 (26A428) | 24 GB, FB25046068 (talkstream, in the body of [claude-code#98769](https://github.com/anthropics/claude-code/issues/98769) and in [talkstream/fseventsd-runaway](https://github.com/talkstream/fseventsd-runaway)); 0 events delivered at 2.3 GB ([gai-tools#62](https://github.com/Navibyte-Innovations-Pvt-Ltd/gai-tools/issues/62)) |
+| 27.0.1 (26A434) | The owner's Mac: 17.7 GB, a fresh watcher got 0 events for 50 writes; 36-37 GiB ([codex#34376](https://github.com/openai/codex/issues/34376)); flat at 4-11 MB for a week, then 10, 52 and 558 MB within an hour after about 10k uniquely named temp files, 7.5 GB at 18 h and 14 GB at 26 h, no recovery (ww2283, 2026-10-20, [claude-code#98769](https://github.com/anthropics/claude-code/issues/98769)) |
 
 Not listed: reports that give only a Darwin version (25.3, 25.5, 25.6, 24.6) or no
 version at all, because they cannot be matched against `sw_vers`.
@@ -936,6 +990,22 @@ calls block inside a wedged daemon. The shell adds an outer bound of timeout + 5
 Measured on the owner's Mac with a healthy daemon: 3-11 ms. The probe adds one
 create and one delete per check: 2 events every 5 minutes.
 
+The probe also times `FSEventStreamStart` and appends it as `start_ms` to its ok
+and stalled lines (absent when the start had not returned by the timeout; parsers
+that read `latency_ms` are unaffected). A healthy daemon takes 0-1 ms; a sick one
+took 13-7,735 ms in [bun#43870](https://github.com/oven-sh/bun/issues/43870). It
+goes into each tick's `TICK` log line, `status --probe` and `status --json`
+(`probe.start_ms`). No heal acts on it yet: a threshold needs readings from sick
+daemons on more Macs first.
+
+After the start the probe also prints `FSEventsGetCurrentEventId()` as `eid`. The
+tick logs it with `ev_s`, the system-wide event rate since the previous tick (no
+root needed). The rate starts over when the fseventsd pid or the boot time changes,
+because event ids jump by billions after a boot. It is logged only: it records the
+flood that a restart erases, and gives the thresholds data (§12, question 1). One
+machine measured 50-200 events/s normally and 2,117-5,715 on flood days
+([talkstream/fseventsd-runaway@78396ba](https://github.com/talkstream/fseventsd-runaway/tree/78396ba)).
+
 ## 11. Changes from the original plan
 
 | Plan | Built | Why |
@@ -949,15 +1019,15 @@ create and one delete per check: 2 events every 5 minutes.
 | Footprint via `top` (and `footprint` if cheap) | `top` for the decision; `footprint` (10 s bound) only in the helper's evidence | `footprint` on a 17 GB process is slow |
 | (not planned) | Emergency ceiling 8 GB cuts the drain short | Protects a machine with a nearly full disk |
 | (not planned) | Helper requires ppid 1 | A root process exec'ing the binary from elsewhere is not the daemon |
-| (not planned) | `doctor --affected` and the affected version list | Owner, 2026-10-16 and 2026-10-20 |
+| (not planned) | `doctor --affected` and the affected version range | Owner, 2026-10-16, 2026-10-20 and 2026-10-25 |
 
 ## 12. Open questions
 
 1. Thresholds after a few days of logs (warn 500 MB, act 2 GB, floor 150 MB,
    emergency interval 3 h, ceiling 8 GB, drain cap 60 min).
 2. Which Docker variant wins (trials pending). B is the default until then.
-3. Keeping the affected version list current (§9): it covers no release newer than
-   27.0.1, and macOS 27.2 is already at release candidate.
+3. Recording fixes (§9): `FSG_AFFECTED_FIXED` is empty, so every version from
+   15.6.1 on counts as affected until a fix is reported and added.
 4. A stall with a footprint below the helper's floor: the helper refuses, and the
    guard notifies with the manual command. Should the helper accept a stall it can
    verify itself (a root-owned copy of the probe)?

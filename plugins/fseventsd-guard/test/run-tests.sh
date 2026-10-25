@@ -13,8 +13,37 @@ HERE=$(cd -P "$(dirname "$0")" && pwd)
 GUARD_HOME=$(cd -P "$HERE/.." && pwd)
 FILTER=${1:-}
 
+# Dirs of earlier runs killed outright (SIGKILL skips the trap below): only those
+# with this suite's owner file, and only once the run it names is gone.
+for d in "${TMPDIR:-/tmp}"/fsg-test.*; do
+  [ -f "$d/.owner" ] || continue
+  p=$(cat "$d/.owner" 2>/dev/null)
+  case $p in ''|*[!0-9]*) continue ;; esac
+  kill -0 "$p" 2>/dev/null || rm -rf "$d"
+done
 ROOT=$(mktemp -d "${TMPDIR:-/tmp}/fsg-test.XXXXXX") || exit 1
 ROOT=$(cd -P "$ROOT" && pwd)
+echo $$ > "$ROOT/.owner"
+BG_PIDS=""; INTERRUPTED=0
+cleanup() {
+  local p
+  if [ "$INTERRUPTED" = 0 ]; then
+    command -v agent_stop >/dev/null && agent_stop
+    for p in $BG_PIDS; do kill "$p" 2>/dev/null; done
+    wait 2>/dev/null
+  else
+    # No graceful waits (timeout -k allows 30 s). Agent ticks run in sessions of
+    # their own (stubs/launchctl), out of reach of a signal to this process group:
+    # each one of this run that still runs goes, with its children.
+    for p in $(cat "$ROOT"/case-*/fake/agent-ticks 2>/dev/null); do
+      /bin/ps -o command= -p "$p" 2>/dev/null | grep -qF "$ROOT/" && kill -KILL -- "-$p" 2>/dev/null
+    done
+    for p in $BG_PIDS; do kill -KILL "$p" 2>/dev/null; done
+  fi
+  rm -rf "$ROOT"
+}
+trap cleanup EXIT
+trap 'INTERRUPTED=1; exit 130' INT TERM HUP
 mkdir -p "$ROOT/tools"
 cp -R "$HERE/stubs" "$HERE/helper-tools" "$HERE/fixtures" "$ROOT/tools/"
 STUBS=$ROOT/tools/stubs
@@ -23,20 +52,9 @@ STUBS=$ROOT/tools/stubs
 mksock() { /usr/bin/perl -MIO::Socket::UNIX -e 'IO::Socket::UNIX->new(Type => SOCK_STREAM(), Local => $ARGV[0], Listen => 1) or die "socket $ARGV[0]: $!\n"' "$1"; }
 mksock "$ROOT/tools/docker.sock" && mksock "$ROOT/tools/other.sock" || { echo "SETUP: cannot create the fake engine sockets" >&2; exit 2; }
 TOOLS=$ROOT/tools/helper-tools
-BG_PIDS=""
-
-cleanup() {
-  local p
-  agent_stop
-  for p in $BG_PIDS; do kill "$p" 2>/dev/null; done
-  wait 2>/dev/null
-  rm -rf "$ROOT"
-}
-trap cleanup EXIT
-trap 'exit 130' INT TERM
 
 export PATH="$STUBS:/usr/bin:/bin:/usr/sbin:/sbin"
-for c in sudo docker curl launchctl osascript pgrep top ps sw_vers swiftc; do
+for c in sudo docker curl launchctl osascript pgrep top ps sw_vers swiftc sysctl; do
   if [ "$(command -v "$c")" != "$STUBS/$c" ]; then
     echo "SAFETY: '$c' resolves to $(command -v "$c"), not the stub; refusing to run" >&2
     exit 2
@@ -56,6 +74,12 @@ tgit() {
 REPO=$ROOT/repo
 mkdir -p "$REPO/plugins"
 cp -R "$GUARD_HOME" "$REPO/plugins/fseventsd-guard"
+# The repository root's marketplace and .gitattributes, which the plugin tests check,
+# when this runs from a checkout of the whole repository (else those tests skip).
+SRC_TOP=$(cd -P "$GUARD_HOME/../.." && pwd)
+if [ "$(cd -P "$SRC_TOP/plugins/fseventsd-guard" 2>/dev/null && pwd)" = "$GUARD_HOME" ]; then
+  for f in .gitattributes .claude-plugin; do [ -e "$SRC_TOP/$f" ] && cp -R "$SRC_TOP/$f" "$REPO/"; done
+fi
 tgit init -q && tgit add -A && tgit commit -q -m "guard under test" && tgit update-ref refs/remotes/origin/main HEAD &&
   tgit remote add origin https://github.com/RuslanTar/fseventsd-guard.git ||
   { echo "SETUP: cannot create the test repo" >&2; exit 2; }
@@ -105,6 +129,8 @@ t() { # start a test: t NAME
   unset FSG_HINT CLAUDE_PROJECT_DIR CLAUDE_PLUGIN_ROOT 2>/dev/null
   # Docker Desktop's socket for the guard: the default context's.
   export FSG_DESKTOP_SOCKET="$C/fake/docker/docker.sock"
+  # Its backend socket (absent: gone) and settings (absent: default file sharing).
+  export FSG_DESKTOP_BACKEND_SOCKET="$C/fake/docker/backend.sock" FSG_DESKTOP_SETTINGS="$C/fake/docker/settings-store.json"
   # The probe lives where install builds it; a fresh case starts with the stand-in.
   mkdir -p "$FSG_STATE_DIR/bin"; cp "$STUBS/fake-probe" "$FSG_STATE_DIR/bin/fsprobe"
   export FSG_TEST_HELPER_TOOLS="$TOOLS"
@@ -120,14 +146,15 @@ t() { # start a test: t NAME
   agent_env FSG_DRAIN_POLL_S=1 FSG_DRAIN_CAP_S=20 FSG_HEALTHY_TIMEOUT_S=6 FSG_CONTAINER_TIMEOUT_S=6 \
     FSG_DOCKER_TIMEOUT_S=10 FSG_DOCKER_QUERY_TIMEOUT_S=2 FSG_PROBE_TIMEOUT_S=2 FSG_RUN_POLL_S=1 \
     FSG_DETECT_COMMANDS=fsgtestrspec FSG_DETECT_DOCKER_CLI=0 FSG_DETECT_DOCKER_EXECS=1 FSG_DETECT_DOCKER_CONTAINERS=1 \
-    FSG_DESKTOP_SOCKET="$FSG_DESKTOP_SOCKET"
-  unset FSG_AFFECTED FSG_AFFECTED_VERSIONS FSG_LEASE_FILE FSG_PROBE_BIN 2>/dev/null
+    FSG_DESKTOP_SOCKET="$FSG_DESKTOP_SOCKET" FSG_DESKTOP_BACKEND_SOCKET="$FSG_DESKTOP_BACKEND_SOCKET" FSG_DESKTOP_SETTINGS="$FSG_DESKTOP_SETTINGS"
+  unset FSG_AFFECTED FSG_AFFECTED_MIN FSG_AFFECTED_FIXED FSG_LEASE_FILE FSG_PROBE_BIN FSG_PROBE_DIR 2>/dev/null
   echo 4242 > "$FSG_FAKE/fsev/pids"
   echo 5000K > "$FSG_FAKE/fsev/4242.mem"
   : > "$FSG_FAKE/calls.log"
 }
 skip_case() { [ -n "$FILTER" ] && case $1 in *"$FILTER"*) return 1 ;; *) return 0 ;; esac; return 1; }
 ok() { PASS=$((PASS + 1)); }
+skip() { printf 'SKIP [%s] %s\n' "$CUR" "$*"; }
 bad() { FAIL=$((FAIL + 1)); printf 'FAIL [%s] %s\n' "$CUR" "$*"; }
 eq() { [ "$1" = "$2" ] && ok || bad "${3:-}: expected '$2', got '$1'"; }
 has() { printf '%s' "$1" | grep -qF -- "$2" && ok || bad "${3:-}: missing '$2' in: $(printf '%s' "$1" | head -c 400)"; }
@@ -165,7 +192,9 @@ docker_default() {
 # fsg-probe-named (--rm -v fsg-probe-vol:/data), fsg-probe-mount (--rm, --mount
 # type=volume,dst=/m2 and a named --mount at /m3), and four compose services, one
 # with a bind mount. The compose services' container, volume and bind-mount names
-# are anonymized (app-*, /host_mnt/Users/dev/app); nothing else in the lines changed.
+# are anonymized (app-*, /host_mnt/Users/dev/app); nothing else in the lines changed,
+# except the health field the record's template gained later, null in every line as
+# for the containers here (none has a health check).
 live_containers() {
   local F=$ROOT/tools/fixtures/docker-cli-29.9.2
   awk -F'\t' '{ n = $2; sub(/^\//, "", n); print $1, n, "running none img:1 no 0", ($3 == "true" ? 1 : 0), ($4 == "\"True\"" ? 1 : 0) }' \
@@ -198,6 +227,9 @@ orphan() { /bin/sh -c '"$@" > /dev/null 2>&1 & echo $!' orphan "$@"; }
 waitfor() { local n=$(( $1 * 5 )); shift; while [ $n -gt 0 ]; do "$@" && return 0; sleep 0.2; n=$((n - 1)); done; return 1; }
 # Kill and reap: an unreaped zombie still has a pid and a start time.
 killbg() { kill "$1" 2>/dev/null; wait "$1" 2>/dev/null; }
+# touch_ago SPEC FILE...: sets the files' mtime to now minus SPEC (date -v, as 20M or
+# 2d), in UTC: local time is ambiguous in the hour a DST change repeats.
+touch_ago() { local a; a=$(TZ=UTC0 date -v-"$1" +%Y%m%d%H%M.%S); shift; TZ=UTC0 touch -t "$a" "$@"; }
 gone() { ! kill -0 "$1" 2>/dev/null; }
 lstart() { LC_ALL=C TZ=UTC0 ps -o lstart= -p "$1" | tr -s ' ' | sed 's/^ //; s/ $//'; }
 pending() { # owner-pid deadline-offset
@@ -259,13 +291,26 @@ if ! skip_case status; then
   has "$(jget "$out" 'd["error"]')" "fseventsd process" "error"
   printf '4242\n4243\n' > "$FSG_FAKE/fsev/pids"; "$G" status >/dev/null; eq $? 3 "two daemons"
   echo 4242 > "$FSG_FAKE/fsev/pids"; mem garbage; "$G" status >/dev/null; eq $? 3 "unparseable top"
+  mem 5000K; echo 5 > "$FSG_FAKE/top-delay"; s=$(date +%s)
+  out=$(FSG_TOP_TIMEOUT_S=1 "$G" status --json); rc=$?
+  eq $rc 3 "a top that does not answer"; has "$(jget "$out" 'd["error"]')" "top did not answer within 1s" "error"
+  [ $(( $(date +%s) - s )) -lt 5 ] && ok || bad "top bounded: took $(( $(date +%s) - s )) s"
 
   t "status probe"
   echo stalled > "$FSG_FAKE/probe"; out=$("$G" status --json --probe); rc=$?
   eq $rc 2 "stalled probe is runaway"; eq "$(jget "$out" 'd["probe"]["result"]')" stalled "probe result"
   echo ok > "$FSG_FAKE/probe"; out=$("$G" status --json --probe)
   eq "$(jget "$out" 'd["probe"]["latency_ms"]')" 7 "latency"
+  eq "$(jget "$out" 'd["probe"]["start_ms"]')" 0 "stream start time"
   FSG_STATUS_PROBE=1 "$G" status >/dev/null; eq $? 0 "probe via config"
+  echo 7735 > "$FSG_FAKE/probe-start-ms"; out=$("$G" status --probe); eq $? 0 "a slow stream start is not a trigger"
+  has "$out" "probe stream start: 7735 ms (a healthy fseventsd takes 0-1 ms" "status line"
+  echo stalled > "$FSG_FAKE/probe"; out=$("$G" status --json --probe)
+  eq "$(jget "$out" 'd["probe"]["start_ms"]')" 7735 "stream start time of a stalled probe"
+  out=$("$G" status --json); eq "$(jget "$out" 'd["probe"]["start_ms"]')" None "null without a probe"
+  printf '#!/bin/bash\necho "result=ok latency_ms=5"\n' > "$FSG_STATE_DIR/bin/fsprobe"
+  echo ok > "$FSG_FAKE/probe"; out=$("$G" status --probe); eq $? 0 "a probe without start_ms still parses"
+  has "$out" "delivery probe: ok (5 ms)" "latency from the old format"; hasnt "$out" "stream start" "no start line"
 
   t "status thresholds precedence"
   mem 300M
@@ -275,22 +320,37 @@ if ! skip_case status; then
   "$G" status >/dev/null; eq $? 1 "user config warn 250"
   FSG_WARN_MB=400 "$G" status >/dev/null; eq $? 0 "env beats user config"
 
-  t "affected versions"
-  for v in 15.7.9 26.4.1 26.5.1 26.5.2 26.6 26.6.1 26.6.2 26.7 26.7.1 27.0 27.0.1; do
-    echo "$v" > "$FSG_FAKE/sw_vers"; "$G" doctor --affected >/dev/null; eq $? 0 "$v affected (reported)"
+  t "affected versions: a range"
+  for v in 15.6.1 15.6.2 15.7.9 15.10 26.0 26.4.1 27.0 27.0.0 27.0.1 27.2 28.0; do
+    echo "$v" > "$FSG_FAKE/sw_vers"; "$G" doctor --affected >/dev/null; eq $? 0 "$v affected (in the range)"
   done
-  echo 27.0.0 > "$FSG_FAKE/sw_vers"; "$G" doctor --affected >/dev/null; eq $? 0 "27.0.0 matches 27.0"
-  for v in 15.7.3 15.8 26.4 26.5 26.6.3 26.7.2 27.0.2 27.2 28.0; do
-    echo "$v" > "$FSG_FAKE/sw_vers"; "$G" doctor --affected >/dev/null; eq $? 1 "$v not affected (no report)"
+  for v in 14.7 15.1.9 15.5 15.6 15.6.0; do
+    echo "$v" > "$FSG_FAKE/sw_vers"; "$G" doctor --affected >/dev/null; eq $? 1 "$v not affected (before 15.6.1)"
   done
-  out=$("$G" doctor --affected); has "$out" "no reproduction reported on macOS 28.0" "message names the version"
-  echo 27.2 > "$FSG_FAKE/sw_vers"; FSG_AFFECTED_VERSIONS="27.0.1 27.2" "$G" doctor --affected >/dev/null; eq $? 0 "a version added to the list"
-  echo 28.0 > "$FSG_FAKE/sw_vers"
+  out=$("$G" doctor --affected); has "$out" "macOS 15.6.0 is older than 15.6.1" "message names the version and the start"
+  echo 27.0.1 > "$FSG_FAKE/sw_vers"; out=$("$G" doctor --affected); has "$out" "from 15.6.1, no fix known for 27.x" "message: no fix known"
+  export FSG_AFFECTED_FIXED="26.8 27.1"
+  for v in 15.7.9 26.7.9 27.0.1 28.0; do
+    echo "$v" > "$FSG_FAKE/sw_vers"; "$G" doctor --affected >/dev/null; eq $? 0 "$v affected (before its line's fix, or no fix for the line)"
+  done
+  for v in 26.8 26.8.0 26.10 27.1 27.1.1 27.2; do
+    echo "$v" > "$FSG_FAKE/sw_vers"; "$G" doctor --affected >/dev/null; eq $? 1 "$v not affected (fixed in its line)"
+  done
+  echo 26.10 > "$FSG_FAKE/sw_vers"; out=$("$G" doctor --affected); has "$out" "macOS 26.10 has the fix (fixed in 26.8)" "message names the fix"
+  echo 26.7.9 > "$FSG_FAKE/sw_vers"; out=$("$G" doctor --affected); has "$out" "from 15.6.1, fixed in 26.8" "message names the line's fix"
+  unset FSG_AFFECTED_FIXED
+  mkdir -p "$FSG_STATE_DIR"; echo "FSG_AFFECTED_MIN=26.0" > "$FSG_STATE_DIR/config"
+  echo 15.7.9 > "$FSG_FAKE/sw_vers"; "$G" doctor --affected >/dev/null; eq $? 1 "the start from the user config"
+  : > "$FSG_STATE_DIR/config"
+  echo 15.5 > "$FSG_FAKE/sw_vers"
   FSG_AFFECTED=yes "$G" doctor --affected >/dev/null; eq $? 0 "forced yes"
   echo 27.0.1 > "$FSG_FAKE/sw_vers"
   FSG_AFFECTED=no "$G" doctor --affected >/dev/null; eq $? 1 "forced no"
+  echo 26.8 > "$FSG_FAKE/sw_vers"
+  FSG_AFFECTED_FIXED=26.8 FSG_AFFECTED=yes "$G" doctor --affected >/dev/null; eq $? 0 "forced yes beats a fix"
   echo 28.0 > "$FSG_FAKE/sw_vers"
   out=$("$G" status --json); eq "$(jget "$out" 'd["os"]["version"]')" 28.0 "version in JSON"
+  eq "$(jget "$out" 'd["os"]["affected"]')" True "a newer major line without a fix is affected"
 fi
 
 # ======================================================================== config-check
@@ -377,9 +437,41 @@ if ! skip_case helper; then
   mem 3G; /bin/sh "$H" 2>/dev/null; eq $? 66 "rate limited"
   n=$(grep -c REFUSED "$EV/helper.log"); [ "$n" -ge 10 ] && ok || bad "every refusal logged ($n)"
   has "$(cat "$EV/helper.log")" "REFUSED code=64" "argument refusal logged"
-  rm -f "$EV/last-restart"; touch "$FSG_FAKE/no-respawn"; /bin/sh "$H" 2>/dev/null; eq $? 72 "no respawn"
+  rm -f "$EV/last-restart"; touch "$FSG_FAKE/no-respawn"; /bin/sh "$H" 2> "$C/err"; eq $? 73 "no respawn"
+  has "$(cat "$C/err")" "sent SIGTERM to 4243, but no new fseventsd appeared" "says so"
   rm -f "$FSG_FAKE/no-respawn"; echo 4242 > "$FSG_FAKE/fsev/pids"; mem 3G; rm -f "$EV/last-restart"
+  touch "$FSG_FAKE/ignore-term"; : > "$FSG_FAKE/calls.log"
+  out=$(/bin/sh "$H"); eq $? 72 "SIGTERM ignored: restarted with SIGKILL"
+  has "$out" "restarted old=4242 new=4243" "new pid"; has "$out" "signal=KILL" "output names the signal"
+  before "$FSG_FAKE/calls.log" "kill -TERM 4242" "kill -KILL 4242"
+  has "$(cat "$EV/helper.log")" "KILL pid=4242 still running 10s after SIGTERM" "logged"
+  echo 4242 > "$FSG_FAKE/fsev/pids"; mem 3G; rm -f "$EV/last-restart"; touch "$FSG_FAKE/no-respawn"
+  /bin/sh "$H" 2> "$C/err"; eq $? 73 "SIGKILL and no respawn"
+  has "$(cat "$C/err")" "sent SIGKILL to 4242, but no new fseventsd appeared" "says so"
+  rm -f "$FSG_FAKE/ignore-term" "$FSG_FAKE/no-respawn"; echo 4242 > "$FSG_FAKE/fsev/pids"; mem 3G; rm -f "$EV/last-restart"
   touch "$FSG_FAKE/kill-fail"; /bin/sh "$H" 2>/dev/null; eq $? 71 "kill failed"; rm -f "$FSG_FAKE/kill-fail"
+
+  t "helper bounds top, find and du"
+  H="$C/helper"; render_helper "$C/h0" 0
+  sed -e 's/^TOP_LIMIT_S=.*/TOP_LIMIT_S=1/' -e 's/^SCAN_LIMIT_S=.*/SCAN_LIMIT_S=1/' "$C/h0" > "$H"
+  EV="$FSG_PREFIX/Library/Logs/fseventsd-guard"
+  mkdir -p "$FSG_PREFIX/.fseventsd"; touch "$FSG_PREFIX/.fseventsd/a" "$FSG_PREFIX/.fseventsd/b" "$FSG_PREFIX/.fseventsd/c"
+  mem 3G; /bin/sh "$C/h0" >/dev/null 2>&1; eq $? 0 "restart"
+  rec=$(cat "$EV"/restart-*.txt)
+  has "$rec" "files=3" "history files counted"; printf '%s' "$rec" | grep -q '^size_kb=[0-9][0-9]*$' && ok || bad "history size: $rec"
+  has "$rec" "--- top (15 s limit)" "top bounded"; has "$rec" "PID MEM CMPRS PORTS" "top's columns"
+  ls -A "$EV" | grep -q '^\.out' && bad "the output file is left behind" || ok
+  rm -f "$EV"/restart-*.txt "$EV/last-restart"; echo 4242 > "$FSG_FAKE/fsev/pids"; mem 3G
+  echo 5 > "$FSG_FAKE/find-delay"; echo 5 > "$FSG_FAKE/du-delay"; s=$(date +%s)
+  /bin/sh "$H" >/dev/null 2>&1; eq $? 0 "a hung scan does not stop the restart"
+  [ $(( $(date +%s) - s )) -lt 8 ] && ok || bad "scans bounded: took $(( $(date +%s) - s )) s"
+  rec=$(cat "$EV"/restart-*.txt)
+  has "$rec" "files=(find timed out)" "find bounded"; has "$rec" "size_kb=(du timed out)" "du bounded"
+  rm -f "$FSG_FAKE/find-delay" "$FSG_FAKE/du-delay" "$EV/last-restart"; echo 4242 > "$FSG_FAKE/fsev/pids"; mem 3G
+  echo 5 > "$FSG_FAKE/top-delay"; s=$(date +%s)
+  /bin/sh "$H" 2> "$C/err"; eq $? 70 "a hung top: cannot measure"
+  [ $(( $(date +%s) - s )) -lt 4 ] && ok || bad "top bounded: took $(( $(date +%s) - s )) s"
+  rm -f "$FSG_FAKE/top-delay"
 
   t "helper trial window"
   H="$C/helper"; render_helper "$H" $(( $(date +%s) + 3600 ))
@@ -475,6 +567,22 @@ if ! skip_case install; then
   has "$(cat "$FSG_FAKE/calls.log")" "launchctl bootout gui/" "agent unloaded"
   exists "$FSG_PREFIX/etc/sudoers.d" "sudoers.d itself is left alone"
 
+  t "an agent switched off in Login Items: doctor and install say how to switch it back on"
+  install_fake; eq $? 0 "install"
+  rm -f "$FSG_FAKE/launchctl-loaded"
+  printf 'disabled services = {\n\t"io.github.ruslantar.fseventsd-guard" => disabled\n}\n' > "$FSG_FAKE/launchctl-disabled"
+  on="switch fseventsd-guard back on in System Settings > General > Login Items & Extensions, or run: launchctl enable gui/$(id -u)/io.github.ruslantar.fseventsd-guard"
+  "$G" doctor --prefix "$FSG_PREFIX" > "$C/doc.out" 2>&1; eq $? 2 "doctor fails"
+  has "$(cat "$C/doc.out")" "FAIL  agent io.github.ruslantar.fseventsd-guard is not loaded: launchd keeps the agent io.github.ruslantar.fseventsd-guard switched off (Login Items)" "doctor names the setting"
+  has "$(cat "$C/doc.out")" "$on" "and how to switch it back on"
+  : > "$FSG_FAKE/calls.log"
+  install_fake; eq $? 1 "install stops"
+  has "$(cat "$C/install.out")" "install: launchd keeps the agent io.github.ruslantar.fseventsd-guard switched off (Login Items), so it does not load it: $on, then run install again" "install says the same"
+  hasnt "$(cat "$FSG_FAKE/calls.log")" "launchctl bootstrap" "no bootstrap launchd would refuse"
+  rm "$FSG_FAKE/launchctl-disabled"
+  install_fake; eq $? 0 "switched back on: install loads it"
+  "$G" doctor --prefix "$FSG_PREFIX" > "$C/doc.out" 2>&1; eq $? 0 "doctor passes"
+
   t "agent plist runs the script; a non-executable copy stops the install"
   install_fake; eq $? 0 "install"
   PL="$FSG_LAUNCH_AGENTS_DIR/io.github.ruslantar.fseventsd-guard.plist"
@@ -555,14 +663,14 @@ if ! skip_case install; then
   has "$(cat "$C/doc.out")" "FAIL  this config cannot be rendered into a helper, so install refuses it: FSG_HELPER_MIN_MB=0 is below 150" "doctor names it"
 
   t "install guards"
-  echo 26.4 > "$FSG_FAKE/sw_vers"; install_fake; eq $? 1 "refuses on a version with no reported reproduction"
+  echo 15.5 > "$FSG_FAKE/sw_vers"; install_fake; eq $? 1 "refuses on a version before the affected range"
   has "$(cat "$C/install.out")" "not needed here" "message"
   absent "$FSG_PREFIX/usr/local/libexec/fseventsd-guard-restart" "nothing installed"
   install_fake --force --no-agent; eq $? 0 "--force installs anyway"
   install_fake --no-agent; eq $? 0 "an existing install updates without --force"
   has "$(cat "$C/install.out")" "updating the existing install" "update note"
   out=$("$G" doctor --prefix "$FSG_PREFIX")
-  has "$out" "no reproduction is reported on this version yet" "doctor on an unlisted version"
+  has "$out" "this version is outside the affected range" "doctor on a version outside the range"
   hasnt "$out" "uninstall" "doctor does not advise uninstalling"
   echo 27.0.1 > "$FSG_FAKE/sw_vers"
   "$G" install --prefix "relative/dir" > /dev/null 2>&1; eq $? 64 "relative prefix refused"
@@ -573,6 +681,16 @@ if ! skip_case install; then
   tu=$(sed -n 's/^TRIAL_UNTIL=//p' "$FSG_PREFIX/usr/local/libexec/fseventsd-guard-restart")
   [ "$tu" -gt "$(date +%s)" ] && ok || bad "TRIAL_UNTIL in the future ($tu)"
   has "$("$G" doctor --prefix "$FSG_PREFIX")" "trial window open" "doctor shows the window"
+  out=$("$G" status 2>&1)
+  has "$out" "helper: trial window open until" "status shows the window"
+  hasnt "$out" "root code changed" "status from the checkout: a trial window is no root code change"
+  cp "$FSG_STATE_DIR/app/config.defaults" "$C/cfg.keep"; echo "# app copy changed" >> "$FSG_STATE_DIR/app/config.defaults"
+  has "$("$G" status 2>&1)" "it asks for sudo only to end the trial window" "status: a plain re-install ends the window, which needs sudo"
+  cat "$C/cfg.keep" > "$FSG_STATE_DIR/app/config.defaults"
+  HP="$FSG_PREFIX/usr/local/libexec/fseventsd-guard-restart"
+  sed "s/^TRIAL_UNTIL=.*/TRIAL_UNTIL=$(( $(date +%s) - 3600 ))/" "$HP" > "$C/h" && cat "$C/h" > "$HP"
+  hasnt "$("$G" status 2>&1)" "root code changed" "nor once the window has ended"
+  hasnt "$("$G" doctor --prefix "$FSG_PREFIX")" "helper differs" "as doctor says"
   "$G" uninstall --yes --prefix "$FSG_PREFIX" --keep-logs >/dev/null 2>&1; eq $? 0 "uninstall --keep-logs"
   exists "$FSG_PREFIX/Library/Logs/fseventsd-guard" "root log dir kept"
   absent "$FSG_PREFIX/usr/local/libexec/fseventsd-guard-restart" "helper removed"
@@ -584,8 +702,14 @@ if ! skip_case install; then
   has "$(cat "$C/o")" "pass --yes" "message names --yes"
   hasnt "$(cat "$FSG_FAKE/calls.log")" "sudo" "no sudo call"
   absent "$FSG_STATE_DIR/app" "refused before anything changed"
-  # script(1) gives the guard a terminal; the answer is typed once the pty is up.
-  { sleep 2; printf 'n\n'; } | FSG_HELPER_MIN_MB=300 script -q /dev/null "$G" install --prefix "$FSG_PREFIX" --no-agent > "$C/o" 2>&1
+  # script(1) gives the guard a terminal; answer WORD QUESTION types WORD there once
+  # QUESTION shows in $C/o (cleared first), within 60 s.
+  answer() {
+    local n=300
+    while [ $n -gt 0 ] && ! grep -qF -- "$2" "$C/o" 2>/dev/null; do sleep 0.2; n=$((n - 1)); done
+    printf '%s\n' "$1"
+  }
+  : > "$C/o"; answer n "Run this as root?" | FSG_HELPER_MIN_MB=300 script -q /dev/null "$G" install --prefix "$FSG_PREFIX" --no-agent > "$C/o" 2>&1
   has "$(cat "$C/o")" "Run this as root? [y/N]" "a terminal is asked"
   before "$C/o" "guard tree:" "Run this as root?"
   before "$C/o" "lib/root-steps.sh blob: " "Run this as root?"
@@ -595,7 +719,7 @@ if ! skip_case install; then
   has "$(cat "$C/o")" "not confirmed" "no is a refusal"
   hasnt "$(cat "$FSG_FAKE/calls.log")" "sudo" "no sudo call after no"
   absent "$HP" "no helper after no"
-  { sleep 2; printf 'y\n'; } | script -q /dev/null "$G" install --prefix "$FSG_PREFIX" --no-agent > "$C/o" 2>&1
+  : > "$C/o"; answer y "Run this as root?" | script -q /dev/null "$G" install --prefix "$FSG_PREFIX" --no-agent > "$C/o" 2>&1
   exists "$HP" "yes installs"
   has "$(cat "$FSG_FAKE/calls.log")" "sudo -k /bin/sh -c" "yes runs sudo"
   : > "$FSG_FAKE/calls.log"
@@ -607,7 +731,7 @@ if ! skip_case install; then
   hasnt "$(cat "$FSG_FAKE/calls.log")" "sudo -k" "and no sudo prompt"
   : > "$FSG_FAKE/calls.log"
   "$G" uninstall --prefix "$FSG_PREFIX" < /dev/null > "$C/o" 2>&1; eq $? 1 "uninstall: no terminal and no --yes: refused"
-  { sleep 2; printf 'n\n'; } | script -q /dev/null "$G" uninstall --prefix "$FSG_PREFIX" > "$C/o" 2>&1
+  : > "$C/o"; answer n "remove all of the above?" | script -q /dev/null "$G" uninstall --prefix "$FSG_PREFIX" > "$C/o" 2>&1
   has "$(cat "$C/o")" "Uninstall: remove all of the above? [y/N]" "uninstall asks a terminal once"
   before "$C/o" "uninstall removes:" "remove all of the above?"
   before "$C/o" "root-steps sha256: " "remove all of the above?"
@@ -1100,6 +1224,15 @@ if ! skip_case source-gate; then
   HOME=$CH "$C/link/fseventsd-guard" install --yes --prefix "$FSG_PREFIX" --no-agent > "$C/o" 2>&1; eq $? 1 "also through a symlink"
   hasnt "$(cat "$FSG_FAKE/calls.log")" "sudo" "no sudo call"
   hasnt "$(cat "$FSG_FAKE/calls.log")" "swiftc" "nothing built"
+  # status and doctor from the plugin's copy point at a clone, as install refuses there.
+  echo '# stale' >> "$FSG_STATE_DIR/app/config.defaults"
+  out=$(HOME=$CH "$CP/fseventsd-guard" status 2>&1)
+  has "$out" "install: the app copy differs from this plugin copy and the root code is unchanged: run install from a clone (git pull in it first); it needs no sudo" "status from the plugin copy"
+  hasnt "$out" "this checkout" "status does not send you back to the plugin copy"
+  HOME=$CH "$CP/fseventsd-guard" doctor --prefix "$FSG_PREFIX" > "$C/o" 2>&1
+  has "$(cat "$C/o")" "installed app copy differs from this plugin copy ($CP): run install from a clone (git pull in it first) to update the agent" "doctor from the plugin copy"
+  hasnt "$(cat "$C/o")" "this checkout" "doctor does not send you back to the plugin copy"
+  sed '$d' "$FSG_STATE_DIR/app/config.defaults" > "$C/cd" && cat "$C/cd" > "$FSG_STATE_DIR/app/config.defaults"
   CD="$C/cfg/plugins/cache/x/fseventsd-guard"; mkdir -p "$(dirname "$CD")"; cp -R "$GUARD_HOME" "$CD"
   CLAUDE_CONFIG_DIR="$C/cfg" "$CD/fseventsd-guard" install --yes --prefix "$FSG_PREFIX" --no-agent > "$C/o" 2>&1; eq $? 1 "refused under CLAUDE_CONFIG_DIR's plugins"
   has "$(cat "$C/o")" "inside Claude Code's plugin directory" "message"
@@ -1621,6 +1754,7 @@ if ! skip_case heal; then
     absent "$FSG_STATE_DIR/docker-intent" "Docker intent cleared"
     has "$(cat "$FSG_FAKE/notifications.log")" "fseventsd healed" "success notification"
     has "$(cat "$FSG_FAKE/notifications.log")" "Time Machine" "costs in the notification"
+    has "$(cat "$FSG_FAKE/notifications.log")" "If a session stops seeing file changes after the heal, restart it." "watcher advice in the notification"
     grep -q '^bind_mount=ok' "$(cat "$FSG_STATE_DIR/last-heal-dir")/result.txt" && ok || bad "bind mount verified"
   done
 
@@ -1632,6 +1766,21 @@ if ! skip_case heal; then
   rm "$FSG_FAKE/docker/engine-ok"; echo 4242 > "$FSG_FAKE/fsev/pids"; mem 3G; rm -f "$FSG_PREFIX/Library/Logs/fseventsd-guard/last-restart"
   : > "$FSG_FAKE/calls.log"; heal >/dev/null 2>&1; eq $? 0 "Docker not running: heal anyway"
   hasnt "$(cat "$FSG_FAKE/calls.log")" "docker stop" "no Docker actions"
+
+  t "the drain marker names the Docker step the heal takes, not the one it planned"
+  docker_default; install_fake; mem 3G
+  docker desktop stop >/dev/null 2>&1
+  echo "$FSG_STATE_DIR/drain/pending" > "$FSG_FAKE/docker/snap"
+  bg "$G" run --label first -- sleep 4; sleep 1
+  heal_bg() { "$G" heal --docker-variant B > "$C/heal-bg.out" 2>&1; }
+  bg heal_bg; hp=$LAST_BG
+  waitfor 20 grep -qs '^phase=draining' "$FSG_STATE_DIR/drain/pending" || bad "the heal drains"
+  has "$(cat "$FSG_STATE_DIR/drain/pending")" "variant=skip" "planned with Docker Desktop stopped: no Docker step"
+  # Docker Desktop started during the drain: the heal takes step B after all.
+  docker desktop start >/dev/null 2>&1
+  wait "$hp"; eq $? 0 "healed"; agent_wait
+  has "$(cat "$FSG_FAKE/docker/snap.out" 2>/dev/null)" "phase=docker-before" "the marker at the Docker step"
+  has "$(cat "$FSG_FAKE/docker/snap.out" 2>/dev/null)" "variant=B" "names step B"
 
   t "heal refusals before the drain"
   docker_default
@@ -2007,20 +2156,23 @@ fi
 if ! skip_case drain-scope; then
   t "unleased work holds a drain only up to its own cap"
   docker_default; install_fake; mem 600M
-  mkdir -p "$C/bin"; printf '#!/bin/sh\nsleep "$1"\n' > "$C/bin/fsgtestrspec"; chmod +x "$C/bin/fsgtestrspec"
-  bg "$C/bin/fsgtestrspec" 60; up=$LAST_BG; sleep 1
-  agent_env FSG_UNLEASED_CAP_S=2
+  # A stand-in runner whose sleep ends with it (else it would outlive the case).
+  mkdir -p "$C/bin"; printf '#!/bin/sh\ntrap '"'"'kill $! 2>/dev/null; exit 143'"'"' TERM\nsleep "$1" & wait $!\n' > "$C/bin/fsgtestrspec"; chmod +x "$C/bin/fsgtestrspec"
+  bg "$C/bin/fsgtestrspec" 600; up=$LAST_BG; sleep 1
+  # The drain cap (300 s) far above the unleased cap (2 s): a slow machine stays
+  # well inside the bound below.
+  agent_env FSG_UNLEASED_CAP_S=2 FSG_DRAIN_CAP_S=300
   s=$(date +%s); heal > "$C/o" 2>&1; rc=$?
   eq $rc 4 "a manual heal gives up at the unleased cap"
-  [ $(( $(date +%s) - s )) -lt 12 ] && ok || bad "did not wait for the 20 s drain cap"
+  [ $(( $(date +%s) - s )) -lt 120 ] && ok || bad "did not wait for the 300 s drain cap"
   NL=$FSG_FAKE/notifications.log
-  has "$(cat "$NL")" "Waiting for 1 item(s): sh fsgtestrspec 60 (pid $up" "the healing notice names the blocker"
+  has "$(cat "$NL")" "Waiting for 1 item(s): sh fsgtestrspec 600 (pid $up" "the healing notice names the blocker"
   has "$(cat "$NL")" "Only leased runs (fseventsd-guard run, or an integrated runner) wait" "the healing notice says which runs wait"
-  has "$(cat "$NL")" "still running after 2s: sh fsgtestrspec 60 (pid $up" "the give-up notice names the blocker"
+  has "$(cat "$NL")" "still running after 2s: sh fsgtestrspec 600 (pid $up" "the give-up notice names the blocker"
   mem 3G
-  s=$(date +%s); FSG_UNLEASED_CAP_S=2 "$G" tick > "$C/o" 2>&1; rc=$?
+  s=$(date +%s); FSG_UNLEASED_CAP_S=2 FSG_DRAIN_CAP_S=300 "$G" tick > "$C/o" 2>&1; rc=$?
   eq $rc 0 "an emergency heal proceeds at the unleased cap"
-  [ $(( $(date +%s) - s )) -lt 12 ] && ok || bad "emergency: did not wait for the 20 s drain cap"
+  [ $(( $(date +%s) - s )) -lt 120 ] && ok || bad "emergency: did not wait for the 300 s drain cap"
   has "$(grep 'cutting running work' "$NL")" "(pid $up" "the cut notice names the cut run"
   killbg "$up"
 
@@ -2183,7 +2335,7 @@ EOF
   mkdir -p "$FSG_STATE_DIR/heal.lock"; : > "$FSG_FAKE/calls.log"
   "$G" tick >/dev/null 2>&1; eq $? 0 "fresh ownerless lock: the tick ends at once"
   hasnt "$(cat "$FSG_FAKE/calls.log")" "docker desktop stop" "Docker untouched"
-  touch -t "$(date -v-2M +%Y%m%d%H%M.%S)" "$FSG_STATE_DIR/heal.lock"
+  touch_ago 2M "$FSG_STATE_DIR/heal.lock"
   "$G" tick >/dev/null 2>&1; eq $? 0 "an old ownerless lock is reclaimed"
   has "$(cat "$FSG_FAKE/calls.log")" "sudo -n /" "and the tick healed"
   absent "$FSG_STATE_DIR/heal.lock" "lock released"
@@ -2466,7 +2618,10 @@ if ! skip_case heal-rm-volumes; then
   t "the docker-before deadline counts the docker info after a failed listing"
   out=$( FSG_HOME=$GUARD_HOME; . "$GUARD_HOME/lib/common.sh"; . "$GUARD_HOME/lib/lease.sh"; . "$GUARD_HOME/lib/drain.sh"
     fsg_init_paths; fsg_load_config; fsg_phase_budget docker-before )
-  eq "$out" $((FSG_DOCKER_TIMEOUT_S + 100 + 3 * FSG_DOCKER_QUERY_TIMEOUT_S)) "status and info, docker ps again, info again, desktop stop and its polls"
+  eq "$out" $((60 + 95 + 3 * FSG_DOCKER_QUERY_TIMEOUT_S)) "status and info, docker ps again, info again, desktop stop and its polls (FSG_DESKTOP_STOP_WAIT_S beats the stop's timeout here)"
+  out=$( FSG_HOME=$GUARD_HOME; . "$GUARD_HOME/lib/common.sh"; . "$GUARD_HOME/lib/lease.sh"; . "$GUARD_HOME/lib/drain.sh"
+    fsg_init_paths; fsg_load_config; FSG_DOCKER_TIMEOUT_S=300; fsg_phase_budget docker-before )
+  eq "$out" $((300 + 10 + 95 + 3 * FSG_DOCKER_QUERY_TIMEOUT_S)) "the stop's timeout beats FSG_DESKTOP_STOP_WAIT_S"
 
   t "the record reads what a real engine's docker inspect printed"
   docker_default; live_containers
@@ -2479,6 +2634,7 @@ if ! skip_case heal-rm-volumes; then
   has "$out" "not_restorable=fsg-probe-mount fsg-probe-named fsg-probe-anon" "the --rm containers"
   has "$out" "not_restored_oneoff=fsg-probe-oneoff" "a one-off; an unset label (null) and \"False\" are not"
   has "$out" "names=app-redis app-unleash app-postgres app-elasticsearch" "the restore set"
+  has "$out" "health=none none none none" "their health, in the same order"
 
   t "a heal refuses over a real engine's --rm containers with anonymous volumes"
   docker_default; install_fake; mem 600M; live_containers
@@ -2521,16 +2677,18 @@ if ! skip_case heal-rm-volumes; then
 
   t "a docker inspect line that is not a whole record leaves the listing incomplete"
   docker_default
-  printf 'c2\t/redis\tfalse\t"False"\tnullnull\t"bind"\tnull\n' > "$FSG_FAKE/docker/record-text-c2"
+  printf 'c2\t/redis\tfalse\t"False"\tnullnull\tnull\t"bind"\tnull\n' > "$FSG_FAKE/docker/record-text-c2"
   out=$(record)
   has "$out" "listed=0" "a mount cut short"; has "$out" "B unchecked" "so its --rm volumes count as not checked"
   has "$(cat "$FSG_LOG")" "DOCKER docker inspect printed 1 line(s) that are not a whole container record" "logged"
-  printf 'c2\t/redis\tfalse\t"False"\tnullnull\t"bind"\tnull\t"/host\ndata"\n' > "$FSG_FAKE/docker/record-text-c2"
+  printf 'c2\t/redis\tfalse\t"False"\tnullnull\tnull\t"bind"\tnull\t"/host\ndata"\n' > "$FSG_FAKE/docker/record-text-c2"
   out=$(record); has "$out" "listed=0" "a destination split by a newline"
-  printf 'c2\t/redis\tfalse\t"False"\tnullnull\t"bind"\tnull\t/host\n' > "$FSG_FAKE/docker/record-text-c2"
+  printf 'c2\t/redis\tfalse\t"False"\tnullnull\tnull\t"bind"\tnull\t/host\n' > "$FSG_FAKE/docker/record-text-c2"
   out=$(record); has "$out" "listed=0" "a destination that is not JSON"
-  printf 'c2\t/redis\tyes\t"False"\tnullnull\n' > "$FSG_FAKE/docker/record-text-c2"
+  printf 'c2\t/redis\tyes\t"False"\tnullnull\tnull\n' > "$FSG_FAKE/docker/record-text-c2"
   out=$(record); has "$out" "listed=0" "an AutoRemove that is neither true nor false"
+  printf 'c2\t/redis\tfalse\t"False"\tnullnull\thealthy\n' > "$FSG_FAKE/docker/record-text-c2"
+  out=$(record); has "$out" "listed=0" "a health status that is not JSON"
   : > "$FSG_FAKE/docker/record-text-c2"; : > "$FSG_LOG"
   out=$(record); has "$out" "listed=0" "no line for a running container, inspect still succeeding"
   has "$(cat "$FSG_LOG")" "of c2, which still run" "logged"
@@ -2549,7 +2707,7 @@ if ! skip_case heal-rm-volumes; then
   rm -f "$FSG_FAKE/docker/label-c3"
   # A named volume whose name has a tab, as the template prints it: matched to the
   # spec in its JSON form, so only the anonymous volume is at risk.
-  printf 'c3\t/devdb\ttrue\tnull\t["my\\tvol:/m"]null\t"volume"\t"my\\tvol"\t"/m"\t"volume"\t"%s"\t"/var/lib/postgresql/data"\n' \
+  printf 'c3\t/devdb\ttrue\tnull\t["my\\tvol:/m"]null\tnull\t"volume"\t"my\\tvol"\t"/m"\t"volume"\t"%s"\t"/var/lib/postgresql/data"\n' \
     "$(printf 'f%063d' 1)" > "$FSG_FAKE/docker/record-text-c3"
   out=$(record)
   has "$out" "listed=1" "read"; has "$out" "rm_anonymous_volumes=devdb (/var/lib/postgresql/data)" "the named volume is not at risk"
@@ -2558,7 +2716,7 @@ if ! skip_case heal-rm-volumes; then
     t "heal variant $v refuses when a docker inspect line is not a whole record"
     docker_default; install_fake; mem 600M
     agent_env FSG_UNLEASED_CAP_S=1
-    printf 'c2\t/redis\tfalse\t"False"\tnullnull\t"bind"\tnull\t/host\n' > "$FSG_FAKE/docker/record-text-c2"; : > "$FSG_FAKE/calls.log"
+    printf 'c2\t/redis\tfalse\t"False"\tnullnull\tnull\t"bind"\tnull\t/host\n' > "$FSG_FAKE/docker/record-text-c2"; : > "$FSG_FAKE/calls.log"
     heal --docker-variant $v --on-cap proceed > "$C/o" 2>&1; eq $? 14 "refused ($(tail -n 1 "$C/o"))"
     L=$(cat "$FSG_FAKE/calls.log")
     hasnt "$L" "docker stop" "no container stopped"; hasnt "$L" "docker desktop stop" "Docker Desktop not stopped"
@@ -2568,7 +2726,7 @@ if ! skip_case heal-rm-volumes; then
 
   t "variant C does not restart Docker Desktop when a docker inspect line is not a whole record"
   docker_default
-  printf 'c2\t/redis\tfalse\t"False"\tnullnull\t"bind"\tnull\n' > "$C/cut"
+  printf 'c2\t/redis\tfalse\t"False"\tnullnull\tnull\t"bind"\tnull\n' > "$C/cut"
   : > "$FSG_FAKE/calls.log"; out=$(c_after 'cp "$C/cut" "$FSG_FAKE/docker/record-text-c2"')
   has "$out" "record: listed=1" "the heal's own listing worked"
   has "$out" "rc=2 err=Docker Desktop not restarted: Docker answers but did not list its containers" "the fresh listing is incomplete"
@@ -2649,6 +2807,7 @@ if ! skip_case heal-hold; then
   docker_default; install_fake; mem 3G
   touch "$FSG_FAKE/docker/bind-broken"
   heal --docker-variant C > "$C/o" 2>&1; eq $? 8 "restarted, Docker not fully back"
+  has "$(grep 'heal incomplete' "$FSG_FAKE/notifications.log")" "Docker not fully restored (bind mount: the container ran" "the reason has no empty part first"
   grep -qx 'variant=C' "$FSG_STATE_DIR/drain/pending" && ok || bad "the hold names the heal's Docker step"
   FSG_RUN_MAX_WAIT_S=1 "$G" run --label after-broken -- true 2> "$C/err"; eq $? 75 "a new run is held"
   has "$(cat "$C/err")" "holding 'after-broken'" "held message"
@@ -2729,6 +2888,17 @@ if ! skip_case heal-hold; then
   "$G" tick >/dev/null 2>&1
   absent "$FSG_STATE_DIR/docker-intent" "Docker verified at the next tick"
   FSG_RUN_MAX_WAIT_S=1 "$G" run -- true 2>/dev/null; eq $? 75 "the agent does not release it"
+
+  t "the reason joins only the parts it has"
+  out=$( FSG_HOME=$GUARD_HOME; . "$GUARD_HOME/lib/common.sh"; . "$GUARD_HOME/lib/docker.sh"
+    DK_ERR=; DK_FAILED=c1; BM_DETAIL="not checked"; fsg_docker_why
+    DK_ERR="containers not back"; DK_FAILED=c1; BM_DETAIL=; fsg_docker_why
+    DK_ERR=; DK_FAILED=; BM_DETAIL="x"; fsg_docker_why
+    DK_ERR="e"; DK_FAILED=c1; BM_DETAIL="x"; fsg_docker_why nobind )
+  eq "$out" "containers: c1; bind mount: not checked
+containers not back containers: c1
+bind mount: x
+e containers: c1" "joined"
 fi
 
 # ======================================================================== docker-silent
@@ -2780,6 +2950,133 @@ if ! skip_case docker-silent; then
   FSG_RUN_MAX_WAIT_S=1 "$G" run -- true 2>/dev/null; eq $? 0 "released once Docker answers and verifies"
 fi
 
+# ======================================================================== docker-stop
+if ! skip_case docker-stop; then
+  # stop_record: variant B's stop record of the last heal.
+  stop_record() { cat "$(cat "$FSG_STATE_DIR/last-heal-dir")/docker-stop.txt" 2>/dev/null; }
+  heal_result() { cat "$(cat "$FSG_STATE_DIR/last-heal-dir")/result.txt" 2>/dev/null; }
+
+  t "B sees Docker Desktop stopped once its processes and sockets are gone, though status fails"
+  docker_default; install_fake; mem 3G
+  touch "$FSG_FAKE/docker/status-fail" "$FSG_FAKE/docker/sock-gone-on-stop"; echo 20 > "$FSG_FAKE/docker/status-delay"
+  heal --docker-variant B > "$C/o" 2>&1; eq $? 0 "healed ($(tail -n 1 "$C/o"))"
+  has "$(cat "$FSG_LOG")" "stopped (no Docker Desktop process runs and its sockets are gone)" "decided by processes and sockets"
+  hasnt "$(cat "$FSG_LOG")" "before-step failed" "not a failed stop"
+  has "$(stop_record)" "backend pid before the stop: 7777" "the record has the backend pid"
+  has "$(stop_record)" "== stop rc=0 in " "the record has the stop's code and duration"
+  has "$(stop_record)" "poll 1 +" "the record has the polls"
+  has "$(stop_record)" "procs=no backend=none sockets=none status=- rc=- in -s: (not asked)" "status not asked once processes and sockets decide"
+  has "$(stop_record)" "decision: stopped" "the record has the decision"
+  has "$(heal_result)" "docker_stop=rc=0 in " "result.txt has the stop"
+  v=$(heal_result | sed -n 's/^docker_before_s=//p'); [ "${v:-99}" -lt 8 ] && ok || bad "the stop did not wait out a slow status (docker_before_s=$v)"
+  exists "$FSG_FAKE/docker/docker.sock" "Docker Desktop's start put its socket back"
+
+  t "B asks a slow or failing status only within its bound, and gives up at FSG_DESKTOP_STOP_WAIT_S"
+  docker_default; install_fake; mem 3G
+  agent_env FSG_DESKTOP_STOP_WAIT_S=8
+  # The user socket stays: processes and sockets never decide, and status is slow.
+  echo 20 > "$FSG_FAKE/docker/status-delay"
+  s=$(date +%s); heal --docker-variant B > "$C/o" 2>&1; eq $? 0 "the heal goes on and heals ($(tail -n 1 "$C/o"))"
+  has "$(cat "$FSG_LOG")" "Docker Desktop did not stop within 8s of docker desktop stop (still there after 8s: processes no, sockets $FSG_FAKE/docker/docker.sock" "the reason names what was left"
+  has "$(stop_record)" "rc=124 in" "a status poll was cut at its bound"
+  has "$(stop_record)" "decision: not-stopped" "decision recorded"
+  v=$(heal_result | sed -n 's/^docker_before_s=//p'); [ "${v:-99}" -le 16 ] && ok || bad "the wait is bounded (docker_before_s=$v)"
+  rm -f "$FSG_FAKE/docker/status-delay"
+  echo 4242 > "$FSG_FAKE/fsev/pids"; mem 3G; rm -f "$FSG_PREFIX/Library/Logs/fseventsd-guard/last-restart"
+  touch "$FSG_FAKE/docker/status-fail"
+  heal --docker-variant B > "$C/o" 2>&1; eq $? 0 "healed again"
+  has "$(stop_record)" "backend.sock: connect: no such file or directory" "the raw status error is recorded"
+
+  t "B: something else starts Docker Desktop right after the stop"
+  docker_default; install_fake; mem 3G
+  touch "$FSG_FAKE/docker/foreign-start"
+  heal --docker-variant B > "$C/o" 2>&1; eq $? 0 "healed ($(tail -n 1 "$C/o"))"
+  has "$(cat "$FSG_LOG")" "something else started Docker Desktop during the heal (backend pid 8888; before the stop: 7777)" "logged"
+  hasnt "$(cat "$FSG_LOG")" "before-step failed" "not reported as a failed stop"
+  has "$(grep 'fseventsd healed' "$FSG_FAKE/notifications.log")" "something else started Docker Desktop during the heal" "the notice says it"
+  has "$(heal_result)" "docker_started_by_other=something else started" "recorded"
+  has "$(stop_record)" "decision: started-by-other" "the stop record says it"
+  hasnt "$(grep -v "^osascript" "$FSG_FAKE/calls.log")" "8888" "the guard does not kill it"
+
+  t "B: something else starts Docker Desktop during the fseventsd restart"
+  docker_default; install_fake; mem 3G
+  echo 3 > "$FSG_FAKE/sudo-delay"
+  foreign_at_restart() {
+    waitfor 60 grep -qs '^phase=restarting' "$FSG_STATE_DIR/drain/pending" &&
+      echo 8888 > "$FSG_FAKE/docker/backend-pid" && echo running > "$FSG_FAKE/docker/desktop"
+  }
+  bg foreign_at_restart
+  heal --docker-variant B > "$C/o" 2>&1; eq $? 0 "healed ($(tail -n 1 "$C/o"))"
+  has "$(cat "$FSG_LOG")" "something else started Docker Desktop during the heal (backend pid 8888; before the stop: 7777)" "logged"
+  has "$(grep 'fseventsd healed' "$FSG_FAKE/notifications.log")" "something else started Docker Desktop" "the notice says it"
+fi
+
+# ======================================================================== bind-probe
+if ! skip_case bind-probe; then
+  # probe_dir: BM_SHARED and BM_DIR as fsg_probe_dir picks them, HOME=$C/home.
+  probe_dir() {
+    ( HOME=$C/home; FSG_HOME=$GUARD_HOME; . "$GUARD_HOME/lib/common.sh"; . "$GUARD_HOME/lib/lease.sh"
+      . "$GUARD_HOME/lib/drain.sh"; . "$GUARD_HOME/lib/docker.sh"
+      fsg_init_paths; fsg_load_config; fsg_probe_dir; echo "${BM_SHARED:--} $BM_DIR" )
+  }
+  sharing() { # dirs...: Docker Desktop's File Sharing list
+    local d j=""
+    for d in "$@"; do j="${j:+$j,}\"$d\""; done
+    printf '{"AutoStart":false,"FilesharingDirectories":[%s]}\n' "$j" > "$FSG_DESKTOP_SETTINGS"
+  }
+
+  t "the probe dir follows Docker Desktop's File Sharing list"
+  eq "$(probe_dir)" "- $FSG_STATE_DIR/mountprobe" "no settings file: default sharing, the state dir"
+  echo '{"AutoStart":false}' > "$FSG_DESKTOP_SETTINGS"
+  eq "$(probe_dir)" "- $FSG_STATE_DIR/mountprobe" "no FilesharingDirectories: default sharing"
+  sharing "$C/home"
+  eq "$(probe_dir)" "1 $FSG_STATE_DIR/mountprobe" "the state dir is in a shared folder"
+  mkdir -p "$C/home/.local/share" "$C/home/Projects"
+  sharing /Volumes/elsewhere "$C/home/.local/share" "$C/home/Projects"
+  eq "$(probe_dir)" "1 $C/home/.local/share/.fseventsd-guard-mountprobe" "the first shared folder under home"
+  sharing "$C/home/sta" /Volumes/elsewhere
+  eq "$(probe_dir)" "0 $FSG_STATE_DIR/mountprobe" "whole components only, nothing shared under home: not shared"
+  sharing
+  eq "$(probe_dir)" "0 $FSG_STATE_DIR/mountprobe" "an empty list shares nothing"
+  sharing "$C/home/Projects"
+  eq "$(FSG_PROBE_DIR=$C/home/Projects/p probe_dir)" "1 $C/home/Projects/p" "FSG_PROBE_DIR in a shared folder"
+  eq "$(FSG_PROBE_DIR=$C/other probe_dir)" "0 $C/other" "FSG_PROBE_DIR is kept even when not shared"
+
+  t "a probe dir Docker Desktop does not share skips the bind check, not fails it"
+  docker_default; install_fake; mem 3G
+  touch "$FSG_FAKE/docker/mounts-denied"
+  heal --docker-variant B > "$C/o" 2>&1; eq $? 0 "healed, not restored-partly ($(tail -n 1 "$C/o"))"
+  grep -q '^bind_mount=skipped the probe dir .* is not shared with Docker Desktop (mounts denied)' "$(cat "$FSG_STATE_DIR/last-heal-dir")/result.txt" && ok || bad "recorded as skipped"
+  has "$(grep 'fseventsd healed' "$FSG_FAKE/notifications.log")" "Bind mount check skipped: the probe dir" "the notice says it"
+  absent "$FSG_STATE_DIR/drain/pending" "no hold"; absent "$FSG_STATE_DIR/docker-intent" "verified"
+  eq "$(ls -A "$FSG_STATE_DIR/mountprobe" 2>/dev/null)" "" "the probe left no file"
+  absent "$FSG_STATE_DIR/mountprobe.out" "nor its output"
+
+  t "the probe removes its file when no probe container runs"
+  docker_default; install_fake; mem 3G
+  agent_env FSG_PROBE_IMAGE=nosuch:1
+  heal --docker-variant B > "$C/o" 2>&1; eq $? 8 "no probe container could run"
+  has "$(grep 'heal incomplete' "$FSG_FAKE/notifications.log")" "Docker not fully restored (bind mount: no probe container could run (tried: nosuch:1))" "reason without a leading separator"
+  hasnt "$(cat "$FSG_FAKE/notifications.log")" "(; " "no empty part joined"
+  eq "$(ls -A "$FSG_STATE_DIR/mountprobe" 2>/dev/null)" "" "no file left after a failed run"
+
+  t "the probe removes its file after a broken round trip"
+  docker_default; install_fake; mem 3G
+  touch "$FSG_FAKE/docker/bind-broken"
+  heal --docker-variant B > "$C/o" 2>&1; eq $? 8 "round trip broken"
+  has "$(grep 'heal incomplete' "$FSG_FAKE/notifications.log" | tail -n 1)" "Docker not fully restored (bind mount: the container ran (alpine:3) but the round trip did not match" "reason without a leading separator"
+  eq "$(ls -A "$FSG_STATE_DIR/mountprobe" 2>/dev/null)" "" "no file left after a broken round trip"
+
+  t "doctor warns when Docker Desktop does not share the probe dir"
+  docker_default; install_fake
+  sharing /Volumes/elsewhere
+  "$G" doctor --prefix "$FSG_PREFIX" > "$C/doc.out" 2>/dev/null
+  has "$(cat "$C/doc.out")" "bind-mount probe dir $FSG_STATE_DIR/mountprobe is not in Docker Desktop's File Sharing list" "warned"
+  sharing "$C/home"
+  "$G" doctor --prefix "$FSG_PREFIX" > "$C/doc.out" 2>/dev/null
+  hasnt "$(cat "$C/doc.out")" "File Sharing list" "no warning once shared"
+fi
+
 # ======================================================================== heal-signal
 if ! skip_case heal-signal; then
   # term_agent FILE PATTERN: a heal request whose agent tick gets TERM once PATTERN
@@ -2805,7 +3102,8 @@ if ! skip_case heal-signal; then
 
   t "a signal during the container wait does not release runs onto an unhealthy container"
   docker_default; install_fake; mem 3G
-  containers "c1 pg running starting postgres:17 unless-stopped 0"
+  containers "c1 pg running healthy postgres:17 unless-stopped 0"
+  echo "c1 starting" > "$FSG_FAKE/docker/health-after-start"
   export FSG_CONTAINER_TIMEOUT_S=8; agent_env FSG_CONTAINER_TIMEOUT_S=8
   term_agent "$FSG_FAKE/calls.log" 'State.Health'
   wait "$HP"; eq $? 130 "the request ends with 130"
@@ -2875,13 +3173,15 @@ if ! skip_case heal-signal; then
   absent "$FSG_STATE_DIR/docker-intent" "intent cleared"
 fi
 
-# dead_intent VARIANT [AFTER_DONE]: the Docker intent of a heal whose tick died
-# before its after-step (AFTER_DONE 1: after it, Docker not verified).
+# dead_intent VARIANT [AFTER_DONE [HEALTH]]: the Docker intent of a heal whose tick
+# died before its after-step (AFTER_DONE 1: after it, Docker not verified). HEALTH:
+# its restore_health; without it, an intent of a guard that did not record it.
 dead_intent() {
   local dead dl
   bg sleep 60; dead=$LAST_BG; dl=$(lstart "$dead"); killbg "$dead"
   printf 'state_version=1\nowner_pid=%s\nowner_lstart=%s\nstarted_epoch=%s\nrequest=\ntrigger=wave\nvariant=%s\nkind=desktop\nstate=running\nendpoint=unix://%s\nrestore_ids=c1 c2\nrestore_names=pg redis\nheal_dir=\nafter_done=%s\nhold_epoch=\n' \
     "$dead" "$dl" "$(date +%s)" "$1" "$FSG_FAKE/docker/docker.sock" "${2:-0}" > "$FSG_STATE_DIR/docker-intent"
+  [ -n "${3:-}" ] && echo "restore_health=$3" >> "$FSG_STATE_DIR/docker-intent"
   DEAD=$dead
 }
 # ======================================================================== heal-kill
@@ -2919,12 +3219,14 @@ if ! skip_case heal-kill; then
 
   t "a tick killed outright after Docker stopped holds runs without the agent until expiry or release"
   docker_default; install_fake; mem 3G
-  echo 6 > "$FSG_FAKE/sudo-delay"; echo 0 > "$FSG_FAKE/sudo-rc"
+  # The restart stays in flight until the tick is killed, however slow the machine.
+  echo 600 > "$FSG_FAKE/sudo-delay"; echo 0 > "$FSG_FAKE/sudo-rc"
   "$G" heal --docker-variant A > "$C/heal.out" 2>&1 & hp=$!; BG_PIDS="$BG_PIDS $hp"
-  waitfor 20 grep -qs '^phase=restarting' "$FSG_STATE_DIR/drain/pending" || bad "the heal reached the restart"
+  waitfor 60 grep -qs '^phase=restarting' "$FSG_STATE_DIR/drain/pending" || bad "the heal reached the restart"
   # No tick runs from here on: the dead tick wrote no hold and nothing recovers.
   touch "$FSG_FAKE/kickstart-off"
-  ap=$(agent_pid); kill -KILL "$ap"; agent_wait
+  # The tick leads its own process group (stubs/launchctl): the restart goes with it.
+  ap=$(agent_pid); kill -KILL -- "-$ap"; agent_wait
   rm -f "$FSG_FAKE/sudo-delay"; mem 5000K
   eq "$(awk '$3 == "running"' "$FSG_FAKE/docker/containers")" "" "Docker's containers left stopped"
   hasnt "$(cat "$FSG_STATE_DIR/drain/pending" 2>/dev/null)" "hold_until_epoch=" "no hold written"
@@ -3045,8 +3347,9 @@ if ! skip_case heal-kill; then
 
   t "a container that runs but is not healthy yet is never dropped"
   docker_default; install_fake; mem 3G
-  containers "c1 pg running starting postgres:17 unless-stopped 0" "c2 redis running none redis:7 unless-stopped 0"
-  heal --docker-variant B >/dev/null 2>&1; eq $? 8 "not verified: pg is not healthy"
+  echo "c1 starting" > "$FSG_FAKE/docker/health-after-start"
+  heal --docker-variant B >/dev/null 2>&1; eq $? 8 "not verified: pg was healthy and is not yet"
+  has "$(cat "$FSG_STATE_DIR/docker-intent" 2>/dev/null)" "restore_health=healthy none" "the intent keeps each one's health before the heal"
   hasnt "$(cat "$FSG_STATE_DIR/docker-intent" 2>/dev/null)" "pg:" "no failed pass counted"
   mem 5000K; : > "$FSG_FAKE/notifications.log"
   sleep 1; FSG_AGENT_INTERVAL_S=1 "$G" tick >/dev/null 2>&1
@@ -3059,6 +3362,45 @@ if ! skip_case heal-kill; then
   absent "$FSG_STATE_DIR/docker-intent" "verified once pg is healthy"
   FSG_RUN_MAX_WAIT_S=1 "$G" run -- true 2>/dev/null; eq $? 0 "released"
   hasnt "$(cat "$FSG_FAKE/notifications.log")" "Dropped" "nothing dropped"
+
+  t "a container already unhealthy before the heal does not fail its verify"
+  docker_default; install_fake; mem 3G
+  containers "c1 pg running unhealthy postgres:17 unless-stopped 0" "c2 redis running none redis:7 unless-stopped 0"
+  heal --docker-variant B >/dev/null 2>&1; eq $? 0 "healed: pg runs, unhealthy as before"
+  has "$(cat "$(cat "$FSG_STATE_DIR/last-heal-dir")/docker-before.txt")" "health=unhealthy none" "the record keeps each one's health"
+  absent "$FSG_STATE_DIR/docker-intent" "verified"
+  FSG_RUN_MAX_WAIT_S=1 "$G" run -- true 2>/dev/null; eq $? 0 "runs released"
+
+  t "a container healthy before the heal that stays unhealthy still fails the verify"
+  docker_default; install_fake; mem 3G
+  echo "c1 unhealthy" > "$FSG_FAKE/docker/health-after-start"
+  heal --docker-variant B >/dev/null 2>&1; eq $? 8 "not verified: pg was healthy"
+  has "$(grep 'heal incomplete' "$FSG_FAKE/notifications.log")" "containers: c1" "named"
+  FSG_RUN_MAX_WAIT_S=1 "$G" run -- true 2>/dev/null; eq $? 75 "runs held"
+
+  t "a dead heal's recovery needs healthy only where the intent recorded it"
+  docker_default; install_fake
+  containers "c1 pg running unhealthy postgres:17 unless-stopped 0" "c2 redis running none redis:7 unless-stopped 0"
+  dead_intent B 1 "unhealthy none"
+  FSG_CONTAINER_TIMEOUT_S=1 "$G" tick >/dev/null 2>&1
+  absent "$FSG_STATE_DIR/docker-intent" "verified: pg was unhealthy before the heal"
+  dead_intent B 1
+  FSG_CONTAINER_TIMEOUT_S=1 "$G" tick >/dev/null 2>&1
+  exists "$FSG_STATE_DIR/docker-intent" "an intent without restore_health needs pg healthy, as before"
+  FSG_RUN_MAX_WAIT_S=1 "$G" run -- true 2>/dev/null; eq $? 75 "runs held"
+
+  t "a hold is released over a container that was unhealthy before the heal, not one that was healthy"
+  docker_default; install_fake
+  containers "c1 pg running unhealthy postgres:17 unless-stopped 0" "c2 redis running none redis:7 unless-stopped 0"
+  for h in "" "healthy none" "unhealthy none"; do
+    mkdir -p "$FSG_STATE_DIR/drain/leases"
+    printf 'state_version=1\nowner_pid=0\nstarted_epoch=%s\nhold_until_epoch=%s\ntrigger=manual\nreason=test hold\nphase=held-docker-not-restored\nrestore_names=pg redis\n%s' \
+      "$(date +%s)" $(( $(date +%s) + 600 )) "${h:+restore_health=$h
+}" > "$FSG_STATE_DIR/drain/pending"
+    "$G" tick >/dev/null 2>&1
+    if [ "$h" = "unhealthy none" ]; then absent "$FSG_STATE_DIR/drain/pending" "released (restore_health=$h)"
+    else exists "$FSG_STATE_DIR/drain/pending" "kept (restore_health=${h:-absent})"; fi
+  done
 
   t "a container gone from a dead heal's restore set is named and dropped, not held for good"
   docker_default; install_fake
@@ -3472,11 +3814,11 @@ if ! skip_case docker-endpoint; then
   done
 fi
 
-# ======================================================================== helper-72
-if ! skip_case helper-72; then
-  t "helper exit 72: the heal waits for the respawn, then restores and verifies Docker"
+# ======================================================================== helper-73
+if ! skip_case helper-73; then
+  t "helper exit 73: the heal waits for the respawn, then restores and verifies Docker"
   docker_default; install_fake; mem 3G
-  echo 72 > "$FSG_FAKE/sudo-rc"
+  echo 73 > "$FSG_FAKE/sudo-rc"
   respawn_late() {
     waitfor 30 grep -q "sudo -n $FSG_PREFIX" "$FSG_FAKE/calls.log" || return 1
     sleep 2; echo 3000K > "$FSG_FAKE/fsev/4343.mem"; echo 4343 > "$FSG_FAKE/fsev/pids"
@@ -3487,13 +3829,21 @@ if ! skip_case helper-72; then
   has "$(cat "$FSG_FAKE/calls.log")" "docker run --rm" "bind mount checked"
   absent "$FSG_STATE_DIR/drain/pending" "released"
 
-  t "helper exit 72 with a broken bind mount keeps runs held"
+  t "helper exit 73 with a broken bind mount keeps runs held"
   docker_default; install_fake; mem 3G
-  echo 72 > "$FSG_FAKE/sudo-rc"; touch "$FSG_FAKE/docker/bind-broken"
+  echo 73 > "$FSG_FAKE/sudo-rc"; touch "$FSG_FAKE/docker/bind-broken"
   heal --docker-variant B > "$C/o" 2>&1; eq $? 7 "no respawn: restart failed"
   has "$(cat "$FSG_FAKE/calls.log")" "docker run --rm" "bind mount checked"
   FSG_RUN_MAX_WAIT_S=1 "$G" run -- true 2>/dev/null; eq $? 75 "new runs held"
   has "$(cat "$FSG_FAKE/notifications.log")" "fseventsd-guard release" "the notification says how to release"
+
+  t "helper exit 72: fseventsd needed SIGKILL; the heal reports it"
+  docker_default; install_fake; mem 3G; touch "$FSG_FAKE/ignore-term"
+  heal --docker-variant B > "$C/o" 2>&1; eq $? 0 "healed ($(tail -n 1 "$C/o"))"
+  has "$(cat "$FSG_LOG")" "HEAL helper rc=72 (restarted, but fseventsd ignored SIGTERM for 10 s and needed SIGKILL)" "logged"
+  has "$(grep healed "$FSG_FAKE/notifications.log")" "the helper restarted it with SIGKILL" "the notice says so"
+  has "$(cat "$(sed -n 's/.* //p' "$FSG_STATE_DIR/last-heal")/result.txt")" "helper_rc=72" "recorded"
+  exists "$FSG_STATE_DIR/last-restart" "counts as a restart"
 fi
 
 # ======================================================================== tick
@@ -3514,10 +3864,107 @@ if ! skip_case tick; then
   hasnt "$(cat "$FSG_FAKE/calls.log")" "sudo -n /" "no second restart"
   has "$(tail -n 1 "$FSG_FAKE/notifications.log")" "not auto-healing" "notification"
 
+  t "tick logs compressed memory, ports and swap"
+  docker_default; install_fake --no-agent
+  echo 1.5G > "$FSG_FAKE/fsev/4242.cmprs"; echo 118+ > "$FSG_FAKE/fsev/4242.ports"
+  echo "total = 14336.00M  used = 13548.50M  free = 787.50M  (encrypted)" > "$FSG_FAKE/swapusage"
+  "$G" tick; eq $? 0 "ok"
+  line=$(grep ' TICK level=' "$FSG_LOG" | tail -n 1)
+  has "$line" "mb=4 cmprs_mb=1536 ports=118 cpu=" "compressed memory and ports from the same top sample"
+  has "$line" "swap_used_mb=13548 " "swap in use"
+  echo garbage > "$FSG_FAKE/swapusage"; echo "?" > "$FSG_FAKE/fsev/4242.ports"; "$G" tick; eq $? 0 "unreadable extras do not matter"
+  line=$(grep ' TICK level=' "$FSG_LOG" | tail -n 1)
+  has "$line" "ports= cpu=" "empty ports"; has "$line" "swap_used_mb= " "empty swap"
+
+  # cpu_step PCT: the last tick's record moves 300 s back and fseventsd uses PCT% of
+  # a core over that gap.
+  cpu_step() {
+    local f="$FSG_STATE_DIR/tick-sample" e c ms
+    e=$(sed -n 's/^epoch=//p' "$f"); c=$(sed -n 's/^cpu_ms=//p' "$f")
+    sed "s/^epoch=.*/epoch=$((e - 300))/" "$f" > "$f.t" && mv "$f.t" "$f"
+    ms=$((c + $1 * 3000))
+    printf '%d:%02d.%02d\n' $((ms / 60000)) $((ms % 60000 / 1000)) $((ms % 1000 / 10)) > "$FSG_FAKE/fsev/$(head -n 1 "$FSG_FAKE/fsev/pids").time"
+  }
+
+  t "tick cpu escalator: warn plus a pinned core for 3 ticks heals"
+  docker_default; install_fake --no-agent; mem 600M
+  "$G" tick; eq $? 1 "first tick: warn, no CPU share yet"
+  has "$(grep ' TICK level=' "$FSG_LOG" | tail -n 1)" "cpu_avg_pct= cpu_streak=0" "no share without an earlier tick"
+  cpu_step 60; "$G" tick; eq $? 1 "1 tick at 60%: warn"
+  has "$(grep ' TICK level=' "$FSG_LOG" | tail -n 1)" "cpu_streak=1" "streak 1"
+  cpu_step 60; "$G" tick; eq $? 1 "2 ticks: warn"
+  "$G" status >/dev/null; eq $? 1 "status: warn at 2 ticks"
+  cpu_step 60; : > "$FSG_FAKE/calls.log"; "$G" tick >/dev/null 2>&1; eq $? 0 "3 ticks: runaway, emergency heal"
+  line=$(grep ' TICK level=' "$FSG_LOG" | tail -n 1)
+  has "$line" "level=runaway" "level"; has "$line" "cpu_streak=3" "streak 3"
+  case $line in *cpu_avg_pct=59*|*cpu_avg_pct=60*) ok ;; *) bad "share from the CPU time between ticks: $line" ;; esac
+  has "$(cat "$FSG_LOG")" "TICK runaway by the cpu escalator" "logged"
+  has "$(cat "$FSG_FAKE/calls.log")" "sudo -n /" "restart happened"
+  has "$(cat "$FSG_STATE_DIR/last-heal")" "healed emergency" "the act threshold's path"
+
+  t "tick cpu escalator: a quiet tick, a small footprint or a new pid start over"
+  docker_default; install_fake --no-agent; mem 600M
+  "$G" tick; cpu_step 60; "$G" tick; cpu_step 60; "$G" tick
+  cpu_step 10; "$G" tick; eq $? 1 "a quiet tick"
+  has "$(grep ' TICK level=' "$FSG_LOG" | tail -n 1)" "cpu_streak=0" "streak reset"
+  cpu_step 60; "$G" tick; cpu_step 60; "$G" tick; eq $? 1 "2 more ticks: warn"
+  mem 300M; cpu_step 90; "$G" tick; eq $? 0 "below warn: ok"
+  has "$(grep ' TICK level=' "$FSG_LOG" | tail -n 1)" "cpu_streak=0" "below warn does not count"
+  mem 600M; cpu_step 60; "$G" tick; cpu_step 60; "$G" tick
+  echo 4300 > "$FSG_FAKE/fsev/pids"; echo 600M > "$FSG_FAKE/fsev/4300.mem"; echo 9:00.00 > "$FSG_FAKE/fsev/4300.time"
+  "$G" tick; eq $? 1 "a new pid: warn"
+  has "$(grep ' TICK level=' "$FSG_LOG" | tail -n 1)" "cpu_avg_pct= cpu_streak=0" "no share across pids"
+  printf 'epoch=%s\npid=4300\ncpu_ms=1\ncpu_pct=97\nstreak=3\n' "$(date +%s)" > "$FSG_STATE_DIR/tick-sample"
+  out=$("$G" status --json); eq $? 2 "status: the agent's streak counts"
+  has "$(jget "$out" 'd["reasons"][0]')" "cpu 97% of a core for 3 ticks in a row" "reason"
+  FSG_CPU_ESCALATE_PCT=0 "$G" status >/dev/null; eq $? 1 "0 turns it off"
+  FSG_CPU_ESCALATE_TICKS=4 "$G" status >/dev/null; eq $? 1 "4 ticks needed"
+  mem 300M; "$G" status >/dev/null; eq $? 0 "below warn: ok"
+  mem 600M; printf 'epoch=%s\npid=4300\ncpu_ms=1\ncpu_pct=97\nstreak=3\n' $(( $(date +%s) - 700 )) > "$FSG_STATE_DIR/tick-sample"
+  "$G" status >/dev/null; eq $? 1 "a record older than two intervals does not count"
+  printf 'epoch=%s\npid=4242\ncpu_ms=1\ncpu_pct=97\nstreak=3\n' "$(date +%s)" > "$FSG_STATE_DIR/tick-sample"
+  "$G" status >/dev/null; eq $? 1 "another pid's record does not count"
+
+  t "tick logs the FSEvents rate from the probe's event ids"
+  docker_default; install_fake --no-agent
+  echo 5000000 > "$FSG_FAKE/probe-eid"; "$G" tick; eq $? 0 "ok"
+  has "$(grep ' TICK level=' "$FSG_LOG" | tail -n 1)" "start_ms=0 eid=5000000 ev_s=" "event id, no rate on the first tick"
+  cpu_step 0; echo 5060000 > "$FSG_FAKE/probe-eid"; "$G" tick
+  line=$(grep ' TICK level=' "$FSG_LOG" | tail -n 1)
+  case $line in *"eid=5060000 ev_s=200"|*"eid=5060000 ev_s=199"|*"eid=5060000 ev_s=198") ok ;; *) bad "60000 events in about 300 s: $line" ;; esac
+  echo "{ sec = 1760009999, usec = 0 } Thu Oct  9 11:39:59 2025" > "$FSG_FAKE/boottime"
+  cpu_step 0; echo 9000000000 > "$FSG_FAKE/probe-eid"; "$G" tick
+  has "$(grep ' TICK level=' "$FSG_LOG" | tail -n 1)" "eid=9000000000 ev_s=" "a reboot starts the rate over"
+  cpu_step 0; rm -f "$FSG_FAKE/probe-eid"; "$G" tick; eq $? 0 "a probe without an event id still parses"
+  has "$(grep ' TICK level=' "$FSG_LOG" | tail -n 1)" "start_ms=0 eid= ev_s=" "no id, no rate"
+
+  t "tick keeps a per-day summary"
+  docker_default; install_fake --no-agent; mem 600M; day=$(date +%Y-%m-%d)
+  echo 5000000 > "$FSG_FAKE/probe-eid"; "$G" tick
+  has "$(cat "$FSG_STATE_DIR/daily")" "$day ticks=1 max_mb=600 max_cpu_pct=- heals=0 ev_s_p50=- ev_s_p95=-" "first tick: nothing to rate yet"
+  cpu_step 60; echo 5030000 > "$FSG_FAKE/probe-eid"; "$G" tick
+  cpu_step 10; echo 5090000 > "$FSG_FAKE/probe-eid"; mem 700M; "$G" tick
+  eq "$(wc -l < "$FSG_STATE_DIR/daily" | tr -d ' ')" 1 "one line per day, rewritten"
+  line=$(cat "$FSG_STATE_DIR/daily")
+  has "$line" "$day ticks=3 max_mb=700 max_cpu_pct=" "ticks and the largest footprint"
+  case $line in *"max_cpu_pct=59 "*|*"max_cpu_pct=60 "*) ok ;; *) bad "largest CPU share: $line" ;; esac
+  case $line in *"ev_s_p50=98 "*|*"ev_s_p50=99 "*|*"ev_s_p50=100 "*) ok ;; *) bad "median rate: $line" ;; esac
+  case $line in *"ev_s_p95=198"|*"ev_s_p95=199"|*"ev_s_p95=200") ok ;; *) bad "95th percentile rate: $line" ;; esac
+  mem 3G; "$G" tick >/dev/null 2>&1; eq $? 0 "an emergency heal"
+  has "$(cat "$FSG_STATE_DIR/daily")" "$day ticks=4 max_mb=3072" "the heal's tick"
+  has "$(cat "$FSG_STATE_DIR/daily")" " heals=1 " "the heal counted"
+  { echo "day 2000-01-01"; echo "tick 5 1 100"; } > "$FSG_STATE_DIR/day-samples"
+  printf '2000-01-01 ticks=1 max_mb=5 max_cpu_pct=1 heals=0 ev_s_p50=100 ev_s_p95=100\n%s\n' "$(cat "$FSG_STATE_DIR/daily")" > "$FSG_STATE_DIR/daily"
+  "$G" tick
+  eq "$(head -n 1 "$FSG_STATE_DIR/daily")" "2000-01-01 ticks=1 max_mb=5 max_cpu_pct=1 heals=0 ev_s_p50=100 ev_s_p95=100" "an earlier day stays"
+  has "$(tail -n 1 "$FSG_STATE_DIR/daily")" "$day ticks=1 " "a new day's samples start over"
+  eq "$(wc -l < "$FSG_STATE_DIR/daily" | tr -d ' ')" 2 "today's line replaced, not added"
+
   t "tick stall confirmation"
   docker_default; install_fake --no-agent
   printf 'stalled\nok\n' > "$FSG_FAKE/probe-seq"; "$G" tick; eq $? 0 "one slow probe is not a stall"
   has "$(cat "$FSG_LOG")" "probe stalled once, then ok" "logged"
+  has "$(grep ' TICK level=' "$FSG_LOG" | tail -n 1)" "probe=ok/7ms start_ms=0" "the stream start time in the tick line"
   mem 300M; printf 'stalled\nstalled\nstalled\n' > "$FSG_FAKE/probe-seq"; : > "$FSG_FAKE/calls.log"
   "$G" tick >/dev/null 2>&1; rc=$?
   eq $rc 0 "confirmed stall above the floor heals"
@@ -3601,7 +4048,7 @@ if ! skip_case heartbeat; then
 
   t "no tick since install; running and dead ticks"
   docker_default; install_fake
-  touch -t "$(date -v-20M +%Y%m%d%H%M.%S)" "$FSG_LAUNCH_AGENTS_DIR/io.github.ruslantar.fseventsd-guard.plist"
+  touch_ago 20M "$FSG_LAUNCH_AGENTS_DIR/io.github.ruslantar.fseventsd-guard.plist"
   out=$("$G" status --json 2>"$C/err")
   eq "$(jget "$out" 'd["agent"]["stale"]')" True "no tick 20 min after install"
   has "$(cat "$C/err")" "no tick recorded since the agent was installed" "message"
@@ -3627,7 +4074,7 @@ if ! skip_case heartbeat; then
   docker_default; install_fake
   PL="$FSG_LAUNCH_AGENTS_DIR/io.github.ruslantar.fseventsd-guard.plist"
   plutil -insert ProgramArguments.0 -string /bin/bash "$PL"
-  touch -t "$(date -v-20M +%Y%m%d%H%M.%S)" "$PL"
+  touch_ago 20M "$PL"
   printf '%s TICK level=ok pid=4242 mb=5\n' "$(date -u -v-1M +%Y-%m-%dT%H:%M:%SZ)" >> "$FSG_LOG"
   out=$("$G" status --json 2>"$C/err")
   eq "$(jget "$out" 'd["agent"]["stale"]')" False "a ticking old agent is not stale"
@@ -3650,7 +4097,7 @@ if ! skip_case heartbeat; then
   t "an agent without a heartbeat is judged by its newest TICK line"
   docker_default; install_fake
   PL="$FSG_LAUNCH_AGENTS_DIR/io.github.ruslantar.fseventsd-guard.plist"
-  touch -t "$(date -v-20M +%Y%m%d%H%M.%S)" "$PL"
+  touch_ago 20M "$PL"
   printf '%s TICK level=ok pid=4242 mb=5\n' "$(date -u -v-1M +%Y-%m-%dT%H:%M:%SZ)" >> "$FSG_LOG"
   out=$("$G" status --json 2>"$C/err")
   eq "$(jget "$out" 'd["agent"]["stale"]')" False "a recent TICK line is a live agent"
@@ -3668,6 +4115,11 @@ if ! skip_case heartbeat; then
   printf '\tlast exit code = 8\n' > "$FSG_FAKE/launchctl-print"
   out=$("$G" doctor --prefix "$FSG_PREFIX" 2>&1); rc=$?
   has "$out" "info  launchctl: the agent's last tick exited 8, an emergency heal's exit code" "heal code"; eq $rc 0 "a heal code is not a doctor warning"
+  printf '\tlast exit code = 14\n' > "$FSG_FAKE/launchctl-print"
+  echo "$(date +%s) refused-anonymous-volumes emergency B 3 $C/heal dir" > "$FSG_STATE_DIR/last-heal"
+  out=$("$G" doctor --prefix "$FSG_PREFIX" 2>&1); rc=$?
+  has "$out" "info  launchctl: the agent's last tick exited 14: its heal refused to stop Docker, for data safety (last heal: refused-anonymous-volumes, record $C/heal dir); see the README, Notifications and what to do: heal refused" "a Docker safety refusal"
+  hasnt "$out" "re-run install" "no reinstall advice"; eq $rc 0 "a refusal is not a doctor warning"
   printf '\tlast exit code = 126: Unknown error: 126\n' > "$FSG_FAKE/launchctl-print"
   out=$("$G" doctor --prefix "$FSG_PREFIX" 2>&1); rc=$?
   has "$out" "WARN  launchctl: the agent's last run exited 126: Unknown error: 126" "cannot execute"; eq $rc 1 "doctor warns"
@@ -3991,10 +4443,10 @@ if ! skip_case uninstall; then
   install_fake
   mkdir "$TMPDIR/fseventsd-guard-install.abc123"; : > "$TMPDIR/fseventsd-guard-install.abc123/helper"
   : > "$TMPDIR/fsg-doctor.abc123"; : > "$TMPDIR/fsg-timeout.abc123"; : > "$TMPDIR/unrelated.txt"
-  touch -t "$(date -v-2H +%Y%m%d%H%M)" "$TMPDIR/fseventsd-guard-install.abc123" "$TMPDIR/fsg-doctor.abc123" "$TMPDIR/fsg-timeout.abc123"
+  touch_ago 2H "$TMPDIR/fseventsd-guard-install.abc123" "$TMPDIR/fsg-doctor.abc123" "$TMPDIR/fsg-timeout.abc123"
   # A guard command running in another terminal (an install staging, a timeout flag).
   mkdir "$TMPDIR/fseventsd-guard-install.new123"; : > "$TMPDIR/fsg-timeout.new123"
-  touch -t "$(date -v-50M +%Y%m%d%H%M)" "$TMPDIR/fsg-timeout.new123"
+  touch_ago 50M "$TMPDIR/fsg-timeout.new123"
   "$G" uninstall --yes --prefix "$FSG_PREFIX" > "$C/un.out" 2>&1; eq $? 0 "uninstall"
   has "$(cat "$C/un.out")" "temp files that interrupted guard commands left:" "listed"
   has "$(cat "$C/un.out")" "$TMPDIR/fsg-timeout.abc123" "by name"
@@ -4021,6 +4473,7 @@ if ! skip_case uninstall; then
     echo "variant=B" > "$FSG_STATE_DIR/trials/20261023T000000-B-t1/summary.txt"
     echo "1 healed manual B 60" > "$FSG_STATE_DIR/last-heal"; echo "$FSG_STATE_DIR/heals/20261023T000000Z-1" > "$FSG_STATE_DIR/last-heal-dir"
     echo "FSG_WARN_MB=600" >> "$FSG_STATE_DIR/config"
+    echo "2026-10-23 ticks=288 max_mb=5 max_cpu_pct=1 heals=0 ev_s_p50=120 ev_s_p95=900" > "$FSG_STATE_DIR/daily"
   }
 
   t "uninstall --keep-logs keeps the logs and moves the records and the config out"
@@ -4029,7 +4482,7 @@ if ! skip_case uninstall; then
   R=$(ls -d "$C/home/Logs"/fseventsd-guard-records-* 2>/dev/null)
   [ -n "$R" ] && [ -d "$R" ] && ok || bad "a dated records dir next to the user log"
   exists "$R/heals/20261023T000000Z-1/result.txt" "heal record"; exists "$R/trials/20261023T000000-B-t1/summary.txt" "trial record"
-  exists "$R/last-heal" "last-heal"; exists "$R/last-heal-dir" "last-heal-dir"
+  exists "$R/last-heal" "last-heal"; exists "$R/last-heal-dir" "last-heal-dir"; exists "$R/daily" "the per-day summary"
   has "$(cat "$R/config" 2>/dev/null)" "FSG_WARN_MB=600" "the config"
   exists "$FSG_LOG" "user log"; exists "$FSG_AGENT_LOG" "agent log"; exists "$FSG_PREFIX/Library/Logs/fseventsd-guard" "root logs"
   absent "$FSG_STATE_DIR" "the rest of the state dir goes"
@@ -4045,17 +4498,19 @@ if ! skip_case uninstall; then
   # hint_cache: the Claude Code install hint's stamps and off switch, as it leaves them.
   hint_cache() { mkdir -p "$FSG_HINT_DIR"; date +%s > "$FSG_HINT_DIR/checked"; date +%s > "$FSG_HINT_DIR/last-warn"; : > "$FSG_HINT_DIR/off"; }
 
-  t "install and uninstall remove the Claude Code install hint's stamps"
+  t "install and uninstall remove the Claude Code install hint's stamps, not its off switch"
   hint_cache; install_fake; eq $? 0 "install"
-  absent "$FSG_HINT_DIR" "install removes them: moot once installed"
+  absent "$FSG_HINT_DIR/checked" "install removes the stamps: moot once installed"; absent "$FSG_HINT_DIR/last-warn" "each of them"
+  exists "$FSG_HINT_DIR/off" "the off switch stays"
+  touch "$FSG_HINT_DIR/off" && ok || bad "the documented touch works on an installed guard"
   hint_cache
   "$G" uninstall --yes --prefix "$FSG_PREFIX" > "$C/un.out" 2>&1; eq $? 0 "uninstall"
-  has "$(cat "$C/un.out")" "$FSG_HINT_DIR (the Claude Code install hint's stamps and off switch)" "listed"
-  absent "$FSG_HINT_DIR" "uninstall removes them"
+  has "$(cat "$C/un.out")" "the Claude Code install hint's stamps in $FSG_HINT_DIR (an off switch there stays)" "listed"
+  absent "$FSG_HINT_DIR/checked" "uninstall removes them"; exists "$FSG_HINT_DIR/off" "and keeps the off switch"
   has "$(cat "$C/un.out")" "uninstalled: no traces left" "clean"
-  install_fake; hint_cache
+  install_fake; mv "$FSG_HINT_DIR/off" "$C/off.was"; date +%s > "$FSG_HINT_DIR/checked"
   "$G" uninstall --yes --keep-logs --prefix "$FSG_PREFIX" > "$C/un.out" 2>&1; eq $? 0 "uninstall --keep-logs"
-  absent "$FSG_HINT_DIR" "--keep-logs removes them too (no log)"
+  absent "$FSG_HINT_DIR" "--keep-logs removes them too (no log), and the dir with no off switch in it"
   # Named otherwise (an exported FSG_HINT_DIR), the dir is not the guard's to remove.
   export FSG_HINT_DIR="$C/home/Caches/other"; hint_cache
   install_fake; eq $? 0 "install"; exists "$FSG_HINT_DIR/checked" "install leaves another name alone"
@@ -4096,18 +4551,18 @@ if ! skip_case claude-hook-prompt; then
   m=$(hook_msg "$out"); x=$(hook_ctx "$out")
   has "$m" "fseventsd is running away: 3.0 GB, 102x Apple's 30 MB budget (up 1h02m)" "the user's line"
   has "$m" "On macOS 27.0.1 it can grow without limit and silently stop delivering file events" "why it matters"
-  has "$m" "new terminal window (it asks for sudo): [ -d ~/fseventsd-guard ] || git clone https://github.com/RuslanTar/fseventsd-guard.git ~/fseventsd-guard; ~/fseventsd-guard/plugins/fseventsd-guard/fseventsd-guard install." "the install command, from a clone of the public repo"
-  has "$m" "Silence: FSG_HINT=0, or touch $FSG_HINT_DIR/off" "how to silence it"
+  has "$m" "new terminal window (it asks for sudo): if [ -d ~/fseventsd-guard ]; then git -C ~/fseventsd-guard pull --ff-only; else git clone https://github.com/RuslanTar/fseventsd-guard.git ~/fseventsd-guard; fi && ~/fseventsd-guard/plugins/fseventsd-guard/fseventsd-guard install." "the install command, from an up-to-date clone of the public repo"
+  has "$m" "Silence: FSG_HINT=0, or mkdir -p $FSG_HINT_DIR && touch $FSG_HINT_DIR/off" "how to silence it"
   has "$x" "a footprint of 3072 MB (102x Apple's 30 MB budget), uptime 1h02m, level runaway (the guard warns at 500 MB and heals at 2048 MB)" "the facts"
   has "$x" "On macOS 27.0.1 fseventsd has a known bug" "the version"
   has "$x" "IDE, dev servers, Docker bind mounts and Claude Code stop seeing file changes" "the symptoms"
-  has "$x" "runs in a new terminal window, not through Claude: [ -d ~/fseventsd-guard ] || git clone https://github.com/RuslanTar/fseventsd-guard.git ~/fseventsd-guard; ~/fseventsd-guard/plugins/fseventsd-guard/fseventsd-guard install, then the same path with doctor." "install, then doctor"
+  has "$x" "runs in a new terminal window, not through Claude: if [ -d ~/fseventsd-guard ]; then git -C ~/fseventsd-guard pull --ff-only; else git clone https://github.com/RuslanTar/fseventsd-guard.git ~/fseventsd-guard; fi && ~/fseventsd-guard/plugins/fseventsd-guard/fseventsd-guard install, then the same path with doctor." "install, then doctor"
   has "$x" "Why and what it costs: https://github.com/RuslanTar/fseventsd-guard#readme." "the README"
   hasnt "$out" "$REPO" "no project checkout or its path assumed"
   has "$x" "once an hour at this level" "the cadence"
   has "$x" "FSG_HINT=0 in Claude Code's environment, or a file $FSG_HINT_DIR/off, silences it" "how to silence it"
   has "$x" "The user has not been told about this in the conversation yet." "to relay once"
-  [ ${#x} -lt 1300 ] && ok || bad "context under ~1,200 chars plus the test paths (${#x})"
+  [ ${#x} -lt 1400 ] && ok || bad "context under ~1,300 chars plus the test paths (${#x})"
   hasnt "$out" "permissionDecision" "never allows or denies"
   exists "$FSG_HINT_DIR/last-runaway" "stamped"
 
@@ -4125,11 +4580,13 @@ if ! skip_case claude-hook-prompt; then
 
   t "claude-hook prompt: silent when installed, not affected, off macOS or switched off"
   mem 3G
-  app_copy; eq "$(hook prompt)" "" "app copy installed"; rm -rf "$FSG_STATE_DIR/app"
   : > "$FSG_LAUNCH_AGENTS_DIR/io.github.ruslantar.fseventsd-guard.plist"; eq "$(hook prompt)" "" "agent plist installed"
   rm "$FSG_LAUNCH_AGENTS_DIR/io.github.ruslantar.fseventsd-guard.plist"
+  HP="$FSG_PREFIX/usr/local/libexec/fseventsd-guard-restart"
+  mkdir -p "$(dirname "$HP")"; : > "$HP"; eq "$(hook prompt)" "" "root helper installed (install --no-agent)"
+  mv "$HP" "$C/helper.was"
   absent "$FSG_HINT_DIR" "an installed guard is neither measured nor stamped"
-  echo 28.0 > "$FSG_FAKE/sw_vers"; eq "$(hook prompt)" "" "a version without a report"; rm "$FSG_FAKE/sw_vers"
+  echo 15.5 > "$FSG_FAKE/sw_vers"; eq "$(hook prompt)" "" "a version before the range"; rm "$FSG_FAKE/sw_vers"
   rm -rf "$FSG_HINT_DIR"; eq "$(FSG_AFFECTED=no hook prompt)" "" "FSG_AFFECTED=no"
   rm -rf "$FSG_HINT_DIR"; not_darwin "$C/bin"
   eq "$(PATH="$C/bin:$PATH" hook prompt)" "" "not macOS"; absent "$FSG_HINT_DIR" "nothing written off macOS"
@@ -4140,6 +4597,13 @@ if ! skip_case claude-hook-prompt; then
   rm "$FSG_HINT_DIR/off"; has "$(hook prompt)" "running away" "shown otherwise"
   eq "$("$G" claude-hook < /dev/null; echo "rc=$?")" "rc=0" "no mode: nothing, exit 0"
   eq "$("$G" claude-hook other < /dev/null; echo "rc=$?")" "rc=0" "an unknown mode: nothing, exit 0"
+
+  t "claude-hook prompt: an install stopped at sudo leaves the nudge and its stamps"
+  mem 3G; hint_stamp checked 3700; hint_stamp last-runaway 3700; c0=$(cat "$FSG_HINT_DIR/checked")
+  echo 1 > "$FSG_FAKE/sudo-rc"; install_fake; eq $? 1 "the root steps fail"
+  exists "$FSG_STATE_DIR/app" "the app copy is in place"
+  eq "$(cat "$FSG_HINT_DIR/checked" 2>/dev/null)" "$c0" "the stamps are untouched"
+  has "$(hook prompt)" "running away" "the nudge goes on"
 
   t "claude-hook prompt: silent when fseventsd cannot be measured"
   : > "$FSG_FAKE/fsev/pids"; eq "$(hook prompt)" "" "no daemon"
@@ -4169,10 +4633,27 @@ if ! skip_case claude-hook-prompt; then
   t "claude-hook prompt: the same nudge in any project, or none"
   d="$C/a \"quoted\" \\ dir"; mkdir -p "$d"; export CLAUDE_PROJECT_DIR="$d"
   mem 3G; out=$(hook prompt); json_ok "$out"
-  has "$(hook_msg "$out")" ": [ -d ~/fseventsd-guard ] || git clone https://github.com/RuslanTar/fseventsd-guard.git ~/fseventsd-guard; " "the clone command"
+  has "$(hook_msg "$out")" ": if [ -d ~/fseventsd-guard ]; then git -C ~/fseventsd-guard pull --ff-only; else git clone https://github.com/RuslanTar/fseventsd-guard.git " "the clone command"
   hasnt "$out" "quoted" "the project path is not used"
   unset CLAUDE_PROJECT_DIR; rm -rf "$FSG_HINT_DIR"
   eq "$(hook prompt)" "$out" "no project dir: the same nudge"
+
+  t "claude-hook prompt: the install command updates an existing clone before install"
+  mem 3G; m=$(hook_msg "$(hook prompt)")
+  cmd=${m#*it asks for sudo): }; cmd=${cmd%%. Why:*}
+  # A stand-in git that logs its call and fails when $C/git-fails exists; the clone's
+  # guard is a stand-in that logs its install.
+  mkdir -p "$C/gitbin" "$C/h"
+  printf '#!/bin/sh\necho "git $*" >> "%s/cmd.log"\n[ ! -e "%s/git-fails" ]\n' "$C" "$C" > "$C/gitbin/git"; chmod +x "$C/gitbin/git"
+  runcmd() { : > "$C/cmd.log"; HOME="$C/h" PATH="$C/gitbin:$PATH" bash -c "$cmd" >/dev/null 2>&1; cat "$C/cmd.log"; }
+  eq "$(runcmd)" "git clone https://github.com/RuslanTar/fseventsd-guard.git $C/h/fseventsd-guard" "no clone yet: it clones"
+  mkdir -p "$C/h/fseventsd-guard/plugins/fseventsd-guard"
+  printf '#!/bin/sh\necho "guard $*" >> "%s/cmd.log"\n' "$C" > "$C/h/fseventsd-guard/plugins/fseventsd-guard/fseventsd-guard"
+  chmod +x "$C/h/fseventsd-guard/plugins/fseventsd-guard/fseventsd-guard"
+  eq "$(runcmd)" "git -C $C/h/fseventsd-guard pull --ff-only
+guard install" "an existing clone: fast-forwarded, then install"
+  touch "$C/git-fails"
+  eq "$(runcmd)" "git -C $C/h/fseventsd-guard pull --ff-only" "a clone that cannot fast-forward: no install of the old release"
 fi
 
 # heal_state PHASE VARIANT OWNER-PID [STARTED]: the drain marker of a live emergency
@@ -4237,6 +4718,7 @@ if ! skip_case claude-hook-bash; then
   has "$x" "fseventsd-guard: a heal of fseventsd (trigger manual; Docker step B" "which heal"
   has "$x" "ran from $(date -r $((e - 95)) +%H:%M) to $(date -r $e +%H:%M) and ended: fseventsd restarted, and Docker and its containers verified." "when, and the result"
   has "$x" "A docker, docker compose or test failure in that window is likely the heal, not the code, and is worth re-running." "re-run advice"
+  has "$x" "If a session stops seeing file changes after the heal, restart it." "watcher advice after a restart"
   eq "$(hook bash PostToolUse s1)" "" "once after it ended"
 
   t "claude-hook bash: a heal that left Docker not verified, or was stopped part way"
@@ -4264,10 +4746,55 @@ if ! skip_case claude-hook-bash; then
   echo "$e aborted-at-cap wave B 30 /x" > "$FSG_STATE_DIR/last-heal"
   x=$(hook_ctx "$(hook bash PostToolUse s1)")
   has "$x" "and ended: it gave up at the drain cap, and nothing was stopped or restarted." "the result"
+  hasnt "$x" "stops seeing file changes" "no watcher advice without a restart"
   hasnt "$x" "worth re-running" "no failure to explain"
   echo "$((e - 1)) healed manual none 30 /x" > "$FSG_STATE_DIR/last-heal"
   x=$(hook_ctx "$(hook bash PostToolUse s1)")
   has "$x" "Docker step none: it leaves Docker alone" "variant none"; hasnt "$x" "worth re-running" "nor for variant none"
+  has "$x" "and ended: fseventsd restarted, and Docker was left alone." "variant none: Docker not claimed verified"
+  echo "$((e - 2)) healed emergency skip 30 /x" > "$FSG_STATE_DIR/last-heal"
+  x=$(hook_ctx "$(hook bash PostToolUse s1)")
+  has "$x" "and ended: fseventsd restarted; Docker was not touched or checked." "Docker stopped (skip): nothing checked"
+  hasnt "$x" "verified" "nor claimed verified"
+  has "$x" "If a session stops seeing file changes after the heal, restart it." "fseventsd still restarted"
+
+  t "claude-hook bash: heal times with GNU date first on PATH"
+  app_copy; e=$(date +%s)
+  # GNU date reads -r as a reference file.
+  mkdir -p "$C/gnu"
+  printf '#!/bin/sh\ncase " $* " in *" -r "*) echo "date: no such file" >&2; exit 1 ;; esac\nexec /bin/date "$@"\n' > "$C/gnu/date"
+  chmod +x "$C/gnu/date"
+  echo "$e healed manual B 95 /x" > "$FSG_STATE_DIR/last-heal"
+  x=$(hook_ctx "$(PATH="$C/gnu:$PATH" hook bash PostToolUse s1)")
+  has "$x" "ran from $(/bin/date -r $((e - 95)) +%H:%M) to $(/bin/date -r $e +%H:%M) and ended" "ended: both times"
+  bg sleep 120; own=$LAST_BG; heal_state draining B "$own" "$((e - 60))"
+  x=$(hook_ctx "$(PATH="$C/gnu:$PATH" hook bash PreToolUse s1)")
+  has "$x" "a heal began at $(/bin/date -r $((e - 60)) +%H:%M) (trigger" "draining: the start"
+  killbg "$own"
+
+  t "claude-hook bash: a trial's hold is lifted by release, not by the agent"
+  app_copy; mkdir -p "$FSG_STATE_DIR/drain/leases"; e=$(date +%s)
+  printf 'state_version=1\nowner_pid=0\nstarted_epoch=%s\nhold_until_epoch=%s\ntrigger=trial\nreason=Docker not restored after a heal: containers: pg\nphase=held-docker-not-restored\nvariant=B\n' \
+    "$e" $((e + 600)) > "$FSG_STATE_DIR/drain/pending"
+  x=$(hook_ctx "$(hook bash PreToolUse s1)")
+  has "$x" "stay held until someone brings Docker back (docker desktop start, docker compose up -d) and runs $(appg) release, or the hold expires" "the way out for a trial"
+  hasnt "$x" "sees Docker back" "the agent is not said to lift it"
+
+  t "claude-hook bash: a failed restart says what happened to Docker"
+  app_copy; e=$(date +%s)
+  echo "$e restart-failed manual skip 30 /x" > "$FSG_STATE_DIR/last-heal"
+  x=$(hook_ctx "$(hook bash PostToolUse s1)")
+  has "$x" "and ended: the fseventsd restart failed ($(appg) doctor says why), and Docker was left alone." "no Docker step"
+  hasnt "$x" "brought back" "not brought back"
+  echo "$((e - 1)) restart-failed manual B 30 /x" > "$FSG_STATE_DIR/last-heal"
+  has "$(hook_ctx "$(hook bash PostToolUse s1)")" "and ended: the fseventsd restart failed ($(appg) doctor says why), and Docker was brought back." "Docker verified"
+  # An intent that holds no runs (C before its restart) is left until Docker verified.
+  printf 'state_version=1\nowner_pid=999999\nowner_lstart=gone\nstarted_epoch=%s\ntrigger=manual\nvariant=C\naction_ran=0\nhold_s=3600\n' \
+    $((e - 30)) > "$FSG_STATE_DIR/docker-intent"
+  echo "$((e - 2)) restart-failed manual C 30 /x" > "$FSG_STATE_DIR/last-heal"
+  x=$(hook_ctx "$(hook bash PostToolUse s1)")
+  has "$x" "and ended: the fseventsd restart failed ($(appg) doctor says why), and Docker is not verified back ($(appg) status says what is left)." "Docker not verified"
+  hasnt "$x" "brought back" "not claimed back"
 
   t "claude-hook bash: a drain marker or hold a killed heal left costs no process"
   app_copy; mkdir -p "$FSG_STATE_DIR/drain/leases" "$C/log"
@@ -4336,7 +4863,7 @@ if ! skip_case claude-hook-bash; then
   t "claude-hook bash: stamps are per session, under a safe name, kept a day"
   app_copy; bg sleep 120; own=$LAST_BG; heal_state draining B "$own"
   S=$TMPDIR/fseventsd-guard-hook; mkdir -p "$S"
-  : > "$S/old-draining-1"; touch -t "$(date -v-2d +%Y%m%d%H%M)" "$S/old-draining-1"; : > "$S/recent-draining-1"
+  : > "$S/old-draining-1"; touch_ago 2d "$S/old-draining-1"; : > "$S/recent-draining-1"
   out=$(hook bash PreToolUse "../../a b"); json_ok "$out"
   absent "$S/old-draining-1" "a stamp older than a day goes"; exists "$S/recent-draining-1" "a recent one stays"
   eq "$(ls -A "$S" | grep -c '^\.\._\.\._a_b-draining-[0-9]*$')" 1 "the session id is reduced to a file name in the stamp dir"
@@ -4390,15 +4917,61 @@ if ! skip_case claude-hook-wrapper; then
   eq "$(wrap prompt UserPromptSubmit 2>&1)" "rc=0" "a failing guard: exit 0, nothing printed"
   absent "$FSG_HINT_DIR" "nothing measured in any of these"
 
+  t "the hooks honour FSG_HINT from Claude Code's environment (a settings file's env)"
+  # Claude Code exports a settings file's env to its hook processes: here, the
+  # hooks.json command run with FSG_HINT in its environment.
+  # envrun MODE-EVENT VALUE: that command for EVENT, as Claude Code runs it.
+  envrun() {
+    local cmd
+    cmd=$(/usr/bin/python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["hooks"][sys.argv[2]][0]["hooks"][0]["command"])' "$GUARD_HOME/hooks/hooks.json" "$1")
+    printf '{"session_id":"e%s","hook_event_name":"%s","tool_name":"Bash"}' "$2" "$1" |
+      env FSG_HINT="$2" CLAUDE_PLUGIN_ROOT="$GUARD_HOME" bash -c "$cmd" 2>&1; echo "rc=$?"
+  }
+  mem 3G
+  for v in 0 no NO off Off false FALSE; do
+    eq "$(envrun UserPromptSubmit "$v")" "rc=0" "FSG_HINT=$v: no nudge"
+  done
+  absent "$FSG_HINT_DIR" "nothing measured"
+  has "$(envrun UserPromptSubmit 1)" "fseventsd is running away" "FSG_HINT=1: the nudge"
+  app_copy; bg sleep 120; own=$LAST_BG; heal_state restarting B "$own"
+  for v in 0 no off False; do
+    eq "$(envrun PreToolUse "$v")" "rc=0" "FSG_HINT=$v: no heal notice"
+  done
+  absent "$TMPDIR/fseventsd-guard-hook" "no heal notice stamped"
+  has "$(envrun PostToolUse yes)" "is in its Docker step" "FSG_HINT=yes: the heal notice"
+  killbg "$own"
+
+  t "the hook wrapper reads all of its stdin on every path"
+  # bigwrap MODE [ARGS]: a PostToolUse JSON larger than a pipe holds, written into the
+  # wrapper; prints the writer's and the wrapper's exit codes (141: SIGPIPE).
+  bigwrap() {
+    { printf '{"session_id":"b1","hook_event_name":"PostToolUse","tool_name":"Bash","tool_response":"'
+      head -c 400000 /dev/zero | tr '\0' x; printf '"}'; } | bash "$WRAP" "$1" > /dev/null 2>&1
+    echo "${PIPESTATUS[0]} ${PIPESTATUS[1]}"
+  }
+  eq "$(bigwrap bash)" "0 0" "not installed"
+  app_copy
+  eq "$(bigwrap bash)" "0 0" "installed, no heal"
+  eq "$(FSG_HINT=0 bigwrap bash)" "0 0" "switched off"
+  eq "$(bigwrap other)" "0 0" "an unknown mode"
+  fake_uname "$C/u-l" Linux; eq "$(PATH="$C/u-l:$PATH" bigwrap bash)" "0 0" "off macOS"
+  bg sleep 120; own=$LAST_BG; heal_state restarting B "$own"
+  eq "$(bigwrap bash)" "0 0" "with a heal notice"
+  killbg "$own"
+
   t "the plugin's hooks.json runs the wrapper, and the manifests name the plugin"
   # The marketplace sits at the repository root, two levels above the plugin.
-  MKT=$(cd -P "$HERE/../../.." && pwd)/.claude-plugin/marketplace.json
-  for f in "$GUARD_HOME/hooks/hooks.json" "$GUARD_HOME/.claude-plugin/plugin.json" "$MKT"; do
+  MKT=$REPO/.claude-plugin/marketplace.json
+  if [ ! -f "$MKT" ]; then
+    skip "no .claude-plugin/marketplace.json: run the suite from a checkout of the whole repository to check it"
+    MKT=
+  fi
+  for f in "$GUARD_HOME/hooks/hooks.json" "$GUARD_HOME/.claude-plugin/plugin.json" ${MKT:+"$MKT"}; do
     /usr/bin/plutil -convert json -o /dev/null "$f" 2>/dev/null && ok || bad "not JSON: $f"
   done
-  out=$(/usr/bin/python3 - "$GUARD_HOME" "$MKT" "$(sed -n 's/^FSG_VERSION=//p' "$GUARD_HOME/lib/common.sh")" <<'PY'
+  out=$(/usr/bin/python3 - "$GUARD_HOME" "$MKT" <<'PY'
 import json, os, sys
-root, mkt, version = sys.argv[1:]
+root, mkt = sys.argv[1:]
 want = {"UserPromptSubmit": (None, "prompt"), "PreToolUse": ("Bash", "bash"), "PostToolUse": ("Bash", "bash")}
 hooks = json.load(open(os.path.join(root, "hooks/hooks.json")))["hooks"]
 if sorted(hooks) != sorted(want):
@@ -4416,20 +4989,24 @@ for ev, (matcher, mode) in want.items():
     if not (os.path.isfile(path) and os.access(path, os.X_OK)):
         print("%s: %s is not an executable file" % (ev, path))
 p = json.load(open(os.path.join(root, ".claude-plugin/plugin.json")))
-for k, v in (("name", "fseventsd-guard"), ("version", version), ("license", "MIT"),
+for k, v in (("name", "fseventsd-guard"), ("license", "MIT"),
              ("repository", "https://github.com/RuslanTar/fseventsd-guard")):
     if p.get(k) != v:
         print("plugin.json %s: %r, want %r" % (k, p.get(k), v))
-m = json.load(open(mkt))
-if m.get("name") != "fseventsd-guard":
-    print("marketplace name: %r" % m.get("name"))
-es = [e for e in m.get("plugins", []) if e.get("name") == "fseventsd-guard"]
-if len(es) != 1 or es[0].get("source") != "./plugins/fseventsd-guard":
-    print("marketplace entry: %r" % es)
-elif "version" in es[0]:
-    print("marketplace entry has a version: plugin.json alone sets it")
-elif not os.path.isfile(os.path.join(os.path.dirname(os.path.dirname(mkt)), "plugins/fseventsd-guard/.claude-plugin/plugin.json")):
-    print("marketplace entry source has no plugin.json")
+# No version anywhere: Claude Code then versions the plugin by the commit of main.
+if "version" in p:
+    print("plugin.json has a version: users would stay on it until it is bumped")
+if mkt:
+    m = json.load(open(mkt))
+    es = [e for e in m.get("plugins", []) if e.get("name") == "fseventsd-guard"]
+    if m.get("name") != "fseventsd-guard":
+        print("marketplace name: %r" % m.get("name"))
+    if len(es) != 1 or es[0].get("source") != "./plugins/fseventsd-guard":
+        print("marketplace entry: %r" % es)
+    elif "version" in es[0]:
+        print("marketplace entry has a version: users would stay on it until it is bumped")
+    elif not os.path.isfile(os.path.join(os.path.dirname(os.path.dirname(mkt)), "plugins/fseventsd-guard/.claude-plugin/plugin.json")):
+        print("marketplace entry source has no plugin.json")
 PY
 )
   eq "$out" "" "hooks.json and the manifests"
@@ -4443,10 +5020,13 @@ PY
     printf '{"session_id":"h1","hook_event_name":"%s","tool_name":"Bash"}' "$2" | CLAUDE_PLUGIN_ROOT="$1" bash -c "$cmd"; echo "rc=$?"
   }
   # The repository forces LF, so a Windows checkout (core.autocrlf=true) gets none.
-  TOP=$(cd -P "$HERE/../../.." && pwd)
-  eq "$(GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 git -C "$TOP" check-attr eol -- plugins/fseventsd-guard/hooks/fseventsd-guard-hook.sh \
-    plugins/fseventsd-guard/hooks/hooks.json plugins/fseventsd-guard/fseventsd-guard plugins/fseventsd-guard/lib/hint.sh | grep -c ': eol: lf$')" 4 \
-    "the hook files check out with LF"
+  if [ -f "$REPO/.gitattributes" ]; then
+    eq "$(GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 git -C "$REPO" check-attr eol -- plugins/fseventsd-guard/hooks/fseventsd-guard-hook.sh \
+      plugins/fseventsd-guard/hooks/hooks.json plugins/fseventsd-guard/fseventsd-guard plugins/fseventsd-guard/lib/hint.sh | grep -c ': eol: lf$')" 4 \
+      "the hook files check out with LF"
+  else
+    skip "no .gitattributes: run the suite from a checkout of the whole repository to check the LF rule"
+  fi
   mem 3G
   has "$(hook_msg "$(hrun "$GUARD_HOME" UserPromptSubmit | sed '$d')")" "fseventsd is running away" "on macOS the command runs the wrapper"
   rm -rf "$FSG_HINT_DIR"

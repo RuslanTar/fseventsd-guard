@@ -88,6 +88,40 @@ fsg_desktop_procs() {
   pgrep -f 'Docker\.app/Contents/MacOS/(com\.docker\.backend|Docker Desktop)' >/dev/null 2>&1
 }
 
+# The pids of Docker Desktop's backend, sorted, on one line; empty when none runs.
+fsg_desktop_backend_pids() {
+  pgrep -f 'Docker\.app/Contents/MacOS/com\.docker\.backend' 2>/dev/null | sort -n | tr '\n' ' ' | sed 's/ $//'
+}
+
+# 0 when no pid of the second list is in the first.
+fsg__pids_disjoint() { # old new
+  local p
+  for p in $2; do case " $1 " in *" $p "*) return 1 ;; esac; done
+  return 0
+}
+
+# The Docker Desktop sockets that still exist: its backend socket, its user socket
+# and the pinned endpoint's. All gone once Docker Desktop has quit.
+fsg__desktop_socks_left() {
+  local p left=""
+  for p in "${FSG_DESKTOP_BACKEND_SOCKET:-$HOME/Library/Containers/com.docker.docker/Data/backend.sock}" \
+           "${FSG_DESKTOP_SOCKET:-$HOME/.docker/run/docker.sock}" "${DK_ENDPOINT#unix://}"; do
+    [ -n "$p" ] && [ -S "$p" ] && case " $left " in *" $p "*) ;; *) left="${left:+$left }$p" ;; esac
+  done
+  printf '%s\n' "$left"
+}
+
+# One bounded `docker desktop status`: sets DS_STATUS (the Status word or empty),
+# DS_RC, DS_S (seconds) and DS_OUT (stdout and stderr on one line, cut).
+fsg__desktop_status_poll() { # seconds
+  local t0 out
+  t0=$(fsg_now)
+  out=$(fsg_timeout "$1" docker desktop status --format json 2>&1); DS_RC=$?
+  DS_S=$(( $(fsg_now) - t0 ))
+  DS_STATUS=$(printf '%s' "$out" | tr -d ' \n\t' | sed -n 's/.*"Status":"\([A-Za-z]*\)".*/\1/p')
+  DS_OUT=$(printf '%s' "$out" | tr '\t\r\n' '   ' | cut -c1-300)
+}
+
 # 0 when the engine answers one bounded `docker info`.
 fsg_docker_answers() { fsg_timeout "$FSG_DOCKER_QUERY_TIMEOUT_S" docker info >/dev/null 2>&1; }
 
@@ -101,6 +135,8 @@ fsg_docker_answers() { fsg_timeout "$FSG_DOCKER_QUERY_TIMEOUT_S" docker info >/d
 #   DK_STOP_IDS   every running container (variant A stops them all)
 #   DK_IDS        the restore set: running containers that can be started again
 #   DK_NAMES      their names
+#   DK_HEALTH     their health status then, in the same order: healthy, unhealthy,
+#                 starting, none (no health check), or - when it was not read
 #   DK_EPHEMERAL  names of running --rm containers (HostConfig.AutoRemove): Docker
 #                 deletes them when they stop, so they cannot be restored
 #   DK_ONEOFF     names of running one-off containers (`docker compose run`, label
@@ -115,7 +151,7 @@ fsg_docker_answers() { fsg_timeout "$FSG_DOCKER_QUERY_TIMEOUT_S" docker info >/d
 #                 failed for a container that still runs, or a line of it that is
 #                 not a whole record), so --rm volumes were not checked
 fsg_docker_record() {
-  DK_KIND=none; DK_STATE=stopped; DK_RUNNING=0; DK_IDS=; DK_NAMES=; DK_PS_OK=0; DK_STOP_IDS=; DK_EPHEMERAL=""; DK_ONEOFF=""
+  DK_KIND=none; DK_STATE=stopped; DK_RUNNING=0; DK_IDS=; DK_NAMES=; DK_HEALTH=; DK_PS_OK=0; DK_STOP_IDS=; DK_EPHEMERAL=""; DK_ONEOFF=""
   DK_AT_RISK=""; DK_RM_PLAIN=""; DK_LISTED=1
   DK_ENDPOINT=; DK_EP_WHY=; DK_ENGINE=
   command -v docker >/dev/null 2>&1 || return 0
@@ -159,13 +195,13 @@ fsg_docker_record() {
 }
 
 # rec() in awk -F'\t' -v ids=IDS: 1 when the line is a whole container record
-# (fsg__docker_containers) of one of IDS: its five fields, then three per mount, each
+# (fsg__docker_containers) of one of IDS: its six fields, then three per mount, each
 # holding what its part of the template prints (a JSON value for free text).
 # shellcheck disable=SC2016
 FSG__AWK_RECORD='
   function jv(s) { return s == "null" || s ~ /^"([^"\\]|\\.)*"$/ }
   function rec(   i) {
-    if (NF < 5 || (NF - 5) % 3 || !($1 in want) || $2 !~ /^\/[a-zA-Z0-9][a-zA-Z0-9_.-]*$/ ||
+    if (NF < 6 || (NF - 6) % 3 || !($1 in want) || $2 !~ /^\/[a-zA-Z0-9][a-zA-Z0-9_.-]*$/ ||
       ($3 != "true" && $3 != "false") || !jv($4) || $5 !~ /^(null|\[.*\])(null|\[.*\])$/) return 0
     for (i = 6; i <= NF; i++) if (!jv($i)) return 0
     return 1
@@ -173,8 +209,8 @@ FSG__AWK_RECORD='
   BEGIN { nw = split(ids, w, " "); for (iw = 1; iw <= nw; iw++) want[w[iw]] = 1 }'
 
 # The running containers of the pinned engine: sets DK_PS_OK, DK_STOP_IDS, DK_IDS,
-# DK_NAMES, DK_EPHEMERAL, DK_ONEOFF, DK_AT_RISK, DK_RM_PLAIN and DK_LISTED (as in
-# fsg_docker_record).
+# DK_NAMES, DK_HEALTH, DK_EPHEMERAL, DK_ONEOFF, DK_AT_RISK, DK_RM_PLAIN and
+# DK_LISTED (as in fsg_docker_record).
 #
 # A volume mount is anonymous when the container's own spec names no volume for it
 # (an image VOLUME, `-v /path`, `--mount type=volume` without a source): Docker's
@@ -183,7 +219,7 @@ FSG__AWK_RECORD='
 # so such a container is protected even if its volume would survive.
 fsg__docker_containers() {
   local ps out ar="" arc skip_ids t unread now bad
-  DK_PS_OK=0; DK_STOP_IDS=; DK_IDS=; DK_NAMES=; DK_EPHEMERAL=""; DK_ONEOFF=""; DK_AT_RISK=""; DK_RM_PLAIN=""; DK_LISTED=0
+  DK_PS_OK=0; DK_STOP_IDS=; DK_IDS=; DK_NAMES=; DK_HEALTH=; DK_EPHEMERAL=""; DK_ONEOFF=""; DK_AT_RISK=""; DK_RM_PLAIN=""; DK_LISTED=0
   ps=$(fsg_timeout 30 docker ps --no-trunc --format '{{.ID}} {{.Names}}' 2>/dev/null) || return 0
   DK_PS_OK=1; DK_LISTED=1
   DK_STOP_IDS=$(printf '%s\n' "$ps" | awk 'NF { print $1 }' | tr '\n' ' ' | sed 's/ $//')
@@ -192,13 +228,13 @@ fsg__docker_containers() {
     # docker inspect tries a template on its typed struct first and, when that fails
     # (here at once: the struct has ID, the JSON Id), on the raw JSON with
     # missingkey=error. Every key that JSON may lack (a mount's Name, absent for a
-    # bind mount, and Type; HostConfig.Mounts, absent without --mount) is read with
-    # index: a missing one prints null through json. Free text (the label, a mount's
-    # name and destination) goes through json too, so a tab or newline in it cannot
-    # shift the fields or split the record. A real engine's records:
+    # bind mount, and Type; HostConfig.Mounts, absent without --mount; State.Health,
+    # absent without a health check) is read with index: a missing one prints null.
+    # Free text (the label, a mount's name and destination) goes through json too, so
+    # a tab or newline in it cannot shift the fields or split the record. A real engine's records:
     # test/fixtures/docker-cli-29.9.2/.
     # shellcheck disable=SC2086
-    ar=$(fsg_timeout 20 docker inspect --format "{{.Id}}$t{{.Name}}$t{{.HostConfig.AutoRemove}}$t{{json (index .Config.Labels \"com.docker.compose.oneoff\")}}$t{{json (index .HostConfig \"Binds\")}}{{json (index .HostConfig \"Mounts\")}}{{range .Mounts}}$t{{json (index . \"Type\")}}$t{{json (index . \"Name\")}}$t{{json (index . \"Destination\")}}{{end}}" $DK_STOP_IDS 2>/dev/null); arc=$?
+    ar=$(fsg_timeout 20 docker inspect --format "{{.Id}}$t{{.Name}}$t{{.HostConfig.AutoRemove}}$t{{json (index .Config.Labels \"com.docker.compose.oneoff\")}}$t{{json (index .HostConfig \"Binds\")}}{{json (index .HostConfig \"Mounts\")}}$t{{with index .State \"Health\"}}{{json (index . \"Status\")}}{{else}}null{{end}}{{range .Mounts}}$t{{json (index . \"Type\")}}$t{{json (index . \"Name\")}}$t{{json (index . \"Destination\")}}{{end}}" $DK_STOP_IDS 2>/dev/null); arc=$?
     # A container that exited since docker ps fails inspect for itself only. One that
     # still runs but failed it (a per-container template error), or whose line is not
     # a whole record, was not checked.
@@ -228,11 +264,12 @@ fsg__docker_containers() {
   # One line per --rm container: "V name (mount points)" with an anonymous volume,
   # else "R name". Field 4 is the one-off label (null when not set: not a one-off),
   # field 5 the spec (HostConfig.Binds, then HostConfig.Mounts; null for each that is
-  # absent), and each mount three more: type, name (null for a bind mount) and
-  # destination. Names are compared, and mount points printed, as JSON escapes them.
+  # absent), field 6 the health status (null without a health check), and each mount
+  # three more: type, name (null for a bind mount) and destination. Names are
+  # compared, and mount points printed, as JSON escapes them.
   out=$(printf '%s\n' "$ar" | awk -F'\t' '$3 == "true" {
     name = $2; sub(/^\//, "", name); d = ""
-    for (i = 6; i + 2 <= NF; i += 3) {
+    for (i = 7; i + 2 <= NF; i += 3) {
       if ($i != "\"volume\"") continue
       vn = $(i + 1); dest = $(i + 2)
       if (dest != "null") dest = substr(dest, 2, length(dest) - 2)
@@ -251,13 +288,17 @@ fsg__docker_containers() {
     NF && !($1 in skip)')
   DK_IDS=$(printf '%s\n' "$out" | awk 'NF { print $1 }' | tr '\n' ' ' | sed 's/ $//')
   DK_NAMES=$(printf '%s\n' "$out" | awk 'NF { print $2 }' | tr '\n' ' ' | sed 's/ $//')
+  DK_HEALTH=$(printf '%s\n' "$ar" | awk -F'\t' -v ids="$DK_IDS" 'NF >= 6 {
+      h = $6; if (h == "null") h = "none"; else if (h ~ /^"[a-z]+"$/) h = substr(h, 2, length(h) - 2); else h = "-"
+      got[$1] = h }
+    END { n = split(ids, a, " "); for (i = 1; i <= n; i++) printf "%s%s", (i > 1 ? " " : ""), (a[i] in got ? got[a[i]] : "-") }')
 }
 
 # The running --rm containers with an anonymous volume now, from a fresh listing, in
 # AT_RISK_NOW (the record's restore set stays as it is). 1 when they could not be
 # listed.
 fsg_docker_at_risk_now() {
-  local DK_PS_OK DK_STOP_IDS DK_IDS DK_NAMES DK_EPHEMERAL DK_ONEOFF DK_AT_RISK DK_RM_PLAIN DK_LISTED
+  local DK_PS_OK DK_STOP_IDS DK_IDS DK_NAMES DK_HEALTH DK_EPHEMERAL DK_ONEOFF DK_AT_RISK DK_RM_PLAIN DK_LISTED
   AT_RISK_NOW=
   fsg__docker_containers
   [ "$DK_LISTED" = 1 ] || return 1
@@ -284,6 +325,7 @@ fsg_docker_record_text() {
   echo "endpoint=$DK_ENDPOINT${DK_EP_WHY:+ (not used: $DK_EP_WHY)}"
   echo "ids=$DK_IDS"
   echo "names=$DK_NAMES"
+  echo "health=$DK_HEALTH"
   echo "not_restorable=$DK_EPHEMERAL"
   echo "not_restored_oneoff=$DK_ONEOFF"
   echo "rm_anonymous_volumes=$DK_AT_RISK"
@@ -329,18 +371,64 @@ fsg_wait_engine() { # seconds
   return 1
 }
 
-fsg_wait_desktop() { # wanted-status seconds
-  local t0
-  t0=$(fsg_now)
-  while [ $(( $(fsg_now) - t0 )) -lt "$2" ]; do
-    [ "$(fsg_desktop_status)" = "$1" ] && return 0
-    fsg_sleep 2
+# Waits for Docker Desktop to stop, up to FSG_DESKTOP_STOP_WAIT_S from T0 (when
+# `docker desktop stop` was issued); one check always runs. Stopped: no Desktop
+# process runs and its sockets are gone, or status says stopped. Once Desktop has
+# quit, status fails only after ~16 s (it dials the missing backend socket), so the
+# processes and sockets are checked every second, and status, bounded to 3 s, only
+# when they do not decide, at most every 5 s. Each poll goes to LOG. Sets
+# DK_STOP_WHY. 0 stopped; 2 a new backend runs (something else started Docker
+# Desktop; DK_NEW_PIDS); 1 not stopped.
+fsg__wait_desktop_stopped() { # t0 backend-pids-before log
+  local procs pids socks st_next=0 gone=0 n=0 rc= last=unknown
+  while :; do
+    n=$((n + 1))
+    pids=$(fsg_desktop_backend_pids)
+    if fsg_desktop_procs; then procs=yes; else procs=no; gone=1; fi
+    socks=$(fsg__desktop_socks_left)
+    DS_STATUS=; DS_RC=; DS_S=; DS_OUT=
+    if [ $procs = no ] && [ -z "$socks" ]; then
+      rc=0; DK_STOP_WHY="no Docker Desktop process runs and its sockets are gone"
+    elif [ -n "$pids" ] && fsg__pids_disjoint "$2" "$pids" && { [ -n "$2" ] || [ $gone = 1 ]; }; then
+      rc=2; DK_NEW_PIDS=$pids; DK_STOP_WHY="a new Docker Desktop backend runs (pid $pids; before the stop: ${2:-none})"
+    elif [ "$(fsg_now)" -ge "$st_next" ]; then
+      fsg__desktop_status_poll 3
+      st_next=$(( $(fsg_now) + 5 ))
+      last="${DS_STATUS:-none (rc $DS_RC)}"
+      [ "$DS_STATUS" = stopped ] && { rc=0; DK_STOP_WHY="docker desktop status says stopped"; }
+    fi
+    printf 'poll %s +%ss: procs=%s backend=%s sockets=%s status=%s rc=%s in %ss: %s\n' "$n" $(( $(fsg_now) - $1 )) \
+      "$procs" "${pids:-none}" "${socks:-none}" "${DS_STATUS:--}" "${DS_RC:--}" "${DS_S:--}" "${DS_OUT:-(not asked)}" >> "$3"
+    [ -n "$rc" ] && return $rc
+    [ $(( $(fsg_now) - $1 )) -lt "$FSG_DESKTOP_STOP_WAIT_S" ] || break
+    fsg_sleep 1
   done
+  DK_STOP_WHY="still there after ${FSG_DESKTOP_STOP_WAIT_S}s: processes $procs, sockets ${socks:-none}, last status $last"
   return 1
+}
+
+# Something else started Docker Desktop during the heal (a new backend runs where
+# none ran, or none of the old ones): sets DK_FOREIGN, said in the record and the
+# notices. The guard does not fight it; the restore goes on as usual.
+fsg__desktop_foreign() { # backend-pids-now
+  DK_FOREIGN="something else started Docker Desktop during the heal (backend pid $1; before the stop: ${DK_PRE_PIDS:-none}); the guard left it running"
+  fsg_log "DOCKER $DK_FOREIGN"
+}
+
+# Before variant B's after-step: a backend that is not the one the stop saw, once
+# the stop was seen (or the old backend is gone), was started by something else.
+fsg__desktop_foreign_check() {
+  local now
+  [ -n "${DK_STOP_DECISION:-}" ] && [ -z "${DK_FOREIGN:-}" ] || return 0
+  now=$(fsg_desktop_backend_pids)
+  [ -n "$now" ] && fsg__pids_disjoint "${DK_PRE_PIDS:-}" "$now" || return 0
+  [ -n "${DK_PRE_PIDS:-}" ] || [ "$DK_STOP_DECISION" = stopped ] || return 0
+  fsg__desktop_foreign "$now"
 }
 
 # Runs the before-step. Returns non-zero on failure (DK_ERR says why).
 fsg_docker_before() { # variant
+  local t0 log wrc
   DK_ERR=
   case $1 in
     A)
@@ -351,9 +439,27 @@ fsg_docker_before() { # variant
         { DK_ERR="docker stop failed"; return 1; }
       ;;
     B)
-      fsg_log "DOCKER B desktop stop"
-      fsg_timeout $((FSG_DOCKER_TIMEOUT_S + 10)) docker desktop stop --timeout "$FSG_DOCKER_TIMEOUT_S" >/dev/null 2>&1
-      fsg_wait_desktop stopped 30 || { DK_ERR="Docker Desktop did not report stopped"; return 1; }
+      # The stop and each poll go to the heal record.
+      log=/dev/null; [ -n "${HEAL_DIR:-}" ] && log="$HEAL_DIR/docker-stop.txt"
+      DK_PRE_PIDS=$(fsg_desktop_backend_pids)
+      fsg_log "DOCKER B desktop stop (backend pid ${DK_PRE_PIDS:-none})"
+      echo "backend pid before the stop: ${DK_PRE_PIDS:-none}" >> "$log"
+      echo "== docker desktop stop output" >> "$log"
+      t0=$(fsg_now)
+      # Not in a subshell: a signal meanwhile lets the stop finish (fsg_tick_cleanup).
+      fsg_timeout $((FSG_DOCKER_TIMEOUT_S + 10)) docker desktop stop --timeout "$FSG_DOCKER_TIMEOUT_S" >> "$log" 2>&1
+      DK_STOP_RC=$?; DK_STOP_S=$(( $(fsg_now) - t0 ))
+      echo "== stop rc=$DK_STOP_RC in ${DK_STOP_S}s; polls (up to ${FSG_DESKTOP_STOP_WAIT_S}s from the stop):" >> "$log"
+      fsg__wait_desktop_stopped "$t0" "$DK_PRE_PIDS" "$log"; wrc=$?
+      case $wrc in
+        0) DK_STOP_DECISION=stopped ;;
+        2) DK_STOP_DECISION=started-by-other ;;
+        *) DK_STOP_DECISION=not-stopped ;;
+      esac
+      echo "decision: $DK_STOP_DECISION ($DK_STOP_WHY)" >> "$log"
+      fsg_log "DOCKER B stop rc=$DK_STOP_RC in ${DK_STOP_S}s: $DK_STOP_DECISION ($DK_STOP_WHY)"
+      if [ $wrc = 2 ]; then fsg__desktop_foreign "$DK_NEW_PIDS"; return 0; fi
+      [ $wrc = 0 ] || { DK_ERR="Docker Desktop did not stop within ${FSG_DESKTOP_STOP_WAIT_S}s of docker desktop stop ($DK_STOP_WHY)"; return 1; }
       ;;
   esac
   return 0
@@ -396,6 +502,7 @@ fsg_docker_after() { # variant
       fsg_timeout "$FSG_DOCKER_TIMEOUT_S" docker start $DK_IDS >/dev/null 2>&1 || { DK_ERR="docker start failed"; return 1; }
       ;;
     B)
+      fsg__desktop_foreign_check
       fsg_docker_desktop_start "B desktop start" || return 1
       fsg_docker_start_missing || { DK_ERR="docker start failed"; return 1; }
       ;;
@@ -426,23 +533,31 @@ fsg_docker_after() { # variant
   return 0
 }
 
-# Waits until every recorded container is running and, when it has a health check,
-# healthy. Sets DK_FAILED to the ids that never got there.
+# Waits until every recorded container is running and, when it was healthy at the
+# record (DK_HEALTH, by position), healthy. One that was unhealthy, starting or had
+# no health check then only needs to run; one whose health was not recorded (an
+# older record) needs to be healthy when it has a check. Sets DK_FAILED to the ids
+# that never got there.
 fsg_docker_wait_containers() {
   DK_FAILED=
   [ -n "$DK_IDS" ] || return 0
-  local t0 id line bad
+  local t0 id line bad i
+  local -a H
+  # shellcheck disable=SC2206
+  H=(${DK_HEALTH:-})
   t0=$(fsg_now)
   while :; do
-    bad=
+    bad=; i=0
     for id in $DK_IDS; do
       # Typed fields only, so the CLI never falls back to the raw JSON, where the
       # absent Health key of a container without a health check would fail it.
       line=$(fsg_timeout 20 docker inspect --format '{{.State.Status}} {{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$id" 2>/dev/null)
       case $line in
         "running healthy"|"running none") ;;
+        "running "*) case ${H[$i]:-} in unhealthy|starting|none) ;; *) bad="$bad $id" ;; esac ;;
         *) bad="$bad $id" ;;
       esac
+      i=$((i + 1))
     done
     if [ -z "$bad" ]; then return 0; fi
     if [ $(( $(fsg_now) - t0 )) -ge "$FSG_CONTAINER_TIMEOUT_S" ]; then
@@ -464,40 +579,115 @@ fsg_probe_images() {
   } | awk 'NF && !seen[$0]++' | head -n 3
 }
 
-# Writes a file on the host, reads it in a throwaway container, writes the reply in
-# the container, reads it on the host. Sets BM_RESULT (ok|failed|skipped), BM_DETAIL.
+# Docker Desktop's File Sharing list (FilesharingDirectories in its
+# settings-store.json, read only), one path per line. 1 when the file or the key is
+# missing or unreadable: Desktop's default sharing (/Users, /Volumes, /private, /tmp,
+# /var/folders) applies.
+fsg_desktop_shared_dirs() {
+  local f=${FSG_DESKTOP_SETTINGS:-"$HOME/Library/Group Containers/group.com.docker/settings-store.json"} n i=0
+  [ -r "$f" ] || return 1
+  n=$(plutil -extract FilesharingDirectories raw -o - "$f" 2>/dev/null) && fsg_is_uint "$n" || return 1
+  while [ $i -lt "$n" ]; do
+    plutil -extract "FilesharingDirectories.$i" raw -o - "$f" 2>/dev/null | sed '/^$/d'
+    i=$((i + 1))
+  done
+}
+
+# 0 when PATH is one of the dirs in LIST (lines) or under one, by whole components.
+fsg__under_any() { # path list
+  local e
+  while IFS= read -r e; do
+    [ -n "$e" ] || continue
+    e=${e%/}
+    case $1 in "$e"|"$e"/*) return 0 ;; esac
+  done <<EOF
+$2
+EOF
+  return 1
+}
+
+# The bind-mount probe's host dir in BM_DIR: FSG_PROBE_DIR, else the state dir's
+# mountprobe when Docker Desktop shares it (default sharing does), else a dir in the
+# first shared folder under your home. BM_SHARED: 1 in the File Sharing list, 0 not,
+# empty when Desktop uses its default sharing.
+fsg_probe_dir() {
+  local list e
+  BM_SHARED=; BM_DIR=${FSG_PROBE_DIR:-"$FSG_STATE_DIR/mountprobe"}
+  list=$(fsg_desktop_shared_dirs) || return 0
+  if fsg__under_any "$BM_DIR" "$list"; then BM_SHARED=1; return 0; fi
+  BM_SHARED=0
+  [ -z "${FSG_PROBE_DIR:-}" ] || return 0
+  while IFS= read -r e; do
+    case $e in
+      "$HOME"/*) if [ -d "$e" ] && [ -w "$e" ]; then BM_DIR="${e%/}/.fseventsd-guard-mountprobe"; BM_SHARED=1; return 0; fi ;;
+    esac
+  done <<EOF
+$list
+EOF
+}
+
+# The probe's file in BM_DIR; the container's side of the bind mount is /fsg-probe.
+FSG__PROBE_FILE=fsg-probe.txt
+
+# Writes a file on the host, reads it in a throwaway container that writes its reply
+# into it, reads that on the host, and removes the file (and the dir if it made it).
+# Sets BM_RESULT (ok|failed|skipped), BM_DETAIL and BM_NOTE (a skip the notices
+# name: the probe dir is not shared with Docker Desktop).
 fsg_docker_verify_bind_mount() {
-  BM_RESULT=skipped; BM_DETAIL=
+  BM_RESULT=skipped; BM_DETAIL=; BM_NOTE=
   if [ "$FSG_VERIFY_BIND_MOUNT" != 1 ]; then BM_DETAIL="disabled"; return 0; fi
   if [ "$DK_STATE" = stopped ]; then BM_DETAIL="Docker was not running"; return 0; fi
   if [ "$DK_STATE" = notlocal ]; then BM_DETAIL="not a local Docker engine"; return 0; fi
-  local dir nonce img got tried=""
-  dir="$FSG_STATE_DIR/mountprobe"
+  local dir f out nonce img got rc made=0 tried=""
+  fsg_probe_dir
+  dir=$BM_DIR; f="$BM_DIR/$FSG__PROBE_FILE"; out="$FSG_STATE_DIR/mountprobe.out"
+  [ -d "$dir" ] || made=1
   mkdir -p "$dir" || { BM_RESULT=failed; BM_DETAIL="cannot create $dir"; return 1; }
   nonce="fsg-$(fsg_now)-$$"
   while IFS= read -r img; do
     [ -n "$img" ] || continue
     tried="$tried $img"
-    rm -f "$dir/to-container" "$dir/from-container"
-    printf '%s\n' "$nonce" > "$dir/to-container"
+    printf '%s\n' "$nonce" > "$f"
     fsg_timeout 90 docker run --rm --pull never --network none --entrypoint /bin/sh \
-      -v "$dir:/fsg-probe" "$img" -c 'read -r v < /fsg-probe/to-container && echo "back:$v" > /fsg-probe/from-container' \
-      >/dev/null 2>&1 || continue
-    got=$(cat "$dir/from-container" 2>/dev/null)
-    rm -f "$dir/to-container" "$dir/from-container"
-    if [ "$got" = "back:$nonce" ]; then BM_RESULT=ok; BM_DETAIL="round trip ok via $img"; return 0; fi
-    BM_RESULT=failed; BM_DETAIL="the container ran ($img) but the round trip did not match (got '${got:-nothing}')"
-    return 1
+      -v "$dir:/fsg-probe" "$img" -c "read -r v < /fsg-probe/$FSG__PROBE_FILE && echo \"back:\$v\" > /fsg-probe/$FSG__PROBE_FILE" \
+      > "$out" 2>&1; rc=$?
+    got=$(cat "$f" 2>/dev/null)
+    if [ $rc -ne 0 ]; then
+      case $(tr 'A-Z' 'a-z' < "$out" 2>/dev/null) in
+        *"mounts denied"*|*"is not shared"*)
+          BM_RESULT=skipped
+          BM_DETAIL="the probe dir $dir is not shared with Docker Desktop (mounts denied); set FSG_PROBE_DIR to a dir in a folder of its File Sharing list"
+          BM_NOTE="Bind mount check skipped: $BM_DETAIL."
+          break ;;
+      esac
+      BM_RESULT=failed
+      continue
+    fi
+    if [ "$got" = "back:$nonce" ]; then BM_RESULT=ok; BM_DETAIL="round trip ok via $img"
+    else BM_RESULT=failed; BM_DETAIL="the container ran ($img) but the round trip did not match (got '${got:-nothing}')"; fi
+    break
   done <<EOF
 $(fsg_probe_images)
 EOF
+  rm -f "$f" "$out"
+  [ $made = 1 ] && rmdir "$dir" 2>/dev/null
+  [ -n "$BM_NOTE" ] && fsg_log "DOCKER $BM_NOTE"
   if [ -z "$tried" ]; then BM_DETAIL="no local image with /bin/sh (set FSG_PROBE_IMAGE)"; return 0; fi
-  BM_RESULT=failed; BM_DETAIL="no probe container could run (tried:$tried)"
-  return 1
+  [ -n "$BM_DETAIL" ] || BM_DETAIL="no probe container could run (tried:$tried)"
+  [ "$BM_RESULT" != failed ]
+}
+
+# Why Docker is not verified: DK_ERR, the containers not back and, unless NOBIND,
+# the bind mount's detail, joined so that none that is empty leaves a separator.
+fsg_docker_why() { # [nobind]
+  local s=${DK_ERR:-}
+  [ -n "${DK_FAILED:-}" ] && s="${s:+$s }containers: $DK_FAILED"
+  [ -z "${1:-}" ] && [ -n "${BM_DETAIL:-}" ] && s="${s:+$s; }bind mount: $BM_DETAIL"
+  printf '%s\n' "$s"
 }
 
 # Docker is back: the engine answers, the recorded containers run (healthy when
-# checked) and a bind mount round trip works. A Docker that was stopped needs
+# they were) and a bind mount round trip works. A Docker that was stopped needs
 # nothing, nor does one that is not local (never touched). Returns non-zero
 # otherwise (DK_ERR, DK_FAILED, BM_* say why).
 fsg_docker_verified() {

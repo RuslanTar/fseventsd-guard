@@ -21,7 +21,7 @@ This repo holds two things:
 
 ## Who needs it
 
-Macs on the versions where the runaway is reported (the list is in
+Macs on macOS 15.6.1 or later (the range and the reports behind it are in
 [`docs/DESIGN.md` §9](plugins/fseventsd-guard/docs/DESIGN.md#9-affected-versions)),
 especially under heavy file churn: parallel agents and test suites, throwaway git
 repos, Docker bind mounts. After cloning, this tells you:
@@ -33,9 +33,12 @@ repos, Docker bind mounts. After cloning, this tells you:
 Background and prior work:
 
 - [anthropics/claude-code#98769](https://github.com/anthropics/claude-code/issues/98769):
-  fseventsd at 24 GB, file watching dead in every Claude Code session.
+  the issue body reports fseventsd at 24 GB on macOS 27.0 with a core pinned for
+  two days; the comments add more Macs where file watching stopped.
 - [talkstream/fseventsd-runaway@78396ba](https://github.com/talkstream/fseventsd-runaway/tree/78396ba):
-  detection and a manual restart.
+  detection and a manual restart. With this guard installed, do not follow its
+  plugin's raw `sudo kill` advice ([Reduce the trigger](plugins/fseventsd-guard/README.md#reduce-the-trigger)
+  says why and how to make the runaway rarer).
 
 ## Install the guard (macOS)
 
@@ -84,8 +87,8 @@ root, never change the installed guard, and always exit 0. Off macOS they exit a
 once and print nothing.
 
 To silence them: set `FSG_HINT=0` in the environment Claude Code starts with (for
-example in the `env` block of a settings file), or create
-`~/Library/Caches/fseventsd-guard-hint/off`.
+example in the `env` block of a settings file), or create the `off` file:
+`mkdir -p ~/Library/Caches/fseventsd-guard-hint && touch ~/Library/Caches/fseventsd-guard-hint/off`.
 
 ### For a team
 
@@ -123,19 +126,16 @@ instead: turn the plugin off there with that line.
 
 ### Updates
 
-Claude Code updates the plugin only when the `version` in
-`plugins/fseventsd-guard/.claude-plugin/plugin.json` changes, so a release is a
-version bump, not every commit. That version always equals `FSG_VERSION` in
-`lib/common.sh` (a test checks it), and the marketplace entry sets none. Bump both
-whenever anything the hooks read changes: `hooks/`, the `fseventsd-guard` script,
-`config.defaults` (thresholds and `FSG_AFFECTED_VERSIONS`) or a library the hooks
-load (`lib/hint.sh`, `lib/common.sh`, `lib/lease.sh`, `lib/measure.sh`). A change
-pushed without a bump never reaches users.
+Neither `plugins/fseventsd-guard/.claude-plugin/plugin.json` nor the marketplace
+entry sets a `version` (a test checks it), so Claude Code versions the plugin by the
+commit it was installed from. Merging to `main` is the release for the hooks: every
+merge reaches users at their next update. `FSG_VERSION` in `lib/common.sh` names the
+guard's own version (the app copy and its state), not the plugin's.
 
 The team settings above turn auto-update on. A personal install does not update
 by itself, as Claude Code leaves auto-update off for marketplaces it does not
-ship: turn it on for `fseventsd-guard` in `/plugin` > Marketplaces, or pull a
-release with `/plugin marketplace update fseventsd-guard`.
+ship: turn it on for `fseventsd-guard` in `/plugin` > Marketplaces, or pull the
+latest `main` with `/plugin marketplace update fseventsd-guard`.
 
 A plugin update changes only the hooks under `~/.claude/plugins`. The root helper
 (`/usr/local/libexec/fseventsd-guard-restart`), the root-steps copy, the sudoers

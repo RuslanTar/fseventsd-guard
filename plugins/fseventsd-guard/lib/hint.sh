@@ -40,6 +40,11 @@ fsg_cmd_claude_hook() { # prompt|bash
 # app copy, as doctor and uninstall look for them.
 fsg_hint_installed() { [ -f "$FSG_PLIST" ] || [ -d "$FSG_STATE_DIR/app" ]; }
 
+# 0 once an install got past its root steps: the agent's plist or the root helper. An
+# install stopped at the root question or at sudo leaves only the app copy, and the
+# nudge goes on.
+fsg_hint_nudge_done() { [ -f "$FSG_PLIST" ] || [ -e "$FSG_HELPER_PATH" ]; }
+
 # The epoch in the hint stamp NAME, or nothing.
 fsg_hint_stamp() {
   local v=
@@ -57,7 +62,7 @@ fsg_hint_every() { case $1 in runaway) echo 3600 ;; warn) echo 10800 ;; *) echo 
 # read; the measurement (top takes about 2 s) runs at most once an hour.
 fsg_hint_prompt() {
   local now t l every
-  fsg_hint_installed && return 0
+  fsg_hint_nudge_done && return 0
   now=$(fsg_now)
   t=$(fsg_hint_stamp checked)
   [ -n "$t" ] && [ $((now - t)) -ge 0 ] && [ $((now - t)) -lt 3600 ] && return 0
@@ -98,11 +103,13 @@ fsg_hint_nudge_json() {
     warn) lead="fseventsd is growing: $size, $x"; every="every 3 hours" ;;
     *) lead="fseventsd is fine now ($size, $x), but it can grow"; every="once a day" ;;
   esac
-  cmd="[ -d $FSG_HINT_CLONE ] || git clone $FSG_HINT_REPO.git $FSG_HINT_CLONE; $g install"
+  # An older clone is brought up to date first: install would install its release.
+  cmd="if [ -d $FSG_HINT_CLONE ]; then git -C $FSG_HINT_CLONE pull --ff-only; else git clone $FSG_HINT_REPO.git $FSG_HINT_CLONE; fi && $g install"
   doc="$FSG_HINT_REPO#readme"
-  off="$FSG_HINT_DIR/off"
+  off=$FSG_HINT_DIR
   case $off in "$HOME"/*) off="~${off#"$HOME"}" ;; esac
-  msg="fseventsd-guard: $lead (up $(fsg_dur "${M_UP:-0}")). On macOS $FSG_OS_VER it can grow without limit and silently stop delivering file events. Install the guard in a new terminal window (it asks for sudo): $cmd. Why: $doc. Silence: FSG_HINT=0, or touch $off"
+  msg="fseventsd-guard: $lead (up $(fsg_dur "${M_UP:-0}")). On macOS $FSG_OS_VER it can grow without limit and silently stop delivering file events. Install the guard in a new terminal window (it asks for sudo): $cmd. Why: $doc. Silence: FSG_HINT=0, or mkdir -p $off && touch $off/off"
+  off="$off/off"
   ctx="fseventsd-guard install hint (from its Claude Code plugin; $every at this level). Measured now: fseventsd, the macOS file-events daemon, has a footprint of $M_MB MB ($x), uptime $(fsg_dur "${M_UP:-0}"), level $S_LEVEL (the guard warns at $FSG_WARN_MB MB and heals at $FSG_ACT_MB MB). On macOS $FSG_OS_VER fseventsd has a known bug: its memory grows without limit and it silently stops delivering file events, so the IDE, dev servers, Docker bind mounts and Claude Code stop seeing file changes until it is restarted as root. fseventsd-guard, which restarts it safely (it lets test runs finish and brings Docker back), is not installed here. Install asks for sudo, so it runs in a new terminal window, not through Claude: $cmd, then the same path with doctor. Why and what it costs: $doc. The hint stops once the guard is installed; FSG_HINT=0 in Claude Code's environment, or a file $off, silences it. The user has not been told about this in the conversation yet."
   printf '{"systemMessage":%s,"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":%s}}\n' \
     "$(fsg_json_str "$msg")" "$(fsg_json_str "$ctx")"
@@ -251,7 +258,8 @@ fsg_hint_heal_text() {
   local g="$FSG_STATE_DIR/app/fseventsd-guard" at r docker=1 out
   case $g in "$HOME"/*) g="\$HOME${g#"$HOME"}" ;; esac
   g="\"$g\""
-  at=$(date -r "$HN_AT" +%H:%M 2>/dev/null)
+  # /bin/date: the hooks run with the user's PATH, where GNU date may come first.
+  at=$(/bin/date -r "$HN_AT" +%H:%M 2>/dev/null)
   case $HN_VARIANT in none|skip) docker=0 ;; esac
   case $HN_PHASE in
     draining)
@@ -261,19 +269,39 @@ fsg_hint_heal_text() {
       out="fseventsd-guard is healing fseventsd on this Mac: a heal began at $at (trigger ${HN_TRIGGER:-?}; $(fsg_hint_step "$HN_VARIANT")) and is in its Docker step and fseventsd restart (phase ${HN_STEP:-docker})."
       [ $docker = 1 ] && out="$out Until it ends, docker, docker compose and test commands may fail, hang or find Docker stopped; a failure in this window is likely the heal, not the code, and is worth re-running once it ends." ;;
     held)
-      out="fseventsd-guard: a heal of fseventsd (trigger ${HN_TRIGGER:-?}; $(fsg_hint_step "$HN_VARIANT")) did not get Docker verified (since $at: $HN_WHY). Docker may still be stopped or partly up, so docker, docker compose and test commands may fail. New runs under a drain lease stay held until the guard's agent sees Docker back (it checks every 5 minutes), or until someone brings Docker back by hand (docker desktop start, docker compose up -d) and runs $g release. Details: $g status"
+      out="fseventsd-guard: a heal of fseventsd (trigger ${HN_TRIGGER:-?}; $(fsg_hint_step "$HN_VARIANT")) did not get Docker verified (since $at: $HN_WHY). Docker may still be stopped or partly up, so docker, docker compose and test commands may fail."
+      if [ "$HN_TRIGGER" = trial ]; then
+        # The agent never lifts a trial's hold: the operator confirms Docker.
+        out="$out New runs under a drain lease stay held until someone brings Docker back (docker desktop start, docker compose up -d) and runs $g release, or the hold expires (FSG_FAILED_HOLD_S, an hour by default). Details: $g status"
+      else
+        out="$out New runs under a drain lease stay held until the guard's agent sees Docker back (it checks every 5 minutes), or until someone brings Docker back by hand (docker desktop start, docker compose up -d) and runs $g release. Details: $g status"
+      fi
       printf '%s\n' "$out"; return 0 ;;
     ended)
+      local restarted=0
       case $HN_RESULT in
-        healed) r="fseventsd restarted, and Docker and its containers verified" ;;
-        restart-failed) r="the fseventsd restart failed ($g doctor says why), and Docker was brought back" ;;
-        restored-partly) r="fseventsd restarted, but the heal ended incomplete (fseventsd not healthy in time, or Docker not fully back; $g status says what is left)" ;;
+        healed)
+          case $HN_VARIANT in
+            skip) r="fseventsd restarted; Docker was not touched or checked" ;;
+            none) r="fseventsd restarted, and Docker was left alone" ;;
+            *) r="fseventsd restarted, and Docker and its containers verified" ;;
+          esac
+          restarted=1 ;;
+        # The Docker intent stays until Docker verified (a hold shows as held first).
+        restart-failed)
+          r="the fseventsd restart failed ($g doctor says why)"
+          if [ $docker = 0 ]; then r="$r, and Docker was left alone"
+          elif [ -f "$FSG_DOCKER_INTENT" ]; then r="$r, and Docker is not verified back ($g status says what is left)"
+          else r="$r, and Docker was brought back"; fi ;;
+        restored-partly) r="fseventsd restarted, but the heal ended incomplete (fseventsd not healthy in time, or Docker not fully back; $g status says what is left)"; restarted=1 ;;
         aborted-at-cap) r="it gave up at the drain cap, and nothing was stopped or restarted"; docker=0 ;;
         refused-*) r="it was refused before its Docker step, and nothing was stopped or restarted"; docker=0 ;;
         drain-not-marked|intent-not-written) r="it could not write its state, and nothing was stopped"; docker=0 ;;
       esac
-      out="fseventsd-guard: a heal of fseventsd (trigger $HN_TRIGGER; $(fsg_hint_step "$HN_VARIANT")) ran from $(date -r $((HN_ID - HN_WALL)) +%H:%M 2>/dev/null) to $(date -r "$HN_ID" +%H:%M 2>/dev/null) and ended: $r."
+      out="fseventsd-guard: a heal of fseventsd (trigger $HN_TRIGGER; $(fsg_hint_step "$HN_VARIANT")) ran from $(/bin/date -r $((HN_ID - HN_WALL)) +%H:%M 2>/dev/null) to $(/bin/date -r "$HN_ID" +%H:%M 2>/dev/null) and ended: $r."
       [ $docker = 1 ] && out="$out A docker, docker compose or test failure in that window is likely the heal, not the code, and is worth re-running."
+      # Untested: watchers may not re-register after a restart (DOCKER-TRIALS.md).
+      [ $restarted = 1 ] && out="$out If a session stops seeing file changes after the heal, restart it."
       printf '%s Details: %s status\n' "$out" "$g"; return 0 ;;
   esac
   out="$out Runs under a drain lease (fseventsd-guard run, integrated runners) are held and start by themselves when it ends; other new runs are not held."

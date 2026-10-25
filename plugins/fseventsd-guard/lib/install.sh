@@ -179,15 +179,34 @@ fsg_app_sum() { # dir
 # it would change, the root code (sudo) or only the app copy (no sudo). Nothing when
 # both match, or when the guard is not installed.
 fsg_status_install_text() {
-  local app="$FSG_STATE_DIR/app" a h
+  local app="$FSG_STATE_DIR/app" a h tu
   [ -x "$app/fseventsd-guard" ] || return 0
   a=$(cd -P "$app" 2>/dev/null && pwd -P); h=$(cd -P "$FSG_HOME" 2>/dev/null && pwd -P)
   [ "$a" != "$h" ] || return 0
-  fsg_root_stale 0 1
+  fsg_where
+  # A trial window install opened is no change of root code.
+  tu=$(fsg_helper_setting TRIAL_UNTIL)
+  fsg_is_uint "$tu" || tu=0
+  fsg_root_stale 0 1 "$tu"
   if [ -n "$FSG_ROOT_STALE" ]; then
-    echo "install: root code changed ($(printf '%s\n' "$FSG_ROOT_STALE" | head -n 1)): re-run install from this checkout; it asks for sudo"
+    echo "install: root code changed ($(printf '%s\n' "$FSG_ROOT_STALE" | head -n 1)): $FSG_REDO_HERE; it asks for sudo"
   elif [ "$(fsg_app_sum "$app")" != "$(fsg_app_sum "$FSG_HOME")" ]; then
-    echo "install: the app copy differs from this checkout and the root code is unchanged: re-run install from this checkout; it needs no sudo"
+    if [ "$tu" -gt 0 ]; then
+      echo "install: the app copy differs from $FSG_HERE and the root code is unchanged: $FSG_REDO_HERE; it asks for sudo only to end the trial window (pass --trial-hours to keep one)"
+    else
+      echo "install: the app copy differs from $FSG_HERE and the root code is unchanged: $FSG_REDO_HERE; it needs no sudo"
+    fi
+  fi
+}
+
+# How status and doctor name the copy they run from (FSG_HERE) and the install to
+# re-run (FSG_REDO, FSG_REDO_HERE). install refuses the plugin's copy, so from there
+# it is a clone, brought up to date first.
+fsg_where() {
+  if fsg_in_claude_plugins "$FSG_HOME"; then
+    FSG_HERE="this plugin copy"; FSG_REDO="run install from a clone (git pull in it first)"; FSG_REDO_HERE=$FSG_REDO
+  else
+    FSG_HERE="this checkout"; FSG_REDO="re-run install"; FSG_REDO_HERE="re-run install from this checkout"
   fi
 }
 
@@ -371,9 +390,10 @@ fsg_root_text() {
 # files in place are the ones it would place now (from the gate's texts, else this
 # checkout's) and doctor passes them. The drop-in is root-only (0440), so its rule is
 # proved with sudo -n -l, as doctor does. CONTENT=1 compares the texts only (status).
-# Sets FSG_ROOT_STALE.
-fsg_root_stale() { # trial_until [content]
-  local tu=$1 content=${2:-0} want_uid=0 r="" tmp
+# COMPARE_TRIAL_UNTIL renders the helper compared with that trial window (status
+# passes the installed one, as doctor does). Sets FSG_ROOT_STALE.
+fsg_root_stale() { # trial_until [content [compare_trial_until]]
+  local tu=$1 content=${2:-0} ctu=${3:-0} want_uid=0 r="" tmp
   FSG_ROOT_STALE=
   [ -n "$FSG_PREFIX" ] && want_uid=$(id -u)
   if [ ! -e "$FSG_HELPER_PATH" ] && [ ! -e "$FSG_SUDOERS_FILE" ]; then
@@ -387,7 +407,7 @@ the helper $FSG_HELPER_PATH is missing or not a regular file"
     if [ "$tu" != 0 ]; then
       r="$r
 --trial-hours opens a trial window in the helper"
-    elif ! ( fsg_render_helper "$tmp" 0 ) 2>/dev/null; then
+    elif ! ( fsg_render_helper "$tmp" "$ctu" ) 2>/dev/null; then
       r="$r
 this config cannot be rendered into a helper"
     elif ! cmp -s "$tmp" "$FSG_HELPER_PATH"; then
@@ -488,7 +508,8 @@ usage: fseventsd-guard install [--trial-hours N] [--force] [--no-agent] [--no-pr
   unchanged) and loads the launchd user agent.
   --trial-hours N  open a time-boxed window (floor 0 MB, 120 s interval) for the
                    Docker trials, N at most 24; it closes by itself
-  --force          install on a macOS version with no reported reproduction
+  --force          install on a macOS version outside the affected range
+                   (doctor --affected says why)
   --allow-unreviewed  run root code that is not committed, differs from
                    origin/main or comes from another origin (read lib/root-steps.sh
                    and lib/restart-helper.sh first; the commit and hashes are
@@ -542,8 +563,8 @@ fsg_cmd_install() {
   fsg_check_root_paths
   fsg_affected
   if [ "$FSG_AFF" != yes ] && [ $force = 0 ]; then
-    # An update of an existing install is not a new suggestion: a macOS update off
-    # the list must not lock the owner out of updating the guard.
+    # An update of an existing install is not a new suggestion: a macOS update past
+    # a fix must not lock the owner out of updating the guard.
     [ -f "$FSG_HELPER_PATH" ] ||
       fsg_die 1 "install: not needed here: $FSG_AFF_WHY. Use --force to install anyway."
     echo "  note: $FSG_AFF_WHY; updating the existing install"
@@ -627,8 +648,6 @@ EOF
       sed -n 's/^\(FSG_[A-Z0-9_]*=.*\)/# \1/p' "$FSG_STATE_DIR/app/config.defaults"
     } > "$FSG_STATE_DIR/config"
   fi
-  # The Claude Code install hint's stamps (lib/hint.sh) are moot once installed.
-  fsg_uninstall_path_ok "$FSG_HINT_DIR" fseventsd-guard-hint && rm -rf "$FSG_HINT_DIR"
 
   echo "[2/5] delivery probe"
   if [ $no_probe = 1 ]; then
@@ -694,10 +713,13 @@ EOF
     fsg_render_plist "$FSG_PLIST.new" "$FSG_STATE_DIR/app"
     plutil -lint "$FSG_PLIST.new" >/dev/null || { rm -f "$FSG_PLIST.new"; fsg_die 1 "install: the rendered plist is invalid"; }
     mv -f "$FSG_PLIST.new" "$FSG_PLIST"
+    fsg_agent_disabled && fsg_die 1 "install: $(fsg_agent_disabled_text), then run install again"
     launchctl bootout "gui/$(id -u)/$FSG_LABEL" >/dev/null 2>&1
     launchctl bootstrap "gui/$(id -u)" "$FSG_PLIST" || fsg_die 1 "install: launchctl bootstrap failed (run: fseventsd-guard doctor)"
     echo "  loaded; it checks every $(fsg_dur "$FSG_AGENT_INTERVAL_S")"
   fi
+  # The Claude Code install hint's stamps (lib/hint.sh) are moot once installed.
+  fsg_uninstall_path_ok "$FSG_HINT_DIR" fseventsd-guard-hint && fsg_hint_stamps_rm
   fsg_log "INSTALL version=$FSG_VERSION prefix=${FSG_PREFIX:-/} trial_until=$trial_until agent=$((1 - no_agent)) probe=$((1 - no_probe)) root=$root"
   echo
   fsg_cmd_doctor
@@ -874,11 +896,28 @@ fsg_uninstall_tmp() {
   done | awk '!seen[$0]++'
 }
 
-# 0 when launchd still keeps the agent's label switched off (Login Items), a setting
-# that outlives the plist.
-fsg_uninstall_disabled() {
+# 0 when launchd keeps the agent's label switched off (Login Items), a setting that
+# outlives the plist. launchd does not load a label it keeps switched off.
+fsg_agent_disabled() {
   launchctl print-disabled "gui/$(id -u)" 2>/dev/null |
     grep -qF -e "\"$FSG_LABEL\" => disabled" -e "\"$FSG_LABEL\" => true"
+}
+
+fsg_agent_disabled_text() {
+  echo "launchd keeps the agent $FSG_LABEL switched off (Login Items), so it does not load it: switch fseventsd-guard back on in System Settings > General > Login Items & Extensions, or run: launchctl enable gui/$(id -u)/$FSG_LABEL"
+}
+
+# The Claude Code install hint's stamps (lib/hint.sh) that exist. Its off switch in
+# the same dir is the user's, and stays.
+fsg_hint_stamps() {
+  local f
+  for f in "$FSG_HINT_DIR/checked" "$FSG_HINT_DIR"/last-*; do [ -e "$f" ] && echo "$f"; done
+  return 0
+}
+fsg_hint_stamps_rm() {
+  fsg_hint_stamps | while IFS= read -r f; do rm -f "$f"; done
+  rmdir "$FSG_HINT_DIR" 2>/dev/null
+  return 0
 }
 
 # --keep-logs: the heal and trial records and the user config leave the state dir for
@@ -887,13 +926,13 @@ fsg_uninstall_disabled() {
 fsg_uninstall_keep_records() {
   local f dst="" any=""
   U_RECORDS=
-  for f in heals trials last-heal last-heal-dir config; do [ -e "$FSG_STATE_DIR/$f" ] && any=1; done
+  for f in heals trials last-heal last-heal-dir daily config; do [ -e "$FSG_STATE_DIR/$f" ] && any=1; done
   [ -n "$any" ] || return 0
   if [ $U_LOG_OK = 1 ]; then dst=$(dirname "$FSG_LOG"); else dst="$HOME/Library/Logs"; fi
   dst="$dst/fseventsd-guard-records-$(date +%Y%m%d-%H%M%S)"
   mkdir -p "$dst" || return 1
   U_RECORDS=$dst
-  for f in heals trials last-heal last-heal-dir config; do
+  for f in heals trials last-heal last-heal-dir daily config; do
     [ -e "$FSG_STATE_DIR/$f" ] || continue
     mv "$FSG_STATE_DIR/$f" "$dst/" || return 1
   done
@@ -969,7 +1008,7 @@ fsg_cmd_uninstall() {
     fi
   fi
   [ $U_STATE_OK = 1 ] && echo "  $FSG_STATE_DIR (app copy, delivery probe, config, heal and trial records, drain state)"
-  [ $U_HINT_OK = 1 ] && [ -e "$FSG_HINT_DIR" ] && echo "  $FSG_HINT_DIR (the Claude Code install hint's stamps and off switch)"
+  [ $U_HINT_OK = 1 ] && [ -n "$(fsg_hint_stamps)" ] && echo "  the Claude Code install hint's stamps in $FSG_HINT_DIR (an off switch there stays)"
   if [ $keep = 0 ]; then
     [ $U_LOG_OK = 1 ] && echo "  $FSG_LOG"
     [ $U_ALOG_OK = 1 ] && echo "  $FSG_AGENT_LOG"
@@ -1043,7 +1082,7 @@ fsg_cmd_uninstall() {
     fsg_say "uninstall: could not move the records to ${U_RECORDS:-a dir next to $FSG_LOG}, so $FSG_STATE_DIR is kept"
   fi
   [ $rm_state = 1 ] && rm -rf "$FSG_STATE_DIR"
-  [ $U_HINT_OK = 1 ] && rm -rf "$FSG_HINT_DIR"
+  [ $U_HINT_OK = 1 ] && fsg_hint_stamps_rm
   if [ $keep = 0 ]; then
     [ $U_LOG_OK = 1 ] && rm -f "$FSG_LOG" "$FSG_LOG.tmp"
     [ $U_ALOG_OK = 1 ] && rm -f "$FSG_AGENT_LOG"
@@ -1086,7 +1125,7 @@ EOF
     else echo "  kept $p: the install created it, but it now holds other files"; fi
   done
   local what="no traces left"
-  if fsg_uninstall_disabled; then
+  if fsg_agent_disabled; then
     what="no files left, only the launchd setting named above"
     echo "  launchd still keeps $FSG_LABEL switched off (from Login Items); clear that setting with: launchctl enable gui/$(id -u)/$FSG_LABEL"
   fi
@@ -1150,11 +1189,11 @@ fsg_helper_dirs() {
 }
 
 # Reports the agent's last exit status from `launchctl print` output. A tick exits
-# with its level (0-3), an emergency heal's code (4-11, docs/DESIGN.md §7) or 130
-# when a signal stopped it; any other code means the job itself failed (126/127:
-# the script could not run).
+# with its level (0-3), an emergency heal's code (4-11, or 14 when it refused to
+# stop Docker; docs/DESIGN.md §7) or 130 when a signal stopped it; any other code
+# means the job itself failed (126/127: the script could not run).
 fsg_doctor_last_exit() { # launchctl-print-output
-  local ec sig n
+  local ec sig n res dir
   ec=$(printf '%s\n' "$1" | sed -n 's/^[[:space:]]*last exit code = //p' | head -n 1)
   sig=$(printf '%s\n' "$1" | sed -n 's/^[[:space:]]*last terminating signal = //p' | head -n 1)
   n=${ec%%[!0-9]*}
@@ -1166,6 +1205,11 @@ fsg_doctor_last_exit() { # launchctl-print-output
     fsg_doc ok "launchctl: the agent's last tick exited $ec (0 ok, 1 warn, 2 runaway, 3 cannot measure)"
   elif [ "$n" -le 11 ]; then
     fsg_doc info "launchctl: the agent's last tick exited $ec, an emergency heal's exit code (docs/DESIGN.md §7)"
+  elif [ "$n" = 14 ]; then
+    # last-heal: epoch result trigger variant wall_s record-dir
+    res=; dir=
+    read -r _ res _ _ _ dir 2>/dev/null < "$FSG_STATE_DIR/last-heal"
+    fsg_doc info "launchctl: the agent's last tick exited 14: its heal refused to stop Docker, for data safety (last heal: ${res:-not recorded}${dir:+, record $dir}); see the README, Notifications and what to do: heal refused"
   elif [ "$n" = 130 ]; then
     fsg_doc info "launchctl: the agent's last tick was stopped by a signal (exit 130) and cleaned up after itself"
   else
@@ -1194,9 +1238,10 @@ fsg_cmd_doctor() {
   local want_uid=0 st uid perm d
   [ -n "$FSG_PREFIX" ] && want_uid=$(id -u)
   echo "fseventsd-guard doctor (version $FSG_VERSION)"
+  fsg_where
   fsg_doc info "macOS ${FSG_OS_VER:-?} (${FSG_OS_BUILD:-?}): affected=$FSG_AFF - $FSG_AFF_WHY"
   if [ "$FSG_AFF" != yes ] && [ -f "$FSG_HELPER_PATH" ]; then
-    fsg_doc info "no reproduction is reported on this version yet; the list may be behind (docs/DESIGN.md §9). Keep the guard if fseventsd still runs away here"
+    fsg_doc info "this version is outside the affected range (docs/DESIGN.md §9). Keep the guard if fseventsd still runs away here"
   fi
   local k v def src
   while IFS=$(printf '\037') read -r k v def src; do
@@ -1248,9 +1293,9 @@ EOF
     if ! err=$( ( fsg_render_helper "$tmp" "$tu" ) 2>&1 ); then
       fsg_doc fail "this config cannot be rendered into a helper, so install refuses it: ${err#fseventsd-guard: }"
     elif cmp -s "$tmp" "$FSG_HELPER_PATH"; then
-      fsg_doc ok "helper matches this checkout's source and config"
+      fsg_doc ok "helper matches $FSG_HERE's source and config"
     else
-      fsg_doc warn "helper differs from this checkout's source or config (floor/interval changed?): review the change, then re-run install; root code changed, so it asks for sudo (it runs only code that matches origin/main)"
+      fsg_doc warn "helper differs from $FSG_HERE's source or config (floor/interval changed?): review the change, then $FSG_REDO; root code changed, so it asks for sudo (it runs only code that matches origin/main)"
     fi
     rm -f "$tmp"
     fsg_helper_limits
@@ -1273,7 +1318,7 @@ EOF
     if [ "${1:-}" = "$want_uid" ] && [ "${3:-}" = 755 ] && [ -z "$(fsg_acl "$FSG_ROOT_STEPS")" ]; then
       fsg_doc ok "root-steps copy $FSG_ROOT_STEPS is owned by uid $want_uid, mode 0755, no ACL"
       fsg_root_text | cmp -s - "$FSG_ROOT_STEPS" ||
-        fsg_doc warn "root-steps copy $FSG_ROOT_STEPS differs from this checkout's lib/root-steps.sh: re-run install; root code changed, so it asks for sudo"
+        fsg_doc warn "root-steps copy $FSG_ROOT_STEPS differs from $FSG_HERE's lib/root-steps.sh: $FSG_REDO; root code changed, so it asks for sudo"
     else
       fsg_doc fail "root-steps copy $FSG_ROOT_STEPS has owner uid ${1:-?}, mode ${3:-?}$( [ -n "$(fsg_acl "$FSG_ROOT_STEPS")" ] && echo ' and an access control list') (want uid $want_uid, 0755, no ACL): re-run install"
     fi
@@ -1320,6 +1365,8 @@ EOF
     if lc=$(launchctl print "gui/$(id -u)/$FSG_LABEL" 2>/dev/null); then
       fsg_doc ok "agent $FSG_LABEL is loaded"
       fsg_doctor_last_exit "$lc"
+    elif fsg_agent_disabled; then
+      fsg_doc fail "agent $FSG_LABEL is not loaded: $(fsg_agent_disabled_text); launchctl bootstrap gui/$(id -u) \"$FSG_PLIST\""
     else
       fsg_doc fail "agent $FSG_LABEL is not loaded: launchctl bootstrap gui/$(id -u) \"$FSG_PLIST\""
     fi
@@ -1334,13 +1381,13 @@ EOF
   fi
   if [ -x "$FSG_STATE_DIR/app/fseventsd-guard" ]; then
     if [ "$(fsg_app_sum "$FSG_STATE_DIR/app")" = "$(fsg_app_sum "$FSG_HOME")" ]; then
-      fsg_doc ok "installed app copy matches this checkout"
+      fsg_doc ok "installed app copy matches $FSG_HERE"
     else
       fsg_root_stale 0
       if [ -n "$FSG_ROOT_STALE" ]; then
-        fsg_doc warn "installed app copy differs from this checkout ($FSG_HOME): re-run install to update the agent; it asks for sudo too, as $(printf '%s\n' "$FSG_ROOT_STALE" | head -n 1)"
+        fsg_doc warn "installed app copy differs from $FSG_HERE ($FSG_HOME): $FSG_REDO to update the agent; it asks for sudo too, as $(printf '%s\n' "$FSG_ROOT_STALE" | head -n 1)"
       else
-        fsg_doc warn "installed app copy differs from this checkout ($FSG_HOME): re-run install to update the agent; the root code is unchanged, so it needs no sudo"
+        fsg_doc warn "installed app copy differs from $FSG_HERE ($FSG_HOME): $FSG_REDO to update the agent; the root code is unchanged, so it needs no sudo"
       fi
     fi
     if [ "${A_INSTALLED:-false}" = true ] && [ "${A_REQUESTS:-false}" != true ] && ! fsg_agent_ready; then
@@ -1358,6 +1405,11 @@ EOF
     esac
   else
     fsg_doc warn "delivery probe not built: stalls are not detected (re-run install with the Command Line Tools)"
+  fi
+  if [ "$FSG_VERIFY_BIND_MOUNT" = 1 ]; then
+    fsg_probe_dir
+    [ "$BM_SHARED" = 0 ] &&
+      fsg_doc warn "bind-mount probe dir $BM_DIR is not in Docker Desktop's File Sharing list, so heals skip the bind-mount check: set FSG_PROBE_DIR to a dir in a shared folder, or share one in Docker Desktop (Settings > Resources > File sharing)"
   fi
   if fsg_drain_hold_active; then
     fsg_doc warn "test runs are held: $(fsg__kv "$FSG_PENDING" reason). Recover Docker, then: fseventsd-guard release"

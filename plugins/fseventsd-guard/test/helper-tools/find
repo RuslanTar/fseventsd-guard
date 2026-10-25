@@ -1,0 +1,5 @@
+#!/bin/bash
+# Test stand-in for /usr/bin/find inside the root helper: the real one, after
+# $FSG_FAKE/find-delay seconds when that file exists.
+[ -f "$FSG_FAKE/find-delay" ] && /bin/sleep "$(cat "$FSG_FAKE/find-delay")"
+exec /usr/bin/find "$@"

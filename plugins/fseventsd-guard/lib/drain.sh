@@ -518,8 +518,10 @@ fsg_phase_budget() { # phase [cap]
     draining) echo $(( ${2:-0} + FSG_DRAIN_POLL_S + 60 + q )) ;;
     # the record's status and info queries, docker ps again after an inspect that
     # left a container unread (30 s), docker info again after a failed listing,
-    # desktop stop (timeout + 10 s), then up to 30 s of status polls (20 s each)
-    docker-before) echo $(( dt + 100 + 3 * q )) ;;
+    # desktop stop (timeout + 10 s) and the stop polls (FSG_DESKTOP_STOP_WAIT_S
+    # from the stop, one more poll of up to 5 s after it)
+    docker-before) n=$(( dt + 10 )); [ "$FSG_DESKTOP_STOP_WAIT_S" -gt $n ] && n=$FSG_DESKTOP_STOP_WAIT_S
+      echo $(( n + 95 + 3 * q )) ;;
     restarting) echo $(( FSG_HELPER_TIMEOUT_S + 10 )) ;;
     waiting-healthy) echo $(( FSG_HEALTHY_TIMEOUT_S + FSG_PROBE_TIMEOUT_S + 30 )) ;;
     # C's container listing before its restart (docker ps 30 s, inspect 20 s, docker
@@ -565,6 +567,7 @@ fsg_drain_hold() { # what failed
     echo "phase=held-docker-not-restored"
     echo "variant=${HEAL_VARIANT:-}"
     echo "restore_names=${DK_NAMES:-}"
+    echo "restore_health=${DK_HEALTH:-}"
     echo "endpoint=${DK_ENDPOINT:-}"
   } > "$tmp" 2>/dev/null && mv -f "$tmp" "$FSG_PENDING"; then
     DRAIN_HELD=0
