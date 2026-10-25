@@ -1354,7 +1354,7 @@ fsg_tick_check() {
     if [ $renotify = 1 ]; then
       mkdir -p "$FSG_STATE_DIR"; echo "$now $M_MB" > "$FSG_STATE_DIR/last-notice"
       fsg_notify "fseventsd at $(fsg_size "$M_MB")" "warn (budget $FSG_BUDGET_MB MB)" \
-        "File watching may degrade. Next: run fseventsd-guard heal at a convenient point (it waits for running tests), or let the next wave boundary do it."
+        "File watching may degrade. Next: run fseventsd-guard heal at a convenient point, such as before a long test run (it waits for running tests)."
     fi
     return 1
   fi

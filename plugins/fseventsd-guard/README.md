@@ -7,7 +7,7 @@ you at each step.
 
 - Install, the Claude Code plugin and team settings: [`README.md`](../../README.md) at the repo root
 - Design decisions, drain protocol, JSON schema, affected versions: [`docs/DESIGN.md`](docs/DESIGN.md)
-- Workflow and runner integration (pre-wave call, leases): [`docs/WORKFLOW-INTEGRATION.md`](docs/WORKFLOW-INTEGRATION.md)
+- Workflow and runner integration (a check before long test runs, leases): [`docs/WORKFLOW-INTEGRATION.md`](docs/WORKFLOW-INTEGRATION.md)
 - Docker trials runbook (picks the Docker step): [`docs/DOCKER-TRIALS.md`](docs/DOCKER-TRIALS.md)
 
 ## Why you may need it
@@ -53,8 +53,9 @@ you at each step.
 
 Two tiers act:
 
-- **Wave boundary (preferred).** The parallel workflow calls `status` before each
-  wave and `heal` on warn or runaway; the agent runs that heal. See
+- **Before a long test run (preferred).** A script or workflow calls `status`
+  before a long or parallel test run (a workflow that runs in waves: before each
+  wave) and `heal` on warn or runaway; the agent runs that heal. See
   `docs/WORKFLOW-INTEGRATION.md`.
 - **Emergency (the agent).** It acts only when the daemon is clearly broken. It still
   drains first: it waits for leased runs up to 60 minutes and for other detected
@@ -112,7 +113,7 @@ and a probe Docker refuses ("Mounts denied") is reported as skipped, not as a
 broken Docker. `doctor` warns when the probe dir is not shared.
 
 The `healing` notification and `status` name what the drain waits for (command,
-pid, age). At a cap a manual or wave-boundary heal gives up and tells you what was
+pid, age). At a cap a manual or pre-run (`--trigger wave`) heal gives up and tells you what was
 still running. An emergency heal goes ahead, because by then file watching is
 already broken, and names what it cut, including runs that started mid-drain.
 
@@ -338,8 +339,8 @@ still keeps the agent switched off from Login Items, it prints the
   and keeps the rest. Run it again to finish (the root-steps copy goes last, so it
   can finish from that copy).
 - Remove what you added yourself: lease snippets in runner scripts
-  ([`docs/WORKFLOW-INTEGRATION.md`](docs/WORKFLOW-INTEGRATION.md)), the pre-wave
-  `status`/`heal` call, `FSG_*` exports. Leases do nothing once the guard is gone,
+  ([`docs/WORKFLOW-INTEGRATION.md`](docs/WORKFLOW-INTEGRATION.md)), the
+  `status`/`heal` call before test runs, `FSG_*` exports. Leases do nothing once the guard is gone,
   and `heal` exits 9.
 
 An install made before the root-steps copy existed (no
@@ -372,7 +373,7 @@ If the install created `/usr/local/libexec` and it is now empty,
 
 | You see | Meaning | Do |
 |---|---|---|
-| `fseventsd at 612 MB` (warn) | Growing past its budget; watching may degrade | Nothing urgent. Run `fseventsd-guard heal` at a convenient point, or let the next wave boundary do it. |
+| `fseventsd at 612 MB` (warn) | Growing past its budget; watching may degrade | Nothing urgent. Run `fseventsd-guard heal` at a convenient point, such as before a long test run. |
 | `fseventsd: healing (2.3 GB)` | A heal started; it names what it waits for, the interactive sessions it leaves alone, the `--rm` containers the Docker step would remove, and those with an anonymous volume that would make it refuse. New leased runs wait; other new runs are not held | Nothing for leased runs: they resume by themselves. Hold off starting unleased runs until `fseventsd healed`. |
 | `fseventsd: cutting running work` | A heal proceeds with work still running: an emergency heal at a cap, or runs that started mid-drain; or the Docker Desktop restart that restores a killed heal's variant C step does. It says so when Docker's exec sessions and containers were still unknown (not listed) at the cap, names the `--rm` containers the Docker step now removes, and says when a wedged Docker (no answer to `docker info`) did not list its containers, so their volumes could not be checked | Re-run the listed test runs after the heal. |
 | `fseventsd: heal refused` (a --rm container would lose its data) | The drain ended with a running `--rm` container that has an anonymous volume, and the Docker step would stop it: Docker would delete the volume with it. Nothing was stopped or restarted (heal exit 14). An emergency heal refused this way waits out the 3-hour emergency interval | Stop the container yourself once its data is safe, or start it again with a named volume (`-v NAME:PATH`), then `fseventsd-guard heal`. |

@@ -2,8 +2,9 @@
 
 Two integration points:
 
-1. **Workflows** call `status` before each wave and `heal` when it is not ok (the
-   preferred, wave-boundary tier).
+1. **Scripts and workflows** call `status` before a long test run (a workflow that
+   runs in waves: before each wave) and `heal` when it is not ok (the preferred
+   tier).
 2. **Runners** of Docker-dependent work take a **lease**, so a heal waits for them
    and they wait for a heal. Until a runner is integrated, the fallback detector
    (`DESIGN.md` §5.4) still sees it as a process if its name is in
@@ -12,13 +13,14 @@ Two integration points:
 
 The lease snippet (§2) is a no-op, and the `run` example runs the bare command,
 where the guard is not installed (no app copy in its state directory, as after
-`uninstall`) or not on macOS. The pre-wave call (§1) skips itself without the app
+`uninstall`) or not on macOS. The call in §1 skips itself without the app
 copy too. With the app copy but no loaded agent it does not: `status` still
-measures, and at runaway `heal` exits 9, which pauses the wave (exit table below).
+measures, and at runaway `heal` exits 9, which pauses the run (exit table below).
 
-## 1. The pre-wave call
+## 1. The call before a long test run
 
-Run this at each wave boundary, before the wave's runs start. It needs no root.
+Run this before a long or parallel test run starts; in a workflow that runs in
+waves, at each wave boundary. It needs no root.
 It calls the installed app copy, so the project needs no clone of the guard.
 
 ```sh
@@ -179,7 +181,7 @@ then pick a row for each:
 | Dev servers and workers | `bin/rails s`, sidekiq, `next dev` | **must not lease**: long-lived, they would hold every drain to the cap; they reconnect after the restore |
 | Hooks that call a runner | a pre-commit hook that runs `bin/parallel-specs` | covered once the runner leases |
 | Test commands run directly | `bundle exec rspec`, a Ruby binstub such as `bin/rspec` | wrap with `fseventsd-guard run --` (a binstub cannot hold a shell snippet); the detector sees `rspec` |
-| Workflow waves | an orchestrator that spawns parallel agents | the pre-wave call (§1) |
+| Workflow waves | an orchestrator that spawns parallel agents | the call in §1, before each wave |
 | Tests that do not use Docker | `npm test` with mocked requests | none |
 
 A runner the detector does not know by name (`FSG_DETECT_COMMANDS`, default
