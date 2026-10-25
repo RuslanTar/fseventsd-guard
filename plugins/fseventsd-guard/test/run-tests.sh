@@ -200,6 +200,9 @@ orphan() { /bin/sh -c '"$@" > /dev/null 2>&1 & echo $!' orphan "$@"; }
 waitfor() { local n=$(( $1 * 5 )); shift; while [ $n -gt 0 ]; do "$@" && return 0; sleep 0.2; n=$((n - 1)); done; return 1; }
 # Kill and reap: an unreaped zombie still has a pid and a start time.
 killbg() { kill "$1" 2>/dev/null; wait "$1" 2>/dev/null; }
+# touch_ago SPEC FILE...: sets the files' mtime to now minus SPEC (date -v, as 20M or
+# 2d), in UTC: local time is ambiguous in the hour a DST change repeats.
+touch_ago() { local a; a=$(TZ=UTC0 date -v-"$1" +%Y%m%d%H%M.%S); shift; TZ=UTC0 touch -t "$a" "$@"; }
 gone() { ! kill -0 "$1" 2>/dev/null; }
 lstart() { LC_ALL=C TZ=UTC0 ps -o lstart= -p "$1" | tr -s ' ' | sed 's/^ //; s/ $//'; }
 pending() { # owner-pid deadline-offset
@@ -2270,7 +2273,7 @@ EOF
   mkdir -p "$FSG_STATE_DIR/heal.lock"; : > "$FSG_FAKE/calls.log"
   "$G" tick >/dev/null 2>&1; eq $? 0 "fresh ownerless lock: the tick ends at once"
   hasnt "$(cat "$FSG_FAKE/calls.log")" "docker desktop stop" "Docker untouched"
-  touch -t "$(date -v-2M +%Y%m%d%H%M.%S)" "$FSG_STATE_DIR/heal.lock"
+  touch_ago 2M "$FSG_STATE_DIR/heal.lock"
   "$G" tick >/dev/null 2>&1; eq $? 0 "an old ownerless lock is reclaimed"
   has "$(cat "$FSG_FAKE/calls.log")" "sudo -n /" "and the tick healed"
   absent "$FSG_STATE_DIR/heal.lock" "lock released"
@@ -3935,7 +3938,7 @@ if ! skip_case heartbeat; then
 
   t "no tick since install; running and dead ticks"
   docker_default; install_fake
-  touch -t "$(date -v-20M +%Y%m%d%H%M.%S)" "$FSG_LAUNCH_AGENTS_DIR/io.github.ruslantar.fseventsd-guard.plist"
+  touch_ago 20M "$FSG_LAUNCH_AGENTS_DIR/io.github.ruslantar.fseventsd-guard.plist"
   out=$("$G" status --json 2>"$C/err")
   eq "$(jget "$out" 'd["agent"]["stale"]')" True "no tick 20 min after install"
   has "$(cat "$C/err")" "no tick recorded since the agent was installed" "message"
@@ -3961,7 +3964,7 @@ if ! skip_case heartbeat; then
   docker_default; install_fake
   PL="$FSG_LAUNCH_AGENTS_DIR/io.github.ruslantar.fseventsd-guard.plist"
   plutil -insert ProgramArguments.0 -string /bin/bash "$PL"
-  touch -t "$(date -v-20M +%Y%m%d%H%M.%S)" "$PL"
+  touch_ago 20M "$PL"
   printf '%s TICK level=ok pid=4242 mb=5\n' "$(date -u -v-1M +%Y-%m-%dT%H:%M:%SZ)" >> "$FSG_LOG"
   out=$("$G" status --json 2>"$C/err")
   eq "$(jget "$out" 'd["agent"]["stale"]')" False "a ticking old agent is not stale"
@@ -3984,7 +3987,7 @@ if ! skip_case heartbeat; then
   t "an agent without a heartbeat is judged by its newest TICK line"
   docker_default; install_fake
   PL="$FSG_LAUNCH_AGENTS_DIR/io.github.ruslantar.fseventsd-guard.plist"
-  touch -t "$(date -v-20M +%Y%m%d%H%M.%S)" "$PL"
+  touch_ago 20M "$PL"
   printf '%s TICK level=ok pid=4242 mb=5\n' "$(date -u -v-1M +%Y-%m-%dT%H:%M:%SZ)" >> "$FSG_LOG"
   out=$("$G" status --json 2>"$C/err")
   eq "$(jget "$out" 'd["agent"]["stale"]')" False "a recent TICK line is a live agent"
@@ -4325,10 +4328,10 @@ if ! skip_case uninstall; then
   install_fake
   mkdir "$TMPDIR/fseventsd-guard-install.abc123"; : > "$TMPDIR/fseventsd-guard-install.abc123/helper"
   : > "$TMPDIR/fsg-doctor.abc123"; : > "$TMPDIR/fsg-timeout.abc123"; : > "$TMPDIR/unrelated.txt"
-  touch -t "$(date -v-2H +%Y%m%d%H%M)" "$TMPDIR/fseventsd-guard-install.abc123" "$TMPDIR/fsg-doctor.abc123" "$TMPDIR/fsg-timeout.abc123"
+  touch_ago 2H "$TMPDIR/fseventsd-guard-install.abc123" "$TMPDIR/fsg-doctor.abc123" "$TMPDIR/fsg-timeout.abc123"
   # A guard command running in another terminal (an install staging, a timeout flag).
   mkdir "$TMPDIR/fseventsd-guard-install.new123"; : > "$TMPDIR/fsg-timeout.new123"
-  touch -t "$(date -v-50M +%Y%m%d%H%M)" "$TMPDIR/fsg-timeout.new123"
+  touch_ago 50M "$TMPDIR/fsg-timeout.new123"
   "$G" uninstall --yes --prefix "$FSG_PREFIX" > "$C/un.out" 2>&1; eq $? 0 "uninstall"
   has "$(cat "$C/un.out")" "temp files that interrupted guard commands left:" "listed"
   has "$(cat "$C/un.out")" "$TMPDIR/fsg-timeout.abc123" "by name"
@@ -4706,7 +4709,7 @@ if ! skip_case claude-hook-bash; then
   t "claude-hook bash: stamps are per session, under a safe name, kept a day"
   app_copy; bg sleep 120; own=$LAST_BG; heal_state draining B "$own"
   S=$TMPDIR/fseventsd-guard-hook; mkdir -p "$S"
-  : > "$S/old-draining-1"; touch -t "$(date -v-2d +%Y%m%d%H%M)" "$S/old-draining-1"; : > "$S/recent-draining-1"
+  : > "$S/old-draining-1"; touch_ago 2d "$S/old-draining-1"; : > "$S/recent-draining-1"
   out=$(hook bash PreToolUse "../../a b"); json_ok "$out"
   absent "$S/old-draining-1" "a stamp older than a day goes"; exists "$S/recent-draining-1" "a recent one stays"
   eq "$(ls -A "$S" | grep -c '^\.\._\.\._a_b-draining-[0-9]*$')" 1 "the session id is reduced to a file name in the stamp dir"
