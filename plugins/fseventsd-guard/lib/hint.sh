@@ -258,7 +258,8 @@ fsg_hint_heal_text() {
   local g="$FSG_STATE_DIR/app/fseventsd-guard" at r docker=1 out
   case $g in "$HOME"/*) g="\$HOME${g#"$HOME"}" ;; esac
   g="\"$g\""
-  at=$(date -r "$HN_AT" +%H:%M 2>/dev/null)
+  # /bin/date: the hooks run with the user's PATH, where GNU date may come first.
+  at=$(/bin/date -r "$HN_AT" +%H:%M 2>/dev/null)
   case $HN_VARIANT in none|skip) docker=0 ;; esac
   case $HN_PHASE in
     draining)
@@ -291,7 +292,7 @@ fsg_hint_heal_text() {
         refused-*) r="it was refused before its Docker step, and nothing was stopped or restarted"; docker=0 ;;
         drain-not-marked|intent-not-written) r="it could not write its state, and nothing was stopped"; docker=0 ;;
       esac
-      out="fseventsd-guard: a heal of fseventsd (trigger $HN_TRIGGER; $(fsg_hint_step "$HN_VARIANT")) ran from $(date -r $((HN_ID - HN_WALL)) +%H:%M 2>/dev/null) to $(date -r "$HN_ID" +%H:%M 2>/dev/null) and ended: $r."
+      out="fseventsd-guard: a heal of fseventsd (trigger $HN_TRIGGER; $(fsg_hint_step "$HN_VARIANT")) ran from $(/bin/date -r $((HN_ID - HN_WALL)) +%H:%M 2>/dev/null) to $(/bin/date -r "$HN_ID" +%H:%M 2>/dev/null) and ended: $r."
       [ $docker = 1 ] && out="$out A docker, docker compose or test failure in that window is likely the heal, not the code, and is worth re-running."
       # Untested: watchers may not re-register after a restart (DOCKER-TRIALS.md).
       [ $restarted = 1 ] && out="$out If a session stops seeing file changes after the heal, restart it."

@@ -4732,6 +4732,20 @@ if ! skip_case claude-hook-bash; then
   hasnt "$x" "verified" "nor claimed verified"
   has "$x" "If a session stops seeing file changes after the heal, restart it." "fseventsd still restarted"
 
+  t "claude-hook bash: heal times with GNU date first on PATH"
+  app_copy; e=$(date +%s)
+  # GNU date reads -r as a reference file.
+  mkdir -p "$C/gnu"
+  printf '#!/bin/sh\ncase " $* " in *" -r "*) echo "date: no such file" >&2; exit 1 ;; esac\nexec /bin/date "$@"\n' > "$C/gnu/date"
+  chmod +x "$C/gnu/date"
+  echo "$e healed manual B 95 /x" > "$FSG_STATE_DIR/last-heal"
+  x=$(hook_ctx "$(PATH="$C/gnu:$PATH" hook bash PostToolUse s1)")
+  has "$x" "ran from $(/bin/date -r $((e - 95)) +%H:%M) to $(/bin/date -r $e +%H:%M) and ended" "ended: both times"
+  bg sleep 120; own=$LAST_BG; heal_state draining B "$own" "$((e - 60))"
+  x=$(hook_ctx "$(PATH="$C/gnu:$PATH" hook bash PreToolUse s1)")
+  has "$x" "a heal began at $(/bin/date -r $((e - 60)) +%H:%M) (trigger" "draining: the start"
+  killbg "$own"
+
   t "claude-hook bash: a failed restart says what happened to Docker"
   app_copy; e=$(date +%s)
   echo "$e restart-failed manual skip 30 /x" > "$FSG_STATE_DIR/last-heal"
