@@ -1,0 +1,4 @@
+#!/bin/bash
+# Test stand-in for /bin/sleep inside the root helper: a short real pause, so the
+# helper's bounded waits stay bounded but fast.
+exec /bin/sleep 0.1

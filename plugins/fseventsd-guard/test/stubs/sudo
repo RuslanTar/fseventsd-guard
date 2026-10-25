@@ -1,0 +1,24 @@
+#!/bin/bash
+# Test stub: sudo never elevates. It logs the call and runs the command as the user.
+#   sudo -n -l PATH   exits with $FSG_FAKE/sudo-l-rc (default 0)
+#   sudo -n PATH      runs PATH (the helper installed under the fake prefix) with
+#                     SUDO_USER set as sudo sets it, or exits with $FSG_FAKE/sudo-rc
+#                     when that file exists; waits $FSG_FAKE/sudo-delay seconds
+#                     first when that file exists
+. "$(dirname "$0")/_fake.sh"
+fake_log "sudo $(printf '%s ' "$@" | cut -c1-200)"
+list=0
+while [ $# -gt 0 ]; do
+  case $1 in
+    -n) shift ;;
+    -l) list=1; shift ;;
+    -*) shift ;;
+    *) break ;;
+  esac
+done
+if [ $list = 1 ]; then exit "$(cat "$FSG_FAKE/sudo-l-rc" 2>/dev/null || echo 0)"; fi
+[ -f "$FSG_FAKE/sudo-delay" ] && /bin/sleep "$(cat "$FSG_FAKE/sudo-delay")"
+if [ -f "$FSG_FAKE/sudo-rc" ]; then exit "$(cat "$FSG_FAKE/sudo-rc")"; fi
+# As sudo does: the invoking user, whatever the caller's environment says.
+SUDO_USER=$(/usr/bin/id -un); export SUDO_USER
+exec "$@"

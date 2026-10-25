@@ -1,0 +1,8 @@
+#!/bin/bash
+# Test stub: macOS version from $FSG_FAKE/sw_vers (default 27.0.1, build 26A434).
+. "$(dirname "$0")/_fake.sh"
+case ${1:-} in
+  -productVersion) cat "$FSG_FAKE/sw_vers" 2>/dev/null || echo 27.0.1 ;;
+  -buildVersion) echo 26A434 ;;
+  *) echo "ProductVersion: $(cat "$FSG_FAKE/sw_vers" 2>/dev/null || echo 27.0.1)" ;;
+esac

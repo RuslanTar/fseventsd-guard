@@ -1,0 +1,29 @@
+#!/bin/bash
+# Test stub: curl against the fake Docker engine API. Answers GET /exec/ID/json for
+# the exec sessions in $FSG_FAKE/docker/execs (see the docker stub): its command is
+# the line's words after tty (or -), else psql. Anything else fails the way an
+# unreachable socket does.
+. "$(dirname "$0")/_fake.sh"
+D=$FSG_FAKE/docker
+fake_log "curl $(printf '%s ' "$@" | sed 's/ $//' | cut -c1-200)"
+sock=""; url=""
+while [ $# -gt 0 ]; do
+  case $1 in
+    --unix-socket) sock=${2:-}; shift ;;
+    --max-time) shift ;;
+    -*) ;;
+    *) url=$1 ;;
+  esac
+  shift
+done
+[ "$sock" = "$D/docker.sock" ] || exit 7
+[ -f "$D/desktop" ] && [ "$(cat "$D/desktop")" != running ] && exit 7
+id=$(printf '%s' "$url" | sed -n 's|^http://localhost/exec/\([^/]*\)/json$|\1|p')
+[ -n "$id" ] || exit 22
+rec=$(awk -v id="$id" '{ for (i = 1; i <= $2; i++) if ($1 "e" NR "n" i == id) {
+    e = (NF >= 4) ? $4 : "psql"; a = ""
+    for (j = 5; j <= NF; j++) a = a (j > 5 ? "," : "") "\"" $j "\""
+    print (($3 == "tty") ? "true" : "false") " \"" e "\" [" a "]"; exit } }' "$D/execs" 2>/dev/null)
+[ -n "$rec" ] || { echo '{"message":"No such exec instance"}'; exit 0; }
+read -r tty entry args <<< "$rec"
+printf '{"CanRemove":false,"ID":"%s","Running":true,"ExitCode":null,"ProcessConfig":{"arguments":%s,"entrypoint":%s,"privileged":false,"tty":%s,"user":""},"OpenStdin":%s,"OpenStderr":true,"OpenStdout":true,"Pid":4321}\n' "$id" "$args" "$entry" "$tty" "$tty"

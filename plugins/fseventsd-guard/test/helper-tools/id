@@ -1,0 +1,4 @@
+#!/bin/bash
+# Test stand-in for /usr/bin/id inside the root helper: uid from $FSG_FAKE/id-u (default 0).
+: "${FSG_FAKE:?}"
+cat "$FSG_FAKE/id-u" 2>/dev/null || echo 0

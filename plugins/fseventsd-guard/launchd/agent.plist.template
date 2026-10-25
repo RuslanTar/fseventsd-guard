@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- fseventsd-guard launchd user agent. Rendered by `fseventsd-guard install`
+     into ~/Library/LaunchAgents; runs the installed app copy, not the checkout,
+     so switching branches or deleting a worktree never breaks it. It runs the
+     script itself (#!/bin/bash), not /bin/bash, so Background Items names the
+     guard. -->
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>@LABEL@</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>@SCRIPT@</string>
+		<string>tick</string>
+	</array>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>PATH</key>
+		<string>@PATH@</string>
+		<key>FSG_STATE_DIR</key>
+		<string>@STATE_DIR@</string>
+		<key>FSG_LOG</key>
+		<string>@USER_LOG@</string>
+	</dict>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>StartInterval</key>
+	<integer>@INTERVAL@</integer>
+	<key>ExitTimeOut</key>
+	<integer>@EXIT_TIMEOUT@</integer>
+	<key>StandardOutPath</key>
+	<string>@AGENT_LOG@</string>
+	<key>StandardErrorPath</key>
+	<string>@AGENT_LOG@</string>
+</dict>
+</plist>

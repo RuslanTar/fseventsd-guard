@@ -1,0 +1,3 @@
+#!/bin/bash
+# Test stand-in for /usr/bin/footprint inside the root helper.
+echo "fake footprint for $*"

@@ -1,0 +1,11 @@
+#!/bin/bash
+# Test stub: "builds" the probe by installing the fake probe at the -o path.
+. "$(dirname "$0")/_fake.sh"
+fake_log "swiftc $*"
+out=""
+while [ $# -gt 0 ]; do
+  [ "$1" = -o ] && { out=$2; shift; }
+  shift
+done
+[ -n "$out" ] || exit 1
+cp "$(dirname "$0")/fake-probe" "$out" && chmod 0755 "$out"

@@ -1,0 +1,297 @@
+#!/bin/bash
+# Test stub: a fake Docker. State in $FSG_FAKE/docker/:
+#   desktop      running|stopped; absent = not Docker Desktop (see engine-ok)
+#   engine-ok    present = a non-Desktop engine answers `docker info`
+#   containers   one per line: ID NAME STATUS HEALTH IMAGE RESTART MANUAL [AUTOREMOVE
+#                [ONEOFF [STARTED [VOLS]]]] (HEALTH is healthy|none; MANUAL=1 after a
+#                `docker stop`; AUTOREMOVE=1 is a --rm container: stopping it removes
+#                it; ONEOFF=1 a `docker compose run` container, label
+#                com.docker.compose.oneoff=True; STARTED its start epoch, - or absent
+#                for an hour ago; VOLS its volume mounts as NAME:DEST,... where NAME
+#                anon is an anonymous volume and any other a named one)
+#   images       one image per line
+#   execs        NAME COUNT [tty|-] [CMD...] lines: COUNT exec sessions in container
+#                NAME, with a TTY and open stdin when tty is given, running CMD (the
+#                curl stub answers for them)
+#   execs-once   lines as in execs, listed by the next ExecIDs inspect only (ids
+#                NAMEhLnI), as a healthcheck probe in flight is
+#   bind-broken  present = bind mounts do not carry files (the failure we heal)
+#   start-delay  seconds `docker desktop start` takes
+#   stop-delay   seconds `docker desktop stop` takes; it logs "stop-done" when it
+#                has stopped Docker
+#   desktop-start-fail  present = `docker desktop start` fails and starts nothing
+#   start-fail   ids (one per line) that `docker start` cannot start
+#   inspect-down present = `docker inspect` cannot reach the daemon although
+#                `docker info` answers (the engine dropped between two calls)
+#   ps-hang      N: the next N `docker ps` calls sleep past the guard's timeouts
+#   ps-fail      N: the next N `docker ps` calls fail at once with an error that is
+#                not "Cannot connect" (an engine that answers badly)
+#   ps-ghost     ID NAME: the next `docker ps` also lists it, a container removed
+#                right after: docker inspect then finds no such object
+#   record-fail  ids (one per line) whose container record fails with a
+#                per-container template error (one the real run printed), while
+#                the others print theirs
+#   label-ID     the text of container ID's com.docker.compose.oneoff label (any
+#                characters), instead of True or False from containers
+#   bind-ID      the destination of a bind mount container ID has before its
+#                volumes (any characters)
+#   record-text-ID  what the container record's template prints for container ID,
+#                as is (a line that is not a whole record; empty: nothing at all)
+#   work-text-ID the same for the engine-work listing's template
+#   hang         present = Docker Desktop runs but is wedged: every engine and status
+#                call sleeps past the guard's timeouts. desktop stop|start|restart
+#                clear it, unless hang-sticky is present too (then they hang as well)
+#   other/       a second engine at unix://$D/other.sock: containers, engine-ok
+#   context-host the current context's endpoint (default unix://$D/docker.sock, a
+#                socket the suite creates); context-fail present = it cannot be read.
+#                Every call logs the endpoint it would use (DOCKER_HOST first) to
+#                $D/endpoints.log as "ENDPOINT COMMAND SUBCOMMAND"
+#   inspect-real lines of fixtures/docker-cli-29.9.2/record.txt: what the container
+#                record's template prints for those container ids of a real engine
+#                (Docker CLI 29.9.2, 2026-10-23; live_containers in run-tests.sh)
+#   inspect-real-work  lines of fixtures/docker-cli-29.9.2/engine-work.txt: what the
+#                engine-work listing's template prints for them, by container name
+#
+# Containers not in inspect-real(-work) get their line from the template itself
+# (render): each action the guard uses prints its value as is, or as JSON through
+# json, so a template that leaves free text unescaped prints its tabs and newlines.
+# The record's template fails on the typed inspect struct ({{.Id}}), so the CLI runs
+# it on the raw JSON with missingkey=error: a dot access to a key that JSON lacks
+# fails that container, with the error the real run printed
+# (fixtures/docker-cli-29.9.2/record-old-template.txt). The stub does the same for
+# the two such keys that run met: a bind mount's Name inside {{range .Mounts}}, and
+# HostConfig.Mounts (absent unless the container used --mount).
+. "$(dirname "$0")/_fake.sh"
+self=$0; [ -L "$self" ] && self=$(readlink "$self")
+FIX=$(dirname "$self")/../fixtures/docker-cli-29.9.2
+D=$FSG_FAKE/docker
+mkdir -p "$D"
+touch "$D/containers"
+fake_log "docker $(printf '%s ' "$@" | sed 's/ $//' | cut -c1-200)"
+ctx=$(cat "$D/context-host" 2>/dev/null) || ctx="unix://$D/docker.sock"
+printf '%s %s %s\n' "${DOCKER_HOST:-$ctx}" "${1:-}" "${2:-}" >> "$D/endpoints.log"
+# The endpoint unix://$D/other.sock is a second engine (colima-like), with its own
+# $D/other/containers and $D/other/engine-ok; `docker desktop` still drives Desktop.
+CF=$D/containers; ENG=desktop
+if [ "${DOCKER_HOST:-$ctx}" = "unix://$D/other.sock" ]; then
+  ENG=other; CF=$D/other/containers; mkdir -p "$D/other"; touch "$CF"
+fi
+
+engine_up() {
+  if [ "$ENG" = other ]; then [ -f "$D/other/engine-ok" ]
+  elif [ -f "$D/desktop" ]; then [ "$(cat "$D/desktop")" = running ]; else [ -f "$D/engine-ok" ]; fi
+}
+set_status() { # id-or-name status manual
+  awk -v id="$1" -v st="$2" -v m="$3" '$1 == id || $2 == id { $3 = st; if (m != "") $7 = m } { print }' "$CF" > "$D/c.tmp" && mv "$D/c.tmp" "$CF"
+}
+engine_stop() { awk '$3 == "running" && $8 == 1 { next } $3 == "running" { $3 = "exited" } { print }' "$CF" > "$D/c.tmp" && mv "$D/c.tmp" "$CF"; }
+remove_if_autoremove() { awk -v id="$1" '($1 == id || $2 == id) && $8 == 1 { next } { print }' "$CF" > "$D/c.tmp" && mv "$D/c.tmp" "$CF"; }
+# Restart policy: unless-stopped/always containers come back unless stopped by hand.
+engine_start() {
+  awk '($6 == "unless-stopped" || $6 == "always") && $7 != 1 { $3 = "running" } { print }' "$CF" > "$D/c.tmp" && mv "$D/c.tmp" "$CF"
+}
+no_daemon() { echo "Cannot connect to the Docker daemon at unix://$D/docker.sock. Is the docker daemon running?" >&2; }
+lookup() { awk -v id="$1" '$1 == id || $2 == id { print; exit }' "$CF"; }
+autoremove() { if [ "$1" = 1 ]; then echo true; else echo false; fi; }
+# VOLS (NAME:DEST,...; NAME anon = an anonymous volume): its named volumes as the
+# HostConfig.Binds JSON.
+vol_binds() {
+  local v out=""
+  for v in $(printf '%s' "$1" | tr ',' ' '); do
+    [ "${v%%:*}" = anon ] || out="${out:+$out,}\"$v\""
+  done
+  if [ -n "$out" ]; then printf '[%s]' "$out"; else printf 'null'; fi
+}
+# TEXT as a JSON string, escaped as Go's encoder escapes the characters tests use.
+json_str() {
+  local s=$1 b=\\ q='"' tb nl='
+'
+  tb=$(printf '\t')
+  s=${s//"$b"/"$b$b"}; s=${s//"$q"/"$b$q"}; s=${s//"$tb"/"${b}t"}; s=${s//"$nl"/"${b}n"}
+  printf '"%s"' "$s"
+}
+# act EXPR SET VALUE: the actions on EXPR (.Field, or index X "key") in R, printing
+# the string VALUE as is, or as JSON through json. A key the data lacks (SET=0)
+# prints <no value>, or null through json, read with index; read with a dot it fails
+# the template on the raw JSON: 1.
+act() {
+  local raw=$3 js
+  if [ "$2" = 1 ]; then js=$(json_str "$3")
+  else
+    case $1:$R in .*"{{$1}}"*|.*"{{json $1}}"*) return 1 ;; esac
+    raw='<no value>'; js=null
+  fi
+  R=${R//"{{json ($1)}}"/"$js"}; R=${R//"{{json $1}}"/"$js"}; R=${R//"{{$1}}"/"$raw"}
+}
+# render FMT ID NAME AUTOREMOVE ONEOFF STARTED VOLS: FMT for that container (fields
+# as in containers) in R, its one {{range}} (.Mounts or .ExecIDs) included. Mounts:
+# a bind at bind-ID's text when present, VOLS, then a bind at /fsg-probe; exec ids
+# as execs and execs-once give them. RT is the part from the {{range}} on. 1, with
+# the real run's error on stderr, when the template fails for it.
+render() {
+  local fmt=$1 id=$2 name=$3 ar lab pre body="" post="" rng="" out="" v n i=0 x sep
+  local mt=() mn=() ms=() md=()
+  ar=$(autoremove "${4:-0}")
+  if [ -f "$D/label-$id" ]; then lab=$(cat "$D/label-$id"); elif [ "${5:-0}" = 1 ]; then lab=True; else lab=False; fi
+  v=${6:--}; [ "$v" = - ] && v=$(( $(date +%s) - 3600 ))
+  case $fmt in
+    *'{{range '*'{{end}}'*) pre=${fmt%%'{{range '*}; body=${fmt#*'{{range '}; post=${body#*'{{end}}'}; body=${body%%'{{end}}'*}
+      rng=${body%%'}}'*}; body=${body#*'}}'} ;;
+    *) pre=$fmt ;;
+  esac
+  case $pre$post in *'.HostConfig.Mounts}}'*) grep -m 1 'key "Mounts"' "$FIX/record-old-template.txt" >&2; return 1 ;; esac
+  sep=$(printf '\001'); R=$pre$sep$post
+  R=${R//'{{.HostConfig.AutoRemove}}'/$ar}
+  R=${R//'{{.State.StartedAt}}'/$(date -u -r "$v" +%Y-%m-%dT%H:%M:%S.123456789Z)}
+  R=${R//'{{json (index .HostConfig "Binds")}}'/$(vol_binds "${7:-}")}
+  R=${R//'{{json (index .HostConfig "Mounts")}}'/null}
+  act .Id 1 "$id"; act .Name 1 "/$name"; act 'index .Config.Labels "com.docker.compose.oneoff"' 1 "$lab"
+  pre=${R%%"$sep"*}; post=${R#*"$sep"}
+  case $rng in
+    .Mounts)
+      [ -f "$D/bind-$id" ] && { mt+=(bind); mn+=(""); ms+=(0); md+=("$(cat "$D/bind-$id")"); }
+      for v in $(printf '%s' "${7:-}" | tr ',' ' '); do
+        n=${v%%:*}; [ "$n" = anon ] && { i=$((i + 1)); n=$(printf 'f%063d' "$i"); }
+        mt+=(volume); mn+=("$n"); ms+=(1); md+=("${v#*:}")
+      done
+      mt+=(bind); mn+=(""); ms+=(0); md+=(/fsg-probe)
+      i=0
+      while [ $i -lt ${#mt[@]} ]; do
+        R=$body
+        act 'index . "Type"' 1 "${mt[i]}"; act 'index . "Destination"' 1 "${md[i]}"; act .Destination 1 "${md[i]}"
+        act 'index . "Name"' "${ms[i]}" "${mn[i]}"
+        act .Name "${ms[i]}" "${mn[i]}" || { grep -m 1 'key "Name"' "$FIX/record-old-template.txt" >&2; return 1; }
+        out=$out$R; i=$((i + 1))
+      done ;;
+    .ExecIDs)
+      for x in $(awk -v n="$name" '$1 == n { for (i = 1; i <= $2; i++) printf "%se%dn%d\n", n, NR, i }' "$D/execs" 2>/dev/null
+        awk -v n="$name" '$1 == n { for (i = 1; i <= $2; i++) printf "%sh%dn%d\n", n, NR, i }' "$D/execs-once" 2>/dev/null); do
+        R=${body//'{{.}}'/$x}; out=$out$R
+      done ;;
+  esac
+  RT=$out$post; R=$pre$RT
+}
+
+cmd=${1:-}; shift
+if [ -f "$D/hang" ]; then
+  case $cmd:${1:-} in
+    desktop:stop|desktop:start|desktop:restart) [ -f "$D/hang-sticky" ] && exec /bin/sleep 30; rm -f "$D/hang" ;;
+    desktop:logs) ;;
+    context:*) ;;
+    *) exec /bin/sleep 30 ;;
+  esac
+fi
+case $cmd in
+  desktop)
+    [ -f "$D/desktop" ] || { echo "docker: 'desktop' is not a docker command." >&2; exit 1; }
+    sub=${1:-}; CF=$D/containers
+    case $sub in
+      status)
+        if [ "${2:-}" = --format ]; then printf '{\n    "Status": "%s"\n}\n' "$(cat "$D/desktop")"
+        else printf 'Name                Value\nStatus              %s\n' "$(cat "$D/desktop")"; fi ;;
+      stop) [ -f "$D/stop-delay" ] && sleep "$(cat "$D/stop-delay")"
+        engine_stop; echo stopped > "$D/desktop"; fake_log "stop-done" ;;
+      start) [ -f "$D/desktop-start-fail" ] && exit 1
+        [ -f "$D/start-delay" ] && sleep "$(cat "$D/start-delay")"; echo running > "$D/desktop"; engine_start ;;
+      restart) engine_stop; echo running > "$D/desktop"; engine_start ;;
+      logs) echo "fake desktop logs" ;;
+      *) exit 1 ;;
+    esac ;;
+  info) engine_up || { no_daemon; exit 1; }; echo "Server Version: fake" ;;
+  ps)
+    if [ -s "$D/ps-hang" ]; then
+      n=$(cat "$D/ps-hang")
+      if [ "$n" -gt 1 ]; then echo $((n - 1)) > "$D/ps-hang"; else rm -f "$D/ps-hang"; fi
+      exec /bin/sleep 30
+    fi
+    if [ -s "$D/ps-fail" ]; then
+      n=$(cat "$D/ps-fail")
+      if [ "$n" -gt 1 ]; then echo $((n - 1)) > "$D/ps-fail"; else rm -f "$D/ps-fail"; fi
+      echo "error during connect: Get \"http://%2Fvar%2Frun%2Fdocker.sock/v1.47/containers/json\": EOF" >&2
+      exit 1
+    fi
+    engine_up || { no_daemon; exit 1; }
+    all=0; quiet=0; fmt=""
+    while [ $# -gt 0 ]; do
+      case $1 in -a) all=1 ;; -q) quiet=1 ;; --format) fmt=$2; shift ;; esac
+      shift
+    done
+    awk -v all=$all -v q=$quiet -v fmt="$fmt" 'NF && (all || $3 == "running") {
+      if (q) print $1; else if (fmt ~ /Status/) print $1 " " $2 " " $3; else print $1 " " $2 }' "$CF"
+    if [ -s "$D/ps-ghost" ]; then
+      awk -v q=$quiet -v fmt="$fmt" '{ if (q) print $1; else if (fmt ~ /Status/) print $1 " " $2 " running"; else print $1 " " $2 }' "$D/ps-ghost"
+      rm -f "$D/ps-ghost"
+    fi ;;
+  inspect)
+    { engine_up && [ ! -f "$D/inspect-down" ]; } || { no_daemon; exit 1; }
+    fmt=""; what=object
+    [ "${1:-}" = --type ] && { what=$2; shift 2; }
+    [ "${1:-}" = --format ] && { fmt=$2; shift 2; }
+    rc=0
+    for id in "$@"; do
+      line=$(lookup "$id")
+      [ -n "$line" ] || { echo "Error: No such $what: $id" >&2; rc=1; continue; }
+      set -- $line
+      case $fmt in
+        *ExecIDs*)
+          [ -f "$D/work-text-$1" ] && { cat "$D/work-text-$1"; continue; }
+          # A real container's line as the run printed it, then its exec ids.
+          render "$fmt" "$1" "$2" "${8:-0}" "${9:-0}" "${10:--}" "${11:-}" || { rc=1; continue; }
+          real=$(awk -v n="/$2" '$1 == n { print; exit }' "$D/inspect-real-work" 2>/dev/null)
+          if [ -n "$real" ]; then printf '%s\n' "$real$RT"; else printf '%s\n' "$R"; fi ;;
+        *AutoRemove*)
+          [ -f "$D/record-text-$1" ] && { cat "$D/record-text-$1"; continue; }
+          if grep -qxF "$1" "$D/record-fail" 2>/dev/null; then
+            grep -m 1 'key "Mounts"' "$FIX/record-old-template.txt" >&2; rc=1; continue
+          fi
+          real=$(awk -F'\t' -v id="$1" '$1 == id { print; exit }' "$D/inspect-real" 2>/dev/null)
+          if [ -n "$real" ]; then printf '%s\n' "$real"
+          else render "$fmt" "$1" "$2" "${8:-0}" "${9:-0}" "${10:--}" "${11:-}" && printf '%s\n' "$R" || rc=1; fi ;;
+        *Health*) echo "$3 $( [ "$3" = running ] && echo "$4" || echo none)" ;;
+        *State.Status*) echo "${fmt%%\{\{*}$3" ;;
+        *Config.Image*) echo "$5" ;;
+        *) echo "$line" ;;
+      esac
+    done
+    case $fmt in *ExecIDs*) rm -f "$D/execs-once" ;; esac
+    exit $rc ;;
+  stop)
+    engine_up || exit 1
+    [ "${1:-}" = -t ] && shift 2
+    for id in "$@"; do set_status "$id" exited 1; remove_if_autoremove "$id"; done ;;
+  start)
+    engine_up || exit 1
+    rc=0
+    for id in "$@"; do
+      cid=$(lookup "$id" | awk '{ print $1 }')
+      [ -n "$cid" ] || { echo "Error response from daemon: No such container: $id" >&2; rc=1; continue; }
+      if grep -qxF "$cid" "$D/start-fail" 2>/dev/null; then rc=1; continue; fi
+      set_status "$id" running 0
+    done
+    exit $rc ;;
+  images) engine_up || exit 1; cat "$D/images" 2>/dev/null ;;
+  context) [ "${1:-}" = inspect ] || exit 0
+    [ -f "$D/context-fail" ] && { echo "context not found" >&2; exit 1; }
+    echo "$ctx" ;;
+  run)
+    engine_up || exit 1
+    vol=""; img=""
+    while [ $# -gt 0 ]; do
+      case $1 in
+        -v) vol=$2; shift ;;
+        --pull|--network|--entrypoint) shift ;;
+        --rm) ;;
+        -c) break ;;
+        -*) ;;
+        *) [ -z "$img" ] && img=$1 ;;
+      esac
+      shift
+    done
+    known=$( { cat "$D/images" 2>/dev/null; awk '{ print $5 }' "$CF"; } | grep -cxF "$img")
+    [ "$known" -gt 0 ] || { echo "Unable to find image '$img' locally" >&2; exit 125; }
+    host=${vol%%:*}
+    [ -f "$D/bind-broken" ] && exit 0
+    read -r v < "$host/to-container" || exit 1
+    echo "back:$v" > "$host/from-container" ;;
+  *) exit 0 ;;
+esac

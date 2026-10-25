@@ -1,0 +1,106 @@
+#!/bin/bash
+# fseventsd-guard: detect a runaway macOS fseventsd and heal it without breaking
+# Docker or cutting test runs. See README.md next to this file.
+#
+#   fseventsd-guard status [--json] [--probe]   health; exit 0 ok, 1 warn, 2 runaway, 3 unknown
+#   fseventsd-guard heal [--dry-run] [...]      ask the agent to heal (drain, Docker step,
+#                                               restart, restore, verify); wait for it
+#   fseventsd-guard run [--label L] -- CMD...   run CMD under a drain lease
+#   fseventsd-guard leases                      list the drain state and live work
+#   fseventsd-guard release                     end a hold left when Docker was not restored
+#   fseventsd-guard install|uninstall|doctor    set up, remove, check (doctor --affected)
+#   fseventsd-guard trial --variant A|B|C|none  one Docker trial (docs/DOCKER-TRIALS.md)
+#   fseventsd-guard tick                        one background-agent round (launchd)
+#   fseventsd-guard notify-test                 send a test notification
+#   fseventsd-guard claude-hook prompt|bash     the Claude Code hooks (lib/hint.sh)
+#
+# Needs bash 3.2 (the macOS /bin/bash) and stock macOS tools only.
+
+set -u
+
+# Resolve this file's directory through symlinks.
+src=$0
+while [ -L "$src" ]; do
+  dir=$(cd -P "$(dirname "$src")" && pwd)
+  src=$(readlink "$src")
+  case $src in /*) ;; *) src="$dir/$src" ;; esac
+done
+FSG_HOME=$(cd -P "$(dirname "$src")" && pwd)
+
+# The hooks run on every prompt and Bash call: they load only what they need.
+if [ "${1:-}" = claude-hook ]; then
+  # shellcheck source=lib/hint.sh
+  . "$FSG_HOME/lib/hint.sh"
+  shift
+  fsg_cmd_claude_hook "$@"
+  exit 0
+fi
+
+# shellcheck source=lib/common.sh
+. "$FSG_HOME/lib/common.sh"
+# shellcheck source=lib/lease.sh
+. "$FSG_HOME/lib/lease.sh"
+# shellcheck source=lib/measure.sh
+. "$FSG_HOME/lib/measure.sh"
+# shellcheck source=lib/drain.sh
+. "$FSG_HOME/lib/drain.sh"
+# shellcheck source=lib/docker.sh
+. "$FSG_HOME/lib/docker.sh"
+# shellcheck source=lib/request.sh
+. "$FSG_HOME/lib/request.sh"
+# shellcheck source=lib/heal.sh
+. "$FSG_HOME/lib/heal.sh"
+# shellcheck source=lib/install.sh
+. "$FSG_HOME/lib/install.sh"
+
+# The caller's PATH, before install/uninstall/doctor replace it (fsg_fixed_path).
+FSG_CALLER_PATH=$PATH
+case ${1:-} in install|uninstall|doctor) fsg_fixed_path ;; esac
+fsg_init_paths
+fsg_load_config
+
+fsg_usage() {
+  sed -n '2,18p' "$FSG_HOME/fseventsd-guard" | sed 's/^# \{0,1\}//'
+}
+fsg_usage_status() {
+  echo "usage: fseventsd-guard status [--json] [--probe|--no-probe]"
+  echo "exit: 0 ok, 1 warn, 2 runaway, 3 cannot measure. JSON schema: docs/DESIGN.md"
+}
+
+fsg_cmd_run() {
+  local label=""
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --label) label=${2:-}; shift ;;
+      --) shift; break ;;
+      -h|--help) echo "usage: fseventsd-guard run [--label NAME] -- CMD [ARGS...]"; return 0 ;;
+      *) break ;;
+    esac
+    shift
+  done
+  [ $# -gt 0 ] || { fsg_say "run: no command given"; return 64; }
+  [ -n "$label" ] || label=$(basename "$1")
+  fsg_lease_acquire "$label" || exit $?
+  # exec keeps this process id and start time, so the lease stays valid for the
+  # command's whole run and ends with it.
+  exec "$@"
+}
+
+cmd=${1:-help}
+[ $# -gt 0 ] && shift
+case $cmd in
+  status) fsg_cmd_status "$@" ;;
+  heal) fsg_cmd_heal "$@" ;;
+  run) fsg_cmd_run "$@" ;;
+  leases) fsg_cmd_leases "$@" ;;
+  release) fsg_cmd_release "$@" ;;
+  tick) fsg_cmd_tick "$@" ;;
+  trial) fsg_cmd_trial "$@" ;;
+  install) fsg_cmd_install "$@" ;;
+  uninstall) fsg_cmd_uninstall "$@" ;;
+  doctor) fsg_cmd_doctor "$@" ;;
+  notify-test) FSG_NOTIFY=1 fsg_notify "fseventsd-guard" "test" "Test notification. Warnings, heals and failures arrive like this." ;;
+  version|--version) echo "fseventsd-guard $FSG_VERSION" ;;
+  help|-h|--help) fsg_usage ;;
+  *) fsg_say "unknown command '$cmd'"; fsg_usage; exit 64 ;;
+esac

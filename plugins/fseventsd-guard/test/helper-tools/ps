@@ -1,0 +1,3 @@
+#!/bin/bash
+# Test stand-in inside the root helper: the shared stub.
+exec "$(dirname "$0")/../stubs/ps" "$@"

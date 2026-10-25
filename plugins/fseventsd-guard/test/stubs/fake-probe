@@ -1,0 +1,17 @@
+#!/bin/bash
+# Test stand-in for fsprobe. Result from $FSG_FAKE/probe-seq (one result per call,
+# consumed in order), else $FSG_FAKE/probe, else ok.
+: "${FSG_FAKE:?}"
+r=ok
+if [ -s "$FSG_FAKE/probe-seq" ]; then
+  r=$(head -n 1 "$FSG_FAKE/probe-seq")
+  tail -n +2 "$FSG_FAKE/probe-seq" > "$FSG_FAKE/probe-seq.tmp" && mv "$FSG_FAKE/probe-seq.tmp" "$FSG_FAKE/probe-seq"
+elif [ -f "$FSG_FAKE/probe" ]; then
+  r=$(cat "$FSG_FAKE/probe")
+fi
+echo "probe $r" >> "$FSG_FAKE/calls.log"
+case $r in
+  ok) echo "result=ok latency_ms=7"; exit 0 ;;
+  stalled) echo "result=stalled timeout_s=${2:-10}"; exit 2 ;;
+  *) echo "result=error fake"; exit 3 ;;
+esac

@@ -1,0 +1,33 @@
+#!/bin/bash
+# Test stub: ps for the fake fseventsd pid; the real ps for everything else.
+. "$(dirname "$0")/_fake.sh"
+pid=""; specs=""; args=("$@")
+while [ $# -gt 0 ]; do
+  case $1 in
+    -p) pid=${2:-}; shift ;;
+    -o) specs="$specs,${2:-}"; shift ;;
+  esac
+  shift
+done
+if [ -z "$pid" ] || ! is_fake_pid "$pid"; then exec /bin/ps "${args[@]}"; fi
+grep -qx "$pid" "$FSEV/pids" 2>/dev/null || exit 1
+header=0
+out=""
+IFS=, read -r -a fields <<< "${specs#,}"
+for f in "${fields[@]}"; do
+  case $f in *=) ;; *) header=1 ;; esac
+  name=${f%=}
+  case $name in
+    uid) v=$(fake_attr "$pid" uid 0) ;;
+    comm) v=$(fake_attr "$pid" comm "$REAL_FSEVENTSD") ;;
+    ppid) v=$(fake_attr "$pid" ppid 1) ;;
+    etime) v=$(fake_attr "$pid" etime 01:02:03) ;;
+    %cpu) v=$(fake_attr "$pid" cpu 1.5) ;;
+    pid) v=$pid ;;
+    lstart) v="Fri Oct 16 00:00:00 2026" ;;
+    *) v=0 ;;
+  esac
+  out="$out $v"
+done
+[ $header = 1 ] && echo "${specs#,}" | tr 'a-z,' 'A-Z '
+echo "${out# }"

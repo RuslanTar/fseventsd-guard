@@ -1,0 +1,16 @@
+{
+  "name": "fseventsd-guard",
+  "owner": {
+    "name": "Ruslan Taranenko",
+    "url": "https://github.com/RuslanTar"
+  },
+  "description": "fseventsd-guard: heals a runaway macOS fseventsd without breaking Docker or cutting test runs.",
+  "plugins": [
+    {
+      "name": "fseventsd-guard",
+      "source": "./plugins/fseventsd-guard",
+      "description": "Claude Code hooks for fseventsd-guard: an install nudge on affected Macs and heal notices while the guard restarts fseventsd. Silent off macOS.",
+      "category": "productivity"
+    }
+  ]
+}

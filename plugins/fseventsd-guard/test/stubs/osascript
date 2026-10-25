@@ -1,0 +1,5 @@
+#!/bin/bash
+# Test stub: records notifications instead of showing them.
+. "$(dirname "$0")/_fake.sh"
+fake_log "osascript $*"
+printf '%s\n' "$*" >> "$FSG_FAKE/notifications.log"

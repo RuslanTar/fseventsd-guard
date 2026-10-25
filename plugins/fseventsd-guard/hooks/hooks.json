@@ -1,0 +1,43 @@
+{
+  "description": "fseventsd-guard: install nudge and heal notices on macOS; silent elsewhere",
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ \"$(uname -s 2>/dev/null)\" = Darwin ] && [ -f \"${CLAUDE_PLUGIN_ROOT}/hooks/fseventsd-guard-hook.sh\" ] || exit 0; bash \"${CLAUDE_PLUGIN_ROOT}/hooks/fseventsd-guard-hook.sh\" prompt",
+            "shell": "bash",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ \"$(uname -s 2>/dev/null)\" = Darwin ] && [ -f \"${CLAUDE_PLUGIN_ROOT}/hooks/fseventsd-guard-hook.sh\" ] || exit 0; bash \"${CLAUDE_PLUGIN_ROOT}/hooks/fseventsd-guard-hook.sh\" bash",
+            "shell": "bash",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ \"$(uname -s 2>/dev/null)\" = Darwin ] && [ -f \"${CLAUDE_PLUGIN_ROOT}/hooks/fseventsd-guard-hook.sh\" ] || exit 0; bash \"${CLAUDE_PLUGIN_ROOT}/hooks/fseventsd-guard-hook.sh\" bash",
+            "shell": "bash",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}

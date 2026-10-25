@@ -1,0 +1,28 @@
+#!/bin/bash
+# Test stub: top -l 1 -pid P -stats LIST for the fake fseventsd. Prints the header
+# only when P is not the fake daemon, like the real top.
+. "$(dirname "$0")/_fake.sh"
+pid=""; stats=mem
+while [ $# -gt 0 ]; do
+  case $1 in
+    -pid) pid=${2:-}; shift ;;
+    -stats) stats=${2:-}; shift ;;
+  esac
+  shift
+done
+echo "Processes: 1 total"
+echo "$stats" | tr 'a-z,' 'A-Z '
+if [ -n "$pid" ] && grep -qx "$pid" "$FSEV/pids" 2>/dev/null; then
+  line=""
+  IFS=, read -r -a fields <<< "$stats"
+  for f in "${fields[@]}"; do
+    case $f in
+      mem) v=$(fake_attr "$pid" mem 5000K) ;;
+      cpu) v=$(fake_attr "$pid" cpu 1.5) ;;
+      pid) v=$pid ;;
+      *) v=0 ;;
+    esac
+    line="$line $v"
+  done
+  echo "${line# }"
+fi

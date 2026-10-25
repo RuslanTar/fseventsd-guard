@@ -1,0 +1,19 @@
+#!/bin/bash
+# Test stand-in for /bin/kill inside the root helper. Never signals anything: it
+# logs, then plays launchd by "respawning" the fake fseventsd under a new pid.
+#   $FSG_FAKE/kill-fail    present = kill fails
+#   $FSG_FAKE/no-respawn   present = no new fseventsd appears
+#   $FSG_FAKE/respawn-mem  footprint of the new daemon (default 3000K)
+. "$(dirname "$0")/../stubs/_fake.sh"
+fake_log "kill $*"
+[ -f "$FSG_FAKE/kill-fail" ] && exit 1
+pid=${2:-}
+if [ -f "$FSG_FAKE/no-respawn" ]; then
+  : > "$FSEV/pids"
+  exit 0
+fi
+new=$((pid + 1))
+echo "$new" > "$FSEV/pids"
+cat "$FSG_FAKE/respawn-mem" 2>/dev/null > "$FSEV/$new.mem" || true
+[ -s "$FSEV/$new.mem" ] || echo 3000K > "$FSEV/$new.mem"
+exit 0

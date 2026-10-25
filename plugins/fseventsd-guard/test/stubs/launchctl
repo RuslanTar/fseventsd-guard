@@ -1,0 +1,39 @@
+#!/bin/bash
+# Test stub: launchctl. bootstrap marks the agent loaded, bootout unloads it, print
+# reports it (with $FSG_FAKE/launchctl-print as its output), print-disabled prints
+# $FSG_FAKE/launchctl-disabled. kickstart starts the
+# installed app copy's tick in the background and in a session of its own, unless
+# the previous tick it started still runs, as launchd would; with
+# $FSG_FAKE/kickstart-off present it starts nothing (an agent whose ticks never
+# run). Like launchd, it does not pass on the caller's environment: the tick gets
+# the plist's variables (PATH, FSG_STATE_DIR), the test's fake paths and stand-in
+# root tools, and the agent's knobs from $FSG_FAKE/agent-env (KEY=VALUE lines; a later line wins).
+# Nothing reaches the real launchd.
+. "$(dirname "$0")/_fake.sh"
+fake_log "launchctl $*"
+case ${1:-} in
+  bootstrap) touch "$FSG_FAKE/launchctl-loaded" ;;
+  bootout) [ -f "$FSG_FAKE/launchctl-loaded" ] || exit 3; rm -f "$FSG_FAKE/launchctl-loaded" ;;
+  print) [ -f "$FSG_FAKE/launchctl-loaded" ] || exit 113
+    [ -f "$FSG_FAKE/launchctl-print" ] && cat "$FSG_FAKE/launchctl-print" ;;
+  print-disabled) [ -f "$FSG_FAKE/launchctl-disabled" ] && cat "$FSG_FAKE/launchctl-disabled" ;;
+  kickstart)
+    [ -f "$FSG_FAKE/launchctl-loaded" ] || exit 113
+    p=$(cat "$FSG_FAKE/agent-tick.pid" 2>/dev/null)
+    [ -n "$p" ] && /bin/ps -p "$p" >/dev/null 2>&1 && exit 0
+    [ -f "$FSG_FAKE/kickstart-off" ] && exit 0
+    set -- PATH="$PATH" HOME="$HOME" TMPDIR="${TMPDIR:-/tmp}" FSG_STATE_DIR="$FSG_STATE_DIR" \
+      FSG_FAKE="$FSG_FAKE" FSG_LOG="$FSG_LOG" FSG_AGENT_LOG="$FSG_AGENT_LOG" \
+      FSG_LAUNCH_AGENTS_DIR="$FSG_LAUNCH_AGENTS_DIR" FSG_PREFIX="$FSG_PREFIX" \
+      FSG_TEST_ROOT_TOOLS="${FSG_TEST_ROOT_TOOLS:-}"
+    if [ -f "$FSG_FAKE/agent-env" ]; then
+      while IFS= read -r l; do case $l in FSG_[A-Z0-9_]*=*) set -- "$@" "$l" ;; esac; done < "$FSG_FAKE/agent-env"
+    fi
+    # In a session of its own, as launchd runs it: a signal to the caller's process
+    # group (timeout -k) does not reach it.
+    env -i "$@" /usr/bin/perl -MPOSIX -e 'POSIX::setsid() or die "setsid: $!"; exec @ARGV or die "exec: $!"' \
+      "$FSG_STATE_DIR/app/fseventsd-guard" tick < /dev/null >> "$FSG_AGENT_LOG" 2>&1 &
+    echo $! > "$FSG_FAKE/agent-tick.pid"
+    echo $! >> "$FSG_FAKE/agent-ticks" ;;
+esac
+exit 0
