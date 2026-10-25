@@ -448,8 +448,9 @@ with no output, and so does the wrapper; the repo's `.gitattributes` keeps every
 file LF on a Windows checkout too. Each prints hook JSON or nothing, always exits 0,
 and never allows, denies or asks. Install the plugin in Claude Code with
 `/plugin marketplace add RuslanTar/fseventsd-guard`, then
-`/plugin install fseventsd-guard@fseventsd-guard`; for a team's settings, see the
-root `README.md`.
+`/plugin install fseventsd-guard@fseventsd-guard`. A team's project settings turn
+the plugin on but do not install it: each teammate still runs the one-time
+`claude plugin` install the root `README.md` gives ("For a team").
 
 | Hook | Speaks when | Says | How often, at what cost |
 |---|---|---|---|
