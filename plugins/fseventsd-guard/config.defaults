@@ -16,7 +16,7 @@
 # --- Thresholds (MB of physical footprint, as top's MEM column reports it) ---------
 # Apple's own launchd memory budget for fseventsd. Reported only.
 FSG_BUDGET_MB=30
-# Warn tier: notify only. A healthy daemon sat at 4-90 MB on the owner's Mac.
+# Warn tier: notify only. A healthy daemon sat at 4-90 MB on the author's Mac.
 FSG_WARN_MB=500
 # Emergency tier: the background agent heals (through the drain).
 FSG_ACT_MB=2048
@@ -122,7 +122,7 @@ FSG_DRAIN_SLACK_S=120
 # --- Drain --------------------------------------------------------------------------
 # Longest wait for leased runs (fseventsd-guard run, integrated runners) that
 # started before the drain, before the cap policy applies.
-# Owner data: an idle run takes up to ~10 min, a busy one up to ~80 min.
+# Measured on one Mac: an idle run takes up to ~10 min, a busy one up to ~80 min.
 FSG_DRAIN_CAP_S=3600
 # Longest wait for unleased work that started before the drain (the detection
 # below), never longer than the drain cap. Nothing holds new unleased runs, so a

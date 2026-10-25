@@ -95,7 +95,7 @@ Why it is shaped like this:
   degraded, not broken, and the developer was notified.
 - After a wave heal gives up at the cap (exit 4), wave heals from every session
   return 11 for `FSG_WAVE_RETRY_MIN` (60) minutes without draining, so a busy
-  machine does not get an hour-long hold at every wave boundary. Whether warn should drain at all is an open owner question
+  machine does not get an hour-long hold at every wave boundary. Whether warn should drain at all is an open question
   (`DESIGN.md` §12 item 7).
 
 ### How a workflow pauses when status is 2 and heal fails

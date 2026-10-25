@@ -615,8 +615,7 @@ None of them lets a non-root user gain root.
     request, trial collection), because the heartbeat is written only at tick start
     and end.
   - Timing-flaky tests: a 1 s `FSG_RUN_MAX_WAIT_S` can give up before the first
-    "holding" line, the pty tests answer after a fixed `sleep 2`, and a real process
-    with pid 4242 looks like the fake fseventsd.
+    "holding" line, and a real process with pid 4242 looks like the fake fseventsd.
 - **Open minor items (review of 2026-10-22).** Not fixed yet:
   - `install` replaces the loaded agent's app copy and rebuilds the probe before it
     asks `Run this as root?`, and does not put them back on `N` or when a root step
@@ -694,7 +693,7 @@ None of them lets a non-root user gain root.
   `PreToolUse` and `PostToolUse` reaches the model, and whether a subagent's hook
   input carries `agent_id` (without one, a subagent shares its session's notice),
   or that `FSG_HINT` set in a settings file's `env` reaches the hooks.
-  The nudge's `top` sample (about 2 s on the owner's Mac) is bounded at
+  The nudge's `top` sample (about 2 s on the author's Mac) is bounded at
   `FSG_TOP_TIMEOUT_S` (15 s), so the hook's 10 s timeout comes first; its stamp is
   written first, so a hang costs one prompt an hour. An agent installed before the drain marker named its Docker step
   writes none, so until `install` is re-run, the notice for a draining heal lists

@@ -504,7 +504,8 @@ usage: fseventsd-guard install [--trial-hours N] [--force] [--no-agent] [--no-pr
   unchanged) and loads the launchd user agent.
   --trial-hours N  open a time-boxed window (floor 0 MB, 120 s interval) for the
                    Docker trials, N at most 24; it closes by itself
-  --force          install on a macOS version with no reported reproduction
+  --force          install on a macOS version outside the affected range
+                   (doctor --affected says why)
   --allow-unreviewed  run root code that is not committed, differs from
                    origin/main or comes from another origin (read lib/root-steps.sh
                    and lib/restart-helper.sh first; the commit and hashes are

@@ -902,7 +902,7 @@ change. New fields may be added. A breaking change bumps the schema to `/2`.
 ```
 
 - `pid`, `footprint_mb`, `cpu_pct`, `uptime_s` are `null` when level is `unknown`.
-- `last_heal`, when present, is `{"epoch", "result" (healed|restart-failed|restored-partly|aborted-at-cap|refused-anonymous-volumes|refused-unlisted|drain-not-marked|lock-not-taken|intent-not-written), "trigger", "docker_variant", "wall_s"}`.
+- `last_heal`, when present, is `{"epoch", "result" (healed|restart-failed|restored-partly|aborted-at-cap|refused-anonymous-volumes|refused-unlisted|drain-not-marked|intent-not-written), "trigger", "docker_variant", "wall_s"}`.
 - `docker_intent` is `null`, or `{"owner_pid", "owner_alive", "trigger", "docker_variant", "since_epoch", "after_step_done"}` while a heal's Docker step has not verified (§5.5). `owner_alive` is true while the tick that wrote it is still in that heal; false means that heal is gone, Docker may be down and the next tick recovers it. `after_step_done` is true once the after-step ran and every container in the restore set was started.
 - `requests` is the agent's queue (§5.3): `queued`, the number of requests not yet claimed, and `running`, `null` or `{"id", "trigger", "requester_pid", "requester_alive", "phase"}`.
 - `agent` is the background agent's heartbeat (`heartbeat` in the state dir), which
