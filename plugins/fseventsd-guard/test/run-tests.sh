@@ -36,7 +36,7 @@ trap cleanup EXIT
 trap 'exit 130' INT TERM
 
 export PATH="$STUBS:/usr/bin:/bin:/usr/sbin:/sbin"
-for c in sudo docker curl launchctl osascript pgrep top ps sw_vers swiftc; do
+for c in sudo docker curl launchctl osascript pgrep top ps sw_vers swiftc sysctl; do
   if [ "$(command -v "$c")" != "$STUBS/$c" ]; then
     echo "SAFETY: '$c' resolves to $(command -v "$c"), not the stub; refusing to run" >&2
     exit 2
@@ -261,6 +261,10 @@ if ! skip_case status; then
   has "$(jget "$out" 'd["error"]')" "fseventsd process" "error"
   printf '4242\n4243\n' > "$FSG_FAKE/fsev/pids"; "$G" status >/dev/null; eq $? 3 "two daemons"
   echo 4242 > "$FSG_FAKE/fsev/pids"; mem garbage; "$G" status >/dev/null; eq $? 3 "unparseable top"
+  mem 5000K; echo 5 > "$FSG_FAKE/top-delay"; s=$(date +%s)
+  out=$(FSG_TOP_TIMEOUT_S=1 "$G" status --json); rc=$?
+  eq $rc 3 "a top that does not answer"; has "$(jget "$out" 'd["error"]')" "top did not answer within 1s" "error"
+  [ $(( $(date +%s) - s )) -lt 5 ] && ok || bad "top bounded: took $(( $(date +%s) - s )) s"
 
   t "status probe"
   echo stalled > "$FSG_FAKE/probe"; out=$("$G" status --json --probe); rc=$?
@@ -3682,6 +3686,18 @@ if ! skip_case tick; then
   "$G" tick; eq $? 2 "second runaway inside 3 h: notify only"
   hasnt "$(cat "$FSG_FAKE/calls.log")" "sudo -n /" "no second restart"
   has "$(tail -n 1 "$FSG_FAKE/notifications.log")" "not auto-healing" "notification"
+
+  t "tick logs compressed memory, ports and swap"
+  docker_default; install_fake --no-agent
+  echo 1.5G > "$FSG_FAKE/fsev/4242.cmprs"; echo 118+ > "$FSG_FAKE/fsev/4242.ports"
+  echo "total = 14336.00M  used = 13548.50M  free = 787.50M  (encrypted)" > "$FSG_FAKE/swapusage"
+  "$G" tick; eq $? 0 "ok"
+  line=$(grep ' TICK level=' "$FSG_LOG" | tail -n 1)
+  has "$line" "mb=4 cmprs_mb=1536 ports=118 cpu=" "compressed memory and ports from the same top sample"
+  has "$line" "swap_used_mb=13548 " "swap in use"
+  echo garbage > "$FSG_FAKE/swapusage"; echo "?" > "$FSG_FAKE/fsev/4242.ports"; "$G" tick; eq $? 0 "unreadable extras do not matter"
+  line=$(grep ' TICK level=' "$FSG_LOG" | tail -n 1)
+  has "$line" "ports= cpu=" "empty ports"; has "$line" "swap_used_mb= " "empty swap"
 
   t "tick stall confirmation"
   docker_default; install_fake --no-agent

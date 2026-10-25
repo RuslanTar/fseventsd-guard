@@ -905,9 +905,15 @@ change. New fields may be added. A breaking change bumps the schema to `/2`.
 - `reasons` lists why the level is not ok; `error` says why it could not measure.
 - `os.affected` is `true`, `false` or `null` (unknown).
 
-Footprint comes from `top -l 1 -pid P -stats mem` (the physical footprint, the
-figure Apple's budget refers to). CPU is `ps -o %cpu`, a decayed average; one `top`
-sample cannot give CPU. Uptime is `ps -o etime`. No root needed.
+Footprint comes from `top -l 1 -pid P -stats pid,mem,cmprs,ports` (MEM is the
+physical footprint, the figure Apple's budget refers to), bounded by
+`FSG_TOP_TIMEOUT_S` (15 s; a slower sample counts as cannot measure). Each tick's
+`TICK` log line also carries the compressed memory (`cmprs_mb`) and Mach ports
+(`ports`) from that sample and the swap in use (`swap_used_mb`, from `sysctl
+vm.swapusage`); they are logged only. Ports tell many live clients apart from
+internal state, and swap shows what the runaway costs the machine. CPU is
+`ps -o %cpu`, a decayed average; one `top` sample cannot give CPU. Uptime is
+`ps -o etime`. No root needed.
 
 ## 9. Affected versions
 

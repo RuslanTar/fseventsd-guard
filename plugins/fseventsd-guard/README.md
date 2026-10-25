@@ -665,9 +665,9 @@ None of them lets a non-root user gain root.
   `PreToolUse` and `PostToolUse` reaches the model, and whether a subagent's hook
   input carries `agent_id` (without one, a subagent shares its session's notice),
   or that `FSG_HINT` set in a settings file's `env` reaches the hooks.
-  The nudge's `top` sample (about 2 s on the owner's Mac) has no bound of its own,
-  only the hook's 10 s timeout; its stamp is written first, so a hang costs one
-  prompt an hour. An agent installed before the drain marker named its Docker step
+  The nudge's `top` sample (about 2 s on the owner's Mac) is bounded at
+  `FSG_TOP_TIMEOUT_S` (15 s), so the hook's 10 s timeout comes first; its stamp is
+  written first, so a hang costs one prompt an hour. An agent installed before the drain marker named its Docker step
   writes none, so until `install` is re-run, the notice for a draining heal lists
   the three steps instead of naming one.
 - **Native Windows without Git for Windows.** The hooks need `bash`. Where Claude

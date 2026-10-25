@@ -1,0 +1,8 @@
+#!/bin/bash
+# Test stub: sysctl -n vm.swapusage and -n kern.boottime print $FSG_FAKE/swapusage
+# and $FSG_FAKE/boottime, else fixed values; anything else is the real sysctl.
+case "$*" in
+  "-n vm.swapusage") cat "${FSG_FAKE:-/nonexistent}/swapusage" 2>/dev/null || echo "total = 2048.00M  used = 512.25M  free = 1535.75M  (encrypted)" ;;
+  "-n kern.boottime") cat "${FSG_FAKE:-/nonexistent}/boottime" 2>/dev/null || echo "{ sec = 1760000000, usec = 0 } Thu Oct  9 08:53:20 2025" ;;
+  *) exec /usr/sbin/sysctl "$@" ;;
+esac

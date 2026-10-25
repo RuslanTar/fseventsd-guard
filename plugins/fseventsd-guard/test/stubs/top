@@ -1,7 +1,9 @@
 #!/bin/bash
 # Test stub: top -l 1 -pid P -stats LIST for the fake fseventsd. Prints the header
-# only when P is not the fake daemon, like the real top.
+# only when P is not the fake daemon, like the real top. Waits $FSG_FAKE/top-delay
+# seconds first when that file exists.
 . "$(dirname "$0")/_fake.sh"
+[ -f "$FSG_FAKE/top-delay" ] && /bin/sleep "$(cat "$FSG_FAKE/top-delay")" > /dev/null
 pid=""; stats=mem
 while [ $# -gt 0 ]; do
   case $1 in
@@ -19,6 +21,8 @@ if [ -n "$pid" ] && grep -qx "$pid" "$FSEV/pids" 2>/dev/null; then
     case $f in
       mem) v=$(fake_attr "$pid" mem 5000K) ;;
       cpu) v=$(fake_attr "$pid" cpu 1.5) ;;
+      cmprs) v=$(fake_attr "$pid" cmprs 0B) ;;
+      ports) v=$(fake_attr "$pid" ports 52) ;;
       pid) v=$pid ;;
       *) v=0 ;;
     esac

@@ -20,6 +20,9 @@ FSG_BUDGET_MB=30
 FSG_WARN_MB=500
 # Emergency tier: the background agent heals (through the drain).
 FSG_ACT_MB=2048
+# Seconds one `top` sample may take (it takes 1-2 s); a slower one counts as cannot
+# measure.
+FSG_TOP_TIMEOUT_S=15
 
 # --- Delivery probe -----------------------------------------------------------------
 # Seconds the probe waits for its own write to come back as an FSEvent.

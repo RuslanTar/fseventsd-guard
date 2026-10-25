@@ -20,12 +20,19 @@ fsg_parse_mem_mb() {
     printf "%d\n", mb }'
 }
 
-# Measures fseventsd. Sets M_PID M_MB M_CPU M_UP M_ERR. Returns 0, or 3 when it
+# Swap in use in whole MB, from `sysctl -n vm.swapusage` ("total = 3072.00M  used =
+# 2051.00M  free = ...").
+fsg_parse_swap_mb() {
+  fsg_parse_mem_mb "$(printf '%s\n' "$1" | awk '{ for (i = 1; i < NF - 1; i++) if ($i == "used" && $(i + 1) == "=") { print $(i + 2); exit } }')"
+}
+
+# Measures fseventsd. Sets M_PID M_MB M_CPU M_UP M_ERR, and M_CMPRS_MB (compressed
+# memory) and M_PORTS (Mach ports), which are logged only. Returns 0, or 3 when it
 # cannot measure (M_ERR says why).
 fsg_measure() {
-  M_PID=; M_MB=; M_CPU=; M_UP=; M_ERR=
+  M_PID=; M_MB=; M_CPU=; M_UP=; M_ERR=; M_CMPRS_MB=; M_PORTS=
   if [ "$(uname -s)" != Darwin ]; then M_ERR="not macOS"; return 3; fi
-  local pids n raw
+  local pids n raw row
   # Root-owned only: any user can start a process named fseventsd, and two
   # matches would make the guard blind.
   pids=$(pgrep -x -u 0 fseventsd 2>/dev/null)
@@ -33,9 +40,14 @@ fsg_measure() {
   n=$(printf '%s\n' "$pids" | wc -l | tr -d ' ')
   if [ "$n" != 1 ]; then M_ERR="$n root-owned processes are named fseventsd"; return 3; fi
   M_PID=$pids
-  raw=$(top -l 1 -pid "$M_PID" -stats mem 2>/dev/null | tail -n 1)
-  M_MB=$(fsg_parse_mem_mb "$raw") || M_MB=
-  if [ -z "$M_MB" ]; then M_ERR="cannot read the footprint of pid $M_PID (top said: ${raw:-nothing})"; return 3; fi
+  # top takes a second or two; bounded, so a wedged system cannot hang a tick or a hook.
+  raw=$(fsg_timeout "$FSG_TOP_TIMEOUT_S" top -l 1 -pid "$M_PID" -stats pid,mem,cmprs,ports 2>/dev/null)
+  if [ $? -eq 124 ]; then M_ERR="top did not answer within ${FSG_TOP_TIMEOUT_S}s"; return 3; fi
+  row=$(printf '%s\n' "$raw" | awk -v p="$M_PID" '$1 == p { print; exit }')
+  M_MB=$(fsg_parse_mem_mb "$(printf '%s\n' "$row" | awk '{ print $2 }')") || M_MB=
+  if [ -z "$M_MB" ]; then M_ERR="cannot read the footprint of pid $M_PID (top said: ${row:-$(printf '%s\n' "$raw" | tail -n 1)})"; return 3; fi
+  M_CMPRS_MB=$(fsg_parse_mem_mb "$(printf '%s\n' "$row" | awk '{ print $3 }')") || M_CMPRS_MB=
+  M_PORTS=$(printf '%s\n' "$row" | awk '{ v = $4; sub(/[+-]$/, "", v); if (v ~ /^[0-9]+$/) print v }')
   M_CPU=$(ps -o %cpu= -p "$M_PID" 2>/dev/null | tr -d ' ')
   M_UP=$(fsg_etime_s "$(ps -o etime= -p "$M_PID" 2>/dev/null)")
   return 0
