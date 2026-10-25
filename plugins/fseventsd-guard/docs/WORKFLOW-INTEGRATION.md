@@ -26,18 +26,18 @@ It calls the installed app copy, so the project needs no clone of the guard.
 ```sh
 G="$HOME/Library/Application Support/fseventsd-guard/app/fseventsd-guard"
 if [ "$(uname -s)" = Darwin ] && [ -x "$G" ]; then
-  "$G" status --json > "$WAVE_DIR/fseventsd-status.json"; rc=$?
-  case $rc in
-    0|3) ;;                                   # ok, or cannot measure: start the wave
-    1|2)
-      "$G" heal --trigger wave; hrc=$?
-      case $hrc in
-        0|6) ;;                               # healed / nothing to do
-        *) [ $rc -eq 2 ] && fsg_wave_pause "$hrc" ;;   # runaway and the heal failed
-      esac ;;
-  esac
+  rc=0; "$G" status --json > "$WAVE_DIR/fseventsd-status.json" || rc=$?
+  if [ $rc -eq 1 ] || [ $rc -eq 2 ]; then   # 0 ok, 3 cannot measure: start the wave
+    hrc=0; "$G" heal --trigger wave || hrc=$?
+    case $hrc in
+      0|3|6) ;;                             # the "proceed" rows of the table below
+      *) if [ $rc -eq 2 ]; then fsg_wave_pause "$hrc"; fi ;;
+    esac
+  fi
 fi
 ```
+
+The `|| rc=$?` form keeps the snippet working under `set -e`.
 
 Why it is shaped like this:
 
@@ -117,8 +117,14 @@ Why it is shaped like this:
    `fseventsd runaway, heal failed (exit N: meaning)` and the manual fix
    `sudo kill -TERM $(pgrep -x fseventsd)`.
 
+This table is the one list of what to do after `heal --trigger wave` when status
+was 2. Start the wave only on a "proceed" row; on any other code, including one not
+listed, do not.
+
 | heal exit | Meaning | Pause action |
 |---|---|---|
+| 0 | healed | proceed |
+| 6 | nothing to do: the helper would refuse (healthy, or rate limited) | proceed |
 | 3 | cannot measure | treat as unknown: proceed, log it |
 | 4 | drain cap reached (other sessions' runs still going) | wait and retry |
 | 11 | wave back-off: a wave heal gave up at the cap less than 60 min ago, no new drain | at warn: proceed; at runaway: wait and retry (the agent's emergency tier still acts) |
@@ -128,6 +134,7 @@ Why it is shaped like this:
 | 10 | the request, the drain marker or the Docker intent could not be written, or the request stayed unclaimed for two agent intervals while no tick ran (disk full) or for `FSG_REQUEST_MAX_AGE_S` (2 h); nothing was stopped | escalate: `fseventsd-guard doctor` |
 | 13 | the agent dropped the request before it started (older than 2 h when it was taken) | wait and retry |
 | 14 | refused after the drain: the Docker step would stop a running `--rm` container with an anonymous volume, which Docker deletes with it, or Docker answers but did not list its containers, so none could be checked; nothing was stopped | escalate: a person stops that container or restarts it with a named volume, or gets `docker ps` working again (the notification says which); until then a retry drains and refuses again |
+| 12, 124 | the call stopped waiting (`--no-wait`, or a `timeout` around it); the heal still runs | wait: poll `heal --result ID --no-wait` until it returns another code, then act on that code |
 | 130 | the agent was stopped during the heal (logout, `launchctl bootout`, `install`; or killed outright, and no tick followed within two agent intervals); its trap or next tick restores Docker. Also the call's own wait stopped by a signal, with the heal still running (the call says `stopped waiting`) | wait and retry: poll `status` as above; after `stopped waiting`, poll `heal --result ID --no-wait` first |
 
 ### Wiring it into an orchestrator
@@ -137,9 +144,10 @@ example:
 
 > **fseventsd pre-wave check (macOS).** Before spawning each wave, run the pre-wave
 > call (fseventsd-guard `docs/WORKFLOW-INTEGRATION.md` §1). Status 0/3: spawn.
-> Status 1/2: `heal --trigger wave` first. If status was 2 and heal exited 4, 7, 8
-> or 9, do not spawn. Poll `status` every 5 min for up to 60 min, then stop the run
-> for a person with the heal exit meaning.
+> Status 1/2: `heal --trigger wave` first. If status was 2, act on the heal exit
+> exactly as the table in §1 says: spawn only on a "proceed" row; on any other
+> code, including a killed or timed-out call, do not spawn and follow the pause
+> routine there.
 
 ## 2. Runner leases
 
