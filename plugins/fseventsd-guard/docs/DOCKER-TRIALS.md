@@ -132,8 +132,8 @@ Docker answered but did not list its containers, so none could be checked
 `docker ps` working again, then run the trial again), `130` the agent was stopped during the trial. After each trial, before the next one, check:
 
 1. **Healed?** `summary.txt` says `result=healed` and `heal_exit=0`. That means
-   Docker is running, every container the heal restores (not `--rm` or one-off ones) is running (and healthy where it
-   has a health check), and the bind-mount round trip worked both ways.
+   Docker is running, every container the heal restores (not `--rm` or one-off ones) is running (and healthy if it was
+   healthy before the heal), and the bind-mount round trip worked both ways.
 2. **Wall time.** `heal_s_after_drain` is the figure to compare. The drain time
    depends on other sessions' runs, not on the variant.
 3. **Workarounds.** Anything you had to do by hand to get Docker or a container
@@ -167,7 +167,7 @@ Fine: no Docker process has the tick's pid as its pgid (second column), and
 `docker desktop status` still says `running`. If one does, or Docker Desktop is gone
 although the trial verified it, stop the trials and note it here: the agent then
 needs `AbandonProcessGroup` in its plist or to start Docker Desktop with
-`open -a Docker` (an owner decision).
+`open -a Docker` (a design decision to make then).
 
 Result: _not checked yet._
 

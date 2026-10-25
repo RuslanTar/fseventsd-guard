@@ -392,7 +392,7 @@ fsg_cmd_status() {
       echo "heal requests: $RQ_QUEUED queued${RQ_ID:+; running: $RQ_ID ($RQ_TRIGGER, phase $RQ_PHASE, requester pid $RQ_PID$( [ "$RQ_ALIVE" = true ] || echo ', gone'))}"
     fsg_helper_limits
     if [ "$FSG_H_TRIAL" = 1 ]; then
-      echo "helper: trial window open until $(date -r "$(fsg_helper_setting TRIAL_UNTIL)" '+%Y-%m-%d %H:%M') (floor $FSG_H_MIN_MB MB, interval ${FSG_H_INTERVAL_S}s)"
+      echo "helper: trial window open until $(/bin/date -r "$(fsg_helper_setting TRIAL_UNTIL)" '+%Y-%m-%d %H:%M') (floor $FSG_H_MIN_MB MB, interval ${FSG_H_INTERVAL_S}s)"
     fi
     echo "agent: $A_TEXT"
     fsg_status_install_text
