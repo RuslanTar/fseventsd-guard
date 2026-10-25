@@ -26,6 +26,8 @@
 #   foreign-start  present = right after `docker desktop stop`, something else starts
 #                Docker Desktop again with a new backend (backend-pid 8888)
 #   backend-pid  the backend pid the pgrep stub reports while Desktop runs (7777)
+#   snap         a file path: `docker desktop stop` copies that file to snap.out
+#                first (what a heal's drain marker says at its Docker step)
 #   start-delay  seconds `docker desktop start` takes
 #   stop-delay   seconds `docker desktop stop` takes; it logs "stop-done" when it
 #                has stopped Docker
@@ -208,7 +210,8 @@ case $cmd in
         fi
         if [ "${2:-}" = --format ]; then printf '{\n    "Status": "%s"\n}\n' "$(cat "$D/desktop")"
         else printf 'Name                Value\nStatus              %s\n' "$(cat "$D/desktop")"; fi ;;
-      stop) [ -f "$D/stop-delay" ] && sleep "$(cat "$D/stop-delay")"
+      stop) [ -f "$D/snap" ] && cat "$(cat "$D/snap")" > "$D/snap.out" 2>/dev/null
+        [ -f "$D/stop-delay" ] && sleep "$(cat "$D/stop-delay")"
         engine_stop; echo stopped > "$D/desktop"; fake_log "stop-done"
         [ -f "$D/sock-gone-on-stop" ] && [ -e "$D/docker.sock" ] && mv "$D/docker.sock" "$D/docker.sock.down"
         if [ -f "$D/foreign-start" ]; then

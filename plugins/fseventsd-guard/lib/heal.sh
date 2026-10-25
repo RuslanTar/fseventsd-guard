@@ -948,9 +948,12 @@ fsg_heal_run() { # t0 old_pid cap policy
   # --- Docker before-step ---
   fsg_drain_phase docker-before
   fsg_docker_record
+  local pre_variant=$HEAL_VARIANT
   HEAL_VARIANT=$(fsg_docker_effective_variant "$HEAL_VARIANT_REQ")
   fsg_docker_record_text > "$HEAL_DIR/docker-before.txt"
   [ "$HEAL_VARIANT" != "$HEAL_VARIANT_REQ" ] && fsg_log "HEAL docker variant $HEAL_VARIANT_REQ -> $HEAL_VARIANT (kind=$DK_KIND state=$DK_STATE)"
+  # The marker went out with the precheck's variant; the hooks name the step from it.
+  [ "$HEAL_VARIANT" != "$pre_variant" ] && [ "${DRAIN_HELD:-0}" = 1 ] && fsg_drain_write docker-before 2>/dev/null
   if [ -n "$DK_AT_RISK" ] && fsg_docker_stops_containers "$HEAL_VARIANT"; then
     fsg__heal_refuse refused-anonymous-volumes "$t0" "a --rm container would lose its data" \
       "Docker step $HEAL_VARIANT would stop these --rm containers, and Docker deletes a --rm container's anonymous volumes with it: $DK_AT_RISK. Nothing was stopped or restarted. Next: stop it yourself once its data is safe, or start it again with a named volume (-v NAME:PATH), then run: fseventsd-guard heal" \

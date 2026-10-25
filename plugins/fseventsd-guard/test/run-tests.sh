@@ -1696,6 +1696,21 @@ if ! skip_case heal; then
   : > "$FSG_FAKE/calls.log"; heal >/dev/null 2>&1; eq $? 0 "Docker not running: heal anyway"
   hasnt "$(cat "$FSG_FAKE/calls.log")" "docker stop" "no Docker actions"
 
+  t "the drain marker names the Docker step the heal takes, not the one it planned"
+  docker_default; install_fake; mem 3G
+  docker desktop stop >/dev/null 2>&1
+  echo "$FSG_STATE_DIR/drain/pending" > "$FSG_FAKE/docker/snap"
+  bg "$G" run --label first -- sleep 4; sleep 1
+  heal_bg() { "$G" heal --docker-variant B > "$C/heal-bg.out" 2>&1; }
+  bg heal_bg; hp=$LAST_BG
+  waitfor 20 grep -qs '^phase=draining' "$FSG_STATE_DIR/drain/pending" || bad "the heal drains"
+  has "$(cat "$FSG_STATE_DIR/drain/pending")" "variant=skip" "planned with Docker Desktop stopped: no Docker step"
+  # Docker Desktop started during the drain: the heal takes step B after all.
+  docker desktop start >/dev/null 2>&1
+  wait "$hp"; eq $? 0 "healed"; agent_wait
+  has "$(cat "$FSG_FAKE/docker/snap.out" 2>/dev/null)" "phase=docker-before" "the marker at the Docker step"
+  has "$(cat "$FSG_FAKE/docker/snap.out" 2>/dev/null)" "variant=B" "names step B"
+
   t "heal refusals before the drain"
   docker_default
   heal > "$C/o" 2>&1; eq $? 9 "not installed"
