@@ -563,36 +563,102 @@ fsg_probe_images() {
   } | awk 'NF && !seen[$0]++' | head -n 3
 }
 
-# Writes a file on the host, reads it in a throwaway container, writes the reply in
-# the container, reads it on the host. Sets BM_RESULT (ok|failed|skipped), BM_DETAIL.
+# Docker Desktop's File Sharing list (FilesharingDirectories in its
+# settings-store.json, read only), one path per line. 1 when the file or the key is
+# missing or unreadable: Desktop's default sharing (/Users, /Volumes, /private, /tmp,
+# /var/folders) applies.
+fsg_desktop_shared_dirs() {
+  local f=${FSG_DESKTOP_SETTINGS:-"$HOME/Library/Group Containers/group.com.docker/settings-store.json"} n i=0
+  [ -r "$f" ] || return 1
+  n=$(plutil -extract FilesharingDirectories raw -o - "$f" 2>/dev/null) && fsg_is_uint "$n" || return 1
+  while [ $i -lt "$n" ]; do
+    plutil -extract "FilesharingDirectories.$i" raw -o - "$f" 2>/dev/null | sed '/^$/d'
+    i=$((i + 1))
+  done
+}
+
+# 0 when PATH is one of the dirs in LIST (lines) or under one, by whole components.
+fsg__under_any() { # path list
+  local e
+  while IFS= read -r e; do
+    [ -n "$e" ] || continue
+    e=${e%/}
+    case $1 in "$e"|"$e"/*) return 0 ;; esac
+  done <<EOF
+$2
+EOF
+  return 1
+}
+
+# The bind-mount probe's host dir in BM_DIR: FSG_PROBE_DIR, else the state dir's
+# mountprobe when Docker Desktop shares it (default sharing does), else a dir in the
+# first shared folder under your home. BM_SHARED: 1 in the File Sharing list, 0 not,
+# empty when Desktop uses its default sharing.
+fsg_probe_dir() {
+  local list e
+  BM_SHARED=; BM_DIR=${FSG_PROBE_DIR:-"$FSG_STATE_DIR/mountprobe"}
+  list=$(fsg_desktop_shared_dirs) || return 0
+  if fsg__under_any "$BM_DIR" "$list"; then BM_SHARED=1; return 0; fi
+  BM_SHARED=0
+  [ -z "${FSG_PROBE_DIR:-}" ] || return 0
+  while IFS= read -r e; do
+    case $e in
+      "$HOME"/*) if [ -d "$e" ] && [ -w "$e" ]; then BM_DIR="${e%/}/.fseventsd-guard-mountprobe"; BM_SHARED=1; return 0; fi ;;
+    esac
+  done <<EOF
+$list
+EOF
+}
+
+# The probe's file in BM_DIR; the container's side of the bind mount is /fsg-probe.
+FSG__PROBE_FILE=fsg-probe.txt
+
+# Writes a file on the host, reads it in a throwaway container that writes its reply
+# into it, reads that on the host, and removes the file (and the dir if it made it).
+# Sets BM_RESULT (ok|failed|skipped), BM_DETAIL and BM_NOTE (a skip the notices
+# name: the probe dir is not shared with Docker Desktop).
 fsg_docker_verify_bind_mount() {
-  BM_RESULT=skipped; BM_DETAIL=
+  BM_RESULT=skipped; BM_DETAIL=; BM_NOTE=
   if [ "$FSG_VERIFY_BIND_MOUNT" != 1 ]; then BM_DETAIL="disabled"; return 0; fi
   if [ "$DK_STATE" = stopped ]; then BM_DETAIL="Docker was not running"; return 0; fi
   if [ "$DK_STATE" = notlocal ]; then BM_DETAIL="not a local Docker engine"; return 0; fi
-  local dir nonce img got tried=""
-  dir="$FSG_STATE_DIR/mountprobe"
+  local dir f out nonce img got rc made=0 tried=""
+  fsg_probe_dir
+  dir=$BM_DIR; f="$BM_DIR/$FSG__PROBE_FILE"; out="$FSG_STATE_DIR/mountprobe.out"
+  [ -d "$dir" ] || made=1
   mkdir -p "$dir" || { BM_RESULT=failed; BM_DETAIL="cannot create $dir"; return 1; }
   nonce="fsg-$(fsg_now)-$$"
   while IFS= read -r img; do
     [ -n "$img" ] || continue
     tried="$tried $img"
-    rm -f "$dir/to-container" "$dir/from-container"
-    printf '%s\n' "$nonce" > "$dir/to-container"
+    printf '%s\n' "$nonce" > "$f"
     fsg_timeout 90 docker run --rm --pull never --network none --entrypoint /bin/sh \
-      -v "$dir:/fsg-probe" "$img" -c 'read -r v < /fsg-probe/to-container && echo "back:$v" > /fsg-probe/from-container' \
-      >/dev/null 2>&1 || continue
-    got=$(cat "$dir/from-container" 2>/dev/null)
-    rm -f "$dir/to-container" "$dir/from-container"
-    if [ "$got" = "back:$nonce" ]; then BM_RESULT=ok; BM_DETAIL="round trip ok via $img"; return 0; fi
-    BM_RESULT=failed; BM_DETAIL="the container ran ($img) but the round trip did not match (got '${got:-nothing}')"
-    return 1
+      -v "$dir:/fsg-probe" "$img" -c "read -r v < /fsg-probe/$FSG__PROBE_FILE && echo \"back:\$v\" > /fsg-probe/$FSG__PROBE_FILE" \
+      > "$out" 2>&1; rc=$?
+    got=$(cat "$f" 2>/dev/null)
+    if [ $rc -ne 0 ]; then
+      case $(tr 'A-Z' 'a-z' < "$out" 2>/dev/null) in
+        *"mounts denied"*|*"is not shared"*)
+          BM_RESULT=skipped
+          BM_DETAIL="the probe dir $dir is not shared with Docker Desktop (mounts denied); set FSG_PROBE_DIR to a dir in a folder of its File Sharing list"
+          BM_NOTE="Bind mount check skipped: $BM_DETAIL."
+          break ;;
+      esac
+      BM_RESULT=failed
+      continue
+    fi
+    if [ "$got" = "back:$nonce" ]; then BM_RESULT=ok; BM_DETAIL="round trip ok via $img"
+    else BM_RESULT=failed; BM_DETAIL="the container ran ($img) but the round trip did not match (got '${got:-nothing}')"; fi
+    break
   done <<EOF
 $(fsg_probe_images)
 EOF
+  rm -f "$f" "$out"
+  [ $made = 1 ] && rmdir "$dir" 2>/dev/null
+  [ -n "$BM_NOTE" ] && fsg_log "DOCKER $BM_NOTE"
   if [ -z "$tried" ]; then BM_DETAIL="no local image with /bin/sh (set FSG_PROBE_IMAGE)"; return 0; fi
-  BM_RESULT=failed; BM_DETAIL="no probe container could run (tried:$tried)"
-  return 1
+  [ -n "$BM_DETAIL" ] || BM_DETAIL="no probe container could run (tried:$tried)"
+  [ "$BM_RESULT" != failed ]
 }
 
 # Why Docker is not verified: DK_ERR, the containers not back and, unless NOBIND,

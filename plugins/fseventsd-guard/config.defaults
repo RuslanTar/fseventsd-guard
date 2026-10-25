@@ -92,6 +92,11 @@ FSG_VERIFY_BIND_MOUNT=1
 # Image for the bind-mount probe. Empty = pick a local alpine/busybox/bash image,
 # else the image of a recorded container.
 FSG_PROBE_IMAGE=
+# Host dir for the bind-mount probe (quote a path with spaces). Empty = the state
+# dir's mountprobe when Docker Desktop shares it, else a dir in the first folder
+# under your home in its File Sharing list. A probe dir Docker Desktop does not
+# share skips the check (doctor warns).
+FSG_PROBE_DIR=
 
 # --- Heal ---------------------------------------------------------------------------
 # Seconds to wait for a fresh, healthy fseventsd after the helper returns.

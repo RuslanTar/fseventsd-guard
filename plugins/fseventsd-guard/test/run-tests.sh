@@ -105,8 +105,8 @@ t() { # start a test: t NAME
   unset FSG_HINT CLAUDE_PROJECT_DIR CLAUDE_PLUGIN_ROOT 2>/dev/null
   # Docker Desktop's socket for the guard: the default context's.
   export FSG_DESKTOP_SOCKET="$C/fake/docker/docker.sock"
-  # Its backend socket (absent: gone).
-  export FSG_DESKTOP_BACKEND_SOCKET="$C/fake/docker/backend.sock"
+  # Its backend socket (absent: gone) and settings (absent: default file sharing).
+  export FSG_DESKTOP_BACKEND_SOCKET="$C/fake/docker/backend.sock" FSG_DESKTOP_SETTINGS="$C/fake/docker/settings-store.json"
   # The probe lives where install builds it; a fresh case starts with the stand-in.
   mkdir -p "$FSG_STATE_DIR/bin"; cp "$STUBS/fake-probe" "$FSG_STATE_DIR/bin/fsprobe"
   export FSG_TEST_HELPER_TOOLS="$TOOLS"
@@ -122,8 +122,8 @@ t() { # start a test: t NAME
   agent_env FSG_DRAIN_POLL_S=1 FSG_DRAIN_CAP_S=20 FSG_HEALTHY_TIMEOUT_S=6 FSG_CONTAINER_TIMEOUT_S=6 \
     FSG_DOCKER_TIMEOUT_S=10 FSG_DOCKER_QUERY_TIMEOUT_S=2 FSG_PROBE_TIMEOUT_S=2 FSG_RUN_POLL_S=1 \
     FSG_DETECT_COMMANDS=fsgtestrspec FSG_DETECT_DOCKER_CLI=0 FSG_DETECT_DOCKER_EXECS=1 FSG_DETECT_DOCKER_CONTAINERS=1 \
-    FSG_DESKTOP_SOCKET="$FSG_DESKTOP_SOCKET" FSG_DESKTOP_BACKEND_SOCKET="$FSG_DESKTOP_BACKEND_SOCKET"
-  unset FSG_AFFECTED FSG_AFFECTED_VERSIONS FSG_LEASE_FILE FSG_PROBE_BIN 2>/dev/null
+    FSG_DESKTOP_SOCKET="$FSG_DESKTOP_SOCKET" FSG_DESKTOP_BACKEND_SOCKET="$FSG_DESKTOP_BACKEND_SOCKET" FSG_DESKTOP_SETTINGS="$FSG_DESKTOP_SETTINGS"
+  unset FSG_AFFECTED FSG_AFFECTED_VERSIONS FSG_LEASE_FILE FSG_PROBE_BIN FSG_PROBE_DIR 2>/dev/null
   echo 4242 > "$FSG_FAKE/fsev/pids"
   echo 5000K > "$FSG_FAKE/fsev/4242.mem"
   : > "$FSG_FAKE/calls.log"
@@ -2856,6 +2856,72 @@ if ! skip_case docker-stop; then
   heal --docker-variant B > "$C/o" 2>&1; eq $? 0 "healed ($(tail -n 1 "$C/o"))"
   has "$(cat "$FSG_LOG")" "something else started Docker Desktop during the heal (backend pid 8888; before the stop: 7777)" "logged"
   has "$(grep 'fseventsd healed' "$FSG_FAKE/notifications.log")" "something else started Docker Desktop" "the notice says it"
+fi
+
+# ======================================================================== bind-probe
+if ! skip_case bind-probe; then
+  # probe_dir: BM_SHARED and BM_DIR as fsg_probe_dir picks them, HOME=$C/home.
+  probe_dir() {
+    ( HOME=$C/home; FSG_HOME=$GUARD_HOME; . "$GUARD_HOME/lib/common.sh"; . "$GUARD_HOME/lib/lease.sh"
+      . "$GUARD_HOME/lib/drain.sh"; . "$GUARD_HOME/lib/docker.sh"
+      fsg_init_paths; fsg_load_config; fsg_probe_dir; echo "${BM_SHARED:--} $BM_DIR" )
+  }
+  sharing() { # dirs...: Docker Desktop's File Sharing list
+    local d j=""
+    for d in "$@"; do j="${j:+$j,}\"$d\""; done
+    printf '{"AutoStart":false,"FilesharingDirectories":[%s]}\n' "$j" > "$FSG_DESKTOP_SETTINGS"
+  }
+
+  t "the probe dir follows Docker Desktop's File Sharing list"
+  eq "$(probe_dir)" "- $FSG_STATE_DIR/mountprobe" "no settings file: default sharing, the state dir"
+  echo '{"AutoStart":false}' > "$FSG_DESKTOP_SETTINGS"
+  eq "$(probe_dir)" "- $FSG_STATE_DIR/mountprobe" "no FilesharingDirectories: default sharing"
+  sharing "$C/home"
+  eq "$(probe_dir)" "1 $FSG_STATE_DIR/mountprobe" "the state dir is in a shared folder"
+  mkdir -p "$C/home/.local/share" "$C/home/Projects"
+  sharing /Volumes/elsewhere "$C/home/.local/share" "$C/home/Projects"
+  eq "$(probe_dir)" "1 $C/home/.local/share/.fseventsd-guard-mountprobe" "the first shared folder under home"
+  sharing "$C/home/sta" /Volumes/elsewhere
+  eq "$(probe_dir)" "0 $FSG_STATE_DIR/mountprobe" "whole components only, nothing shared under home: not shared"
+  sharing
+  eq "$(probe_dir)" "0 $FSG_STATE_DIR/mountprobe" "an empty list shares nothing"
+  sharing "$C/home/Projects"
+  eq "$(FSG_PROBE_DIR=$C/home/Projects/p probe_dir)" "1 $C/home/Projects/p" "FSG_PROBE_DIR in a shared folder"
+  eq "$(FSG_PROBE_DIR=$C/other probe_dir)" "0 $C/other" "FSG_PROBE_DIR is kept even when not shared"
+
+  t "a probe dir Docker Desktop does not share skips the bind check, not fails it"
+  docker_default; install_fake; mem 3G
+  touch "$FSG_FAKE/docker/mounts-denied"
+  heal --docker-variant B > "$C/o" 2>&1; eq $? 0 "healed, not restored-partly ($(tail -n 1 "$C/o"))"
+  grep -q '^bind_mount=skipped the probe dir .* is not shared with Docker Desktop (mounts denied)' "$(cat "$FSG_STATE_DIR/last-heal-dir")/result.txt" && ok || bad "recorded as skipped"
+  has "$(grep 'fseventsd healed' "$FSG_FAKE/notifications.log")" "Bind mount check skipped: the probe dir" "the notice says it"
+  absent "$FSG_STATE_DIR/drain/pending" "no hold"; absent "$FSG_STATE_DIR/docker-intent" "verified"
+  eq "$(ls -A "$FSG_STATE_DIR/mountprobe" 2>/dev/null)" "" "the probe left no file"
+  absent "$FSG_STATE_DIR/mountprobe.out" "nor its output"
+
+  t "the probe removes its file when no probe container runs"
+  docker_default; install_fake; mem 3G
+  agent_env FSG_PROBE_IMAGE=nosuch:1
+  heal --docker-variant B > "$C/o" 2>&1; eq $? 8 "no probe container could run"
+  has "$(grep 'heal incomplete' "$FSG_FAKE/notifications.log")" "Docker not fully restored (bind mount: no probe container could run (tried: nosuch:1))" "reason without a leading separator"
+  hasnt "$(cat "$FSG_FAKE/notifications.log")" "(; " "no empty part joined"
+  eq "$(ls -A "$FSG_STATE_DIR/mountprobe" 2>/dev/null)" "" "no file left after a failed run"
+
+  t "the probe removes its file after a broken round trip"
+  docker_default; install_fake; mem 3G
+  touch "$FSG_FAKE/docker/bind-broken"
+  heal --docker-variant B > "$C/o" 2>&1; eq $? 8 "round trip broken"
+  has "$(grep 'heal incomplete' "$FSG_FAKE/notifications.log" | tail -n 1)" "Docker not fully restored (bind mount: the container ran (alpine:3) but the round trip did not match" "reason without a leading separator"
+  eq "$(ls -A "$FSG_STATE_DIR/mountprobe" 2>/dev/null)" "" "no file left after a broken round trip"
+
+  t "doctor warns when Docker Desktop does not share the probe dir"
+  docker_default; install_fake
+  sharing /Volumes/elsewhere
+  "$G" doctor --prefix "$FSG_PREFIX" > "$C/doc.out" 2>/dev/null
+  has "$(cat "$C/doc.out")" "bind-mount probe dir $FSG_STATE_DIR/mountprobe is not in Docker Desktop's File Sharing list" "warned"
+  sharing "$C/home"
+  "$G" doctor --prefix "$FSG_PREFIX" > "$C/doc.out" 2>/dev/null
+  hasnt "$(cat "$C/doc.out")" "File Sharing list" "no warning once shared"
 fi
 
 # ======================================================================== heal-signal

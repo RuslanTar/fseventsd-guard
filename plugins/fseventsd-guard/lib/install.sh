@@ -1359,6 +1359,11 @@ EOF
   else
     fsg_doc warn "delivery probe not built: stalls are not detected (re-run install with the Command Line Tools)"
   fi
+  if [ "$FSG_VERIFY_BIND_MOUNT" = 1 ]; then
+    fsg_probe_dir
+    [ "$BM_SHARED" = 0 ] &&
+      fsg_doc warn "bind-mount probe dir $BM_DIR is not in Docker Desktop's File Sharing list, so heals skip the bind-mount check: set FSG_PROBE_DIR to a dir in a shared folder, or share one in Docker Desktop (Settings > Resources > File sharing)"
+  fi
   if fsg_drain_hold_active; then
     fsg_doc warn "test runs are held: $(fsg__kv "$FSG_PENDING" reason). Recover Docker, then: fseventsd-guard release"
   fi

@@ -339,7 +339,7 @@ fsg_intent_recover() {
   [ -f "$f" ] || return 0
   fsg_intent_owner_alive && return 0
   local HEAL_TRIGGER HEAL_VARIANT DK_KIND DK_STATE DK_IDS DK_NAMES DK_ERR="" DK_FAILED="" BM_RESULT="" BM_DETAIL=""
-  local DK_ENDPOINT DK_EP_WHY="" DK_NOTE="" DK_STOP_DECISION="" DK_FOREIGN=""
+  local DK_ENDPOINT DK_EP_WHY="" DK_NOTE="" DK_STOP_DECISION="" DK_FOREIGN="" BM_NOTE=""
   local opid ran=0 released="" held="" what drc cut_n
   local cap=$FSG_DRAIN_CAP_S
   local RC_DROPPED="" RC_FAILING="" gone_note="" PASS_RAN=0
@@ -454,7 +454,7 @@ fsg__recover_no_marker() { # tick-pid-of-the-heal
 fsg_recover_interrupted() {
   local f=$FSG_DOCKER_INTENT opid HEAL_TRIGGER HEAL_VARIANT DK_KIND DK_STATE DK_IDS DK_NAMES DK_ENDPOINT DK_EP_WHY=""
   local DK_ERR="" DK_FAILED="" BM_RESULT="" BM_DETAIL="" RC_DROPPED="" RC_FAILING="" PASS_RAN=0 DK_NOTE=""
-  local DK_STOP_DECISION="" DK_FOREIGN=""
+  local DK_STOP_DECISION="" DK_FOREIGN="" BM_NOTE=""
   [ "${TICK_RECOVERING:-0}" = 1 ] || return 0
   TICK_RECOVERING=0
   fsg_drain_end
@@ -892,7 +892,7 @@ fsg_heal_run() { # t0 old_pid cap policy
   local t0=$1 old_pid=$2 cap=$3 policy=$4
   HEAL_DK_PRE_DONE=0; HEAL_DK_POST_DONE=0; HEAL_DK_VERIFIED=0; HEAL_DK_HELD=0; HEAL_DK_RESTORE=0; HELPER_RC=
   T_DRAIN=; T_DPRE=; T_RESTART=; T_HEALTHY=; T_DPOST=; T_CONT=; T_VERIFY=; T_AFTER_DRAIN=; DK_FAILED=; DRAIN_CUT=; DK_NOTE=
-  DK_STOP_DECISION=; DK_STOP_RC=; DK_STOP_S=; DK_STOP_WHY=; DK_FOREIGN=
+  DK_STOP_DECISION=; DK_STOP_RC=; DK_STOP_S=; DK_STOP_WHY=; DK_FOREIGN=; BM_NOTE=
   # One tick can run several heals within a second.
   HEAL_DIR="$FSG_STATE_DIR/heals/$(date -u +%Y%m%dT%H%M%SZ)-$$"
   [ -e "$HEAL_DIR" ] && HEAL_DIR="$HEAL_DIR-$RANDOM"
@@ -1070,7 +1070,7 @@ fsg_heal_run() { # t0 old_pid cap policy
   T_AFTER_DRAIN=$((wall - T_DRAIN))
   local dk_note="" nr_note="${DK_EPHEMERAL:+ Not restored (--rm, removed when stopped): $DK_EPHEMERAL.}"
   nr_note="$nr_note${DK_ONEOFF:+ Not restored (one-off, docker compose run: a start would run its command again): $DK_ONEOFF.}${DK_NOTE:+ $DK_NOTE.}"
-  nr_note="$nr_note${DK_FOREIGN:+ Note: $DK_FOREIGN.}"
+  nr_note="$nr_note${DK_FOREIGN:+ Note: $DK_FOREIGN.}${BM_NOTE:+ $BM_NOTE}"
   # A Docker that is not local was never touched nor checked: a hold in place
   # before the heal comes back.
   [ "$DK_STATE" = notlocal ] && dk_note=" Docker step skipped: not a local Docker engine ($DK_EP_WHY); no container was stopped, started or checked."
