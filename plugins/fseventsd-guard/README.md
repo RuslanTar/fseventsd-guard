@@ -692,6 +692,10 @@ None of them lets a non-root user gain root.
   written first, so a hang costs one prompt an hour. An agent installed before the drain marker named its Docker step
   writes none, so until `install` is re-run, the notice for a draining heal lists
   the three steps instead of naming one.
+- **Heal notice costs and keys.** While a heal runs, each Bash call checks the
+  drain's owner (a `ps` and a few reads) before the once-per-phase stamp, as the
+  stamp's name comes from that check. A session id with JSON escapes reads as
+  empty, so such sessions share one notice; Claude Code's ids are UUIDs. Accepted.
 - **Native Windows without Git for Windows.** The hooks need `bash`. Where Claude
   Code finds none, it may show a hook error on each prompt and Bash call before
   the `uname` check runs. Turn the plugin off there with `enabledPlugins` false in
