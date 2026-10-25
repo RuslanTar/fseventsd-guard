@@ -656,8 +656,14 @@ if ! skip_case install; then
   has "$(cat "$C/o")" "pass --yes" "message names --yes"
   hasnt "$(cat "$FSG_FAKE/calls.log")" "sudo" "no sudo call"
   absent "$FSG_STATE_DIR/app" "refused before anything changed"
-  # script(1) gives the guard a terminal; the answer is typed once the pty is up.
-  { sleep 2; printf 'n\n'; } | FSG_HELPER_MIN_MB=300 script -q /dev/null "$G" install --prefix "$FSG_PREFIX" --no-agent > "$C/o" 2>&1
+  # script(1) gives the guard a terminal; answer WORD QUESTION types WORD there once
+  # QUESTION shows in $C/o (cleared first), within 60 s.
+  answer() {
+    local n=300
+    while [ $n -gt 0 ] && ! grep -qF -- "$2" "$C/o" 2>/dev/null; do sleep 0.2; n=$((n - 1)); done
+    printf '%s\n' "$1"
+  }
+  : > "$C/o"; answer n "Run this as root?" | FSG_HELPER_MIN_MB=300 script -q /dev/null "$G" install --prefix "$FSG_PREFIX" --no-agent > "$C/o" 2>&1
   has "$(cat "$C/o")" "Run this as root? [y/N]" "a terminal is asked"
   before "$C/o" "guard tree:" "Run this as root?"
   before "$C/o" "lib/root-steps.sh blob: " "Run this as root?"
@@ -667,7 +673,7 @@ if ! skip_case install; then
   has "$(cat "$C/o")" "not confirmed" "no is a refusal"
   hasnt "$(cat "$FSG_FAKE/calls.log")" "sudo" "no sudo call after no"
   absent "$HP" "no helper after no"
-  { sleep 2; printf 'y\n'; } | script -q /dev/null "$G" install --prefix "$FSG_PREFIX" --no-agent > "$C/o" 2>&1
+  : > "$C/o"; answer y "Run this as root?" | script -q /dev/null "$G" install --prefix "$FSG_PREFIX" --no-agent > "$C/o" 2>&1
   exists "$HP" "yes installs"
   has "$(cat "$FSG_FAKE/calls.log")" "sudo -k /bin/sh -c" "yes runs sudo"
   : > "$FSG_FAKE/calls.log"
@@ -679,7 +685,7 @@ if ! skip_case install; then
   hasnt "$(cat "$FSG_FAKE/calls.log")" "sudo -k" "and no sudo prompt"
   : > "$FSG_FAKE/calls.log"
   "$G" uninstall --prefix "$FSG_PREFIX" < /dev/null > "$C/o" 2>&1; eq $? 1 "uninstall: no terminal and no --yes: refused"
-  { sleep 2; printf 'n\n'; } | script -q /dev/null "$G" uninstall --prefix "$FSG_PREFIX" > "$C/o" 2>&1
+  : > "$C/o"; answer n "remove all of the above?" | script -q /dev/null "$G" uninstall --prefix "$FSG_PREFIX" > "$C/o" 2>&1
   has "$(cat "$C/o")" "Uninstall: remove all of the above? [y/N]" "uninstall asks a terminal once"
   before "$C/o" "uninstall removes:" "remove all of the above?"
   before "$C/o" "root-steps sha256: " "remove all of the above?"
@@ -2104,20 +2110,23 @@ fi
 if ! skip_case drain-scope; then
   t "unleased work holds a drain only up to its own cap"
   docker_default; install_fake; mem 600M
-  mkdir -p "$C/bin"; printf '#!/bin/sh\nsleep "$1"\n' > "$C/bin/fsgtestrspec"; chmod +x "$C/bin/fsgtestrspec"
-  bg "$C/bin/fsgtestrspec" 60; up=$LAST_BG; sleep 1
-  agent_env FSG_UNLEASED_CAP_S=2
+  # A stand-in runner whose sleep ends with it (else it would outlive the case).
+  mkdir -p "$C/bin"; printf '#!/bin/sh\ntrap '"'"'kill $! 2>/dev/null; exit 143'"'"' TERM\nsleep "$1" & wait $!\n' > "$C/bin/fsgtestrspec"; chmod +x "$C/bin/fsgtestrspec"
+  bg "$C/bin/fsgtestrspec" 600; up=$LAST_BG; sleep 1
+  # The drain cap (300 s) far above the unleased cap (2 s): a slow machine stays
+  # well inside the bound below.
+  agent_env FSG_UNLEASED_CAP_S=2 FSG_DRAIN_CAP_S=300
   s=$(date +%s); heal > "$C/o" 2>&1; rc=$?
   eq $rc 4 "a manual heal gives up at the unleased cap"
-  [ $(( $(date +%s) - s )) -lt 12 ] && ok || bad "did not wait for the 20 s drain cap"
+  [ $(( $(date +%s) - s )) -lt 120 ] && ok || bad "did not wait for the 300 s drain cap"
   NL=$FSG_FAKE/notifications.log
-  has "$(cat "$NL")" "Waiting for 1 item(s): sh fsgtestrspec 60 (pid $up" "the healing notice names the blocker"
+  has "$(cat "$NL")" "Waiting for 1 item(s): sh fsgtestrspec 600 (pid $up" "the healing notice names the blocker"
   has "$(cat "$NL")" "Only leased runs (fseventsd-guard run, or an integrated runner) wait" "the healing notice says which runs wait"
-  has "$(cat "$NL")" "still running after 2s: sh fsgtestrspec 60 (pid $up" "the give-up notice names the blocker"
+  has "$(cat "$NL")" "still running after 2s: sh fsgtestrspec 600 (pid $up" "the give-up notice names the blocker"
   mem 3G
-  s=$(date +%s); FSG_UNLEASED_CAP_S=2 "$G" tick > "$C/o" 2>&1; rc=$?
+  s=$(date +%s); FSG_UNLEASED_CAP_S=2 FSG_DRAIN_CAP_S=300 "$G" tick > "$C/o" 2>&1; rc=$?
   eq $rc 0 "an emergency heal proceeds at the unleased cap"
-  [ $(( $(date +%s) - s )) -lt 12 ] && ok || bad "emergency: did not wait for the 20 s drain cap"
+  [ $(( $(date +%s) - s )) -lt 120 ] && ok || bad "emergency: did not wait for the 300 s drain cap"
   has "$(grep 'cutting running work' "$NL")" "(pid $up" "the cut notice names the cut run"
   killbg "$up"
 
@@ -3158,12 +3167,14 @@ if ! skip_case heal-kill; then
 
   t "a tick killed outright after Docker stopped holds runs without the agent until expiry or release"
   docker_default; install_fake; mem 3G
-  echo 6 > "$FSG_FAKE/sudo-delay"; echo 0 > "$FSG_FAKE/sudo-rc"
+  # The restart stays in flight until the tick is killed, however slow the machine.
+  echo 600 > "$FSG_FAKE/sudo-delay"; echo 0 > "$FSG_FAKE/sudo-rc"
   "$G" heal --docker-variant A > "$C/heal.out" 2>&1 & hp=$!; BG_PIDS="$BG_PIDS $hp"
-  waitfor 20 grep -qs '^phase=restarting' "$FSG_STATE_DIR/drain/pending" || bad "the heal reached the restart"
+  waitfor 60 grep -qs '^phase=restarting' "$FSG_STATE_DIR/drain/pending" || bad "the heal reached the restart"
   # No tick runs from here on: the dead tick wrote no hold and nothing recovers.
   touch "$FSG_FAKE/kickstart-off"
-  ap=$(agent_pid); kill -KILL "$ap"; agent_wait
+  # The tick leads its own process group (stubs/launchctl): the restart goes with it.
+  ap=$(agent_pid); kill -KILL -- "-$ap"; agent_wait
   rm -f "$FSG_FAKE/sudo-delay"; mem 5000K
   eq "$(awk '$3 == "running"' "$FSG_FAKE/docker/containers")" "" "Docker's containers left stopped"
   hasnt "$(cat "$FSG_STATE_DIR/drain/pending" 2>/dev/null)" "hold_until_epoch=" "no hold written"
