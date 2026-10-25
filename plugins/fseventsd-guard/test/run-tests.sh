@@ -681,6 +681,13 @@ if ! skip_case install; then
   tu=$(sed -n 's/^TRIAL_UNTIL=//p' "$FSG_PREFIX/usr/local/libexec/fseventsd-guard-restart")
   [ "$tu" -gt "$(date +%s)" ] && ok || bad "TRIAL_UNTIL in the future ($tu)"
   has "$("$G" doctor --prefix "$FSG_PREFIX")" "trial window open" "doctor shows the window"
+  out=$("$G" status 2>&1)
+  has "$out" "helper: trial window open until" "status shows the window"
+  hasnt "$out" "root code changed" "status from the checkout: a trial window is no root code change"
+  HP="$FSG_PREFIX/usr/local/libexec/fseventsd-guard-restart"
+  sed "s/^TRIAL_UNTIL=.*/TRIAL_UNTIL=$(( $(date +%s) - 3600 ))/" "$HP" > "$C/h" && cat "$C/h" > "$HP"
+  hasnt "$("$G" status 2>&1)" "root code changed" "nor once the window has ended"
+  hasnt "$("$G" doctor --prefix "$FSG_PREFIX")" "helper differs" "as doctor says"
   "$G" uninstall --yes --prefix "$FSG_PREFIX" --keep-logs >/dev/null 2>&1; eq $? 0 "uninstall --keep-logs"
   exists "$FSG_PREFIX/Library/Logs/fseventsd-guard" "root log dir kept"
   absent "$FSG_PREFIX/usr/local/libexec/fseventsd-guard-restart" "helper removed"

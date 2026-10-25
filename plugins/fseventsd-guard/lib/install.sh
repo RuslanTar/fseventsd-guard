@@ -179,12 +179,15 @@ fsg_app_sum() { # dir
 # it would change, the root code (sudo) or only the app copy (no sudo). Nothing when
 # both match, or when the guard is not installed.
 fsg_status_install_text() {
-  local app="$FSG_STATE_DIR/app" a h
+  local app="$FSG_STATE_DIR/app" a h tu
   [ -x "$app/fseventsd-guard" ] || return 0
   a=$(cd -P "$app" 2>/dev/null && pwd -P); h=$(cd -P "$FSG_HOME" 2>/dev/null && pwd -P)
   [ "$a" != "$h" ] || return 0
   fsg_where
-  fsg_root_stale 0 1
+  # A trial window install opened is no change of root code.
+  tu=$(fsg_helper_setting TRIAL_UNTIL)
+  fsg_is_uint "$tu" || tu=0
+  fsg_root_stale 0 1 "$tu"
   if [ -n "$FSG_ROOT_STALE" ]; then
     echo "install: root code changed ($(printf '%s\n' "$FSG_ROOT_STALE" | head -n 1)): $FSG_REDO_HERE; it asks for sudo"
   elif [ "$(fsg_app_sum "$app")" != "$(fsg_app_sum "$FSG_HOME")" ]; then
@@ -383,9 +386,10 @@ fsg_root_text() {
 # files in place are the ones it would place now (from the gate's texts, else this
 # checkout's) and doctor passes them. The drop-in is root-only (0440), so its rule is
 # proved with sudo -n -l, as doctor does. CONTENT=1 compares the texts only (status).
-# Sets FSG_ROOT_STALE.
-fsg_root_stale() { # trial_until [content]
-  local tu=$1 content=${2:-0} want_uid=0 r="" tmp
+# COMPARE_TRIAL_UNTIL renders the helper compared with that trial window (status
+# passes the installed one, as doctor does). Sets FSG_ROOT_STALE.
+fsg_root_stale() { # trial_until [content [compare_trial_until]]
+  local tu=$1 content=${2:-0} ctu=${3:-0} want_uid=0 r="" tmp
   FSG_ROOT_STALE=
   [ -n "$FSG_PREFIX" ] && want_uid=$(id -u)
   if [ ! -e "$FSG_HELPER_PATH" ] && [ ! -e "$FSG_SUDOERS_FILE" ]; then
@@ -399,7 +403,7 @@ the helper $FSG_HELPER_PATH is missing or not a regular file"
     if [ "$tu" != 0 ]; then
       r="$r
 --trial-hours opens a trial window in the helper"
-    elif ! ( fsg_render_helper "$tmp" 0 ) 2>/dev/null; then
+    elif ! ( fsg_render_helper "$tmp" "$ctu" ) 2>/dev/null; then
       r="$r
 this config cannot be rendered into a helper"
     elif ! cmp -s "$tmp" "$FSG_HELPER_PATH"; then
