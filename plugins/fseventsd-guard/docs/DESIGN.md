@@ -210,10 +210,17 @@ scripts can source it. The root helper is `/bin/sh` with absolute tool paths.
 | wave boundary | workflow calls `status` → 1 or 2 | `heal --trigger wave`: a request the agent runs (cap policy abort) | n/a | preferred tier |
 | wave back-off | a wave heal gave up at the drain cap < 60 min ago | wave heals exit 11 without draining | 60 min | a never-free machine would otherwise get an hour-long hold at every wave boundary; whether a warn alone should drain at all is an open question (§12) |
 | emergency | footprint ≥ `FSG_ACT_MB`, or a **confirmed** stalled probe | the tick's own emergency heal (cap policy proceed) | 2 GB | well above warn, before the machine suffers |
+| CPU escalator | footprint ≥ `FSG_WARN_MB` and fseventsd at ≥ `FSG_CPU_ESCALATE_PCT` of one core for `FSG_CPU_ESCALATE_TICKS` ticks in a row | counts as runaway, so as emergency above; `status` says runaway too (a wave boundary drains with the full cap) | 50%, 3 ticks | a runaway pins a core: 1.2 GB at 100% CPU ([claude-code#96008](https://github.com/anthropics/claude-code/issues/96008)) sat between warn and act. macOS's own CPU report fires at 50% over 180 s ([talkstream/fseventsd-runaway@78396ba](https://github.com/talkstream/fseventsd-runaway/tree/78396ba)) |
 | emergency interval | last guard restart, last heal attempt that reached the Docker step (or an emergency heal refused there, exit 14), or the helper's root stamp < 3 h ago | notify only | 10800 s | the original requirements: "at most once per ~3 h", "no restart loops". Counted from the newest of the three, so a wave heal plus an emergency heal cannot loop, and neither can a helper that keeps failing after Docker was stopped, nor a drain repeated every tick for a `--rm` container that keeps running (§6) |
 | helper floor | helper refuses below | n/a | 150 MB | above healthy (≤ 90 MB), below warn |
 | helper interval | helper refuses within | n/a | 1800 s | hard backstop under every tier |
 | emergency ceiling | footprint ≥ `FSG_EMERGENCY_CUT_MB` during an emergency drain | stop waiting, proceed | 8 GB | the daemon reached 17 GB on a 96%-full disk; waiting 60 min more risks the machine |
+
+The CPU share is the CPU time fseventsd used since the previous tick divided by the
+wall time between the two (`ps -o time`, kept in `tick-sample` in the state dir), an
+exact average over the 5 minutes rather than the decayed `ps -o %cpu`. A new pid
+starts over, so a restart resets the count. `status` honours the agent's count
+only for the same pid and a record younger than two agent intervals.
 
 A stall counts only if a second probe, run right away, also stalls. At load
 average 100-300 one slow probe is not evidence. All values are config knobs, to be
@@ -912,8 +919,9 @@ physical footprint, the figure Apple's budget refers to), bounded by
 (`ports`) from that sample and the swap in use (`swap_used_mb`, from `sysctl
 vm.swapusage`); they are logged only. Ports tell many live clients apart from
 internal state, and swap shows what the runaway costs the machine. CPU is
-`ps -o %cpu`, a decayed average; one `top` sample cannot give CPU. Uptime is
-`ps -o etime`. No root needed.
+`ps -o %cpu`, a decayed average; one `top` sample cannot give CPU. The tick also
+logs `cpu_avg_pct`, the share of one core since the previous tick, and
+`cpu_streak` (§4). Uptime is `ps -o etime`. No root needed.
 
 ## 9. Affected versions
 

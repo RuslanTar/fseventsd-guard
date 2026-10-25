@@ -1329,10 +1329,12 @@ fsg_tick_check() {
       [ "$P_RESULT" = stalled ] || fsg_log "TICK probe stalled once, then $P_RESULT (not counted)"
     fi
   fi
+  fsg_tick_sample
   fsg_classify 0
   TICK_LEVEL=$S_LEVEL
-  fsg_log "TICK level=$S_LEVEL pid=$M_PID mb=$M_MB cmprs_mb=${M_CMPRS_MB:-} ports=${M_PORTS:-} cpu=${M_CPU:-} up_s=${M_UP:-} swap_used_mb=$(fsg_parse_swap_mb "$(sysctl -n vm.swapusage 2>/dev/null)") probe=${P_RESULT:-skipped}${P_LATENCY_MS:+/${P_LATENCY_MS}ms}${P_START_MS:+ start_ms=$P_START_MS}"
+  fsg_log "TICK level=$S_LEVEL pid=$M_PID mb=$M_MB cmprs_mb=${M_CMPRS_MB:-} ports=${M_PORTS:-} cpu=${M_CPU:-} cpu_avg_pct=${T_CPU_PCT:-} cpu_streak=$T_CPU_STREAK up_s=${M_UP:-} swap_used_mb=$(fsg_parse_swap_mb "$(sysctl -n vm.swapusage 2>/dev/null)") probe=${P_RESULT:-skipped}${P_LATENCY_MS:+/${P_LATENCY_MS}ms}${P_START_MS:+ start_ms=$P_START_MS}"
   [ "$S_LEVEL" = ok ] && return 0
+  [ -n "$C_STREAK" ] && fsg_log "TICK runaway by the cpu escalator: ${C_PCT}% of a core for $C_STREAK ticks at $M_MB MB"
 
   local now last_t=0 last_mb=0 renotify=0
   now=$(fsg_now)

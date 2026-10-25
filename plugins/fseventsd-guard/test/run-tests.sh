@@ -3699,6 +3699,55 @@ if ! skip_case tick; then
   line=$(grep ' TICK level=' "$FSG_LOG" | tail -n 1)
   has "$line" "ports= cpu=" "empty ports"; has "$line" "swap_used_mb= " "empty swap"
 
+  # cpu_step PCT: the last tick's record moves 300 s back and fseventsd uses PCT% of
+  # a core over that gap.
+  cpu_step() {
+    local f="$FSG_STATE_DIR/tick-sample" e c ms
+    e=$(sed -n 's/^epoch=//p' "$f"); c=$(sed -n 's/^cpu_ms=//p' "$f")
+    sed "s/^epoch=.*/epoch=$((e - 300))/" "$f" > "$f.t" && mv "$f.t" "$f"
+    ms=$((c + $1 * 3000))
+    printf '%d:%02d.%02d\n' $((ms / 60000)) $((ms % 60000 / 1000)) $((ms % 1000 / 10)) > "$FSG_FAKE/fsev/$(head -n 1 "$FSG_FAKE/fsev/pids").time"
+  }
+
+  t "tick cpu escalator: warn plus a pinned core for 3 ticks heals"
+  docker_default; install_fake --no-agent; mem 600M
+  "$G" tick; eq $? 1 "first tick: warn, no CPU share yet"
+  has "$(grep ' TICK level=' "$FSG_LOG" | tail -n 1)" "cpu_avg_pct= cpu_streak=0" "no share without an earlier tick"
+  cpu_step 60; "$G" tick; eq $? 1 "1 tick at 60%: warn"
+  has "$(grep ' TICK level=' "$FSG_LOG" | tail -n 1)" "cpu_streak=1" "streak 1"
+  cpu_step 60; "$G" tick; eq $? 1 "2 ticks: warn"
+  "$G" status >/dev/null; eq $? 1 "status: warn at 2 ticks"
+  cpu_step 60; : > "$FSG_FAKE/calls.log"; "$G" tick >/dev/null 2>&1; eq $? 0 "3 ticks: runaway, emergency heal"
+  line=$(grep ' TICK level=' "$FSG_LOG" | tail -n 1)
+  has "$line" "level=runaway" "level"; has "$line" "cpu_streak=3" "streak 3"
+  case $line in *cpu_avg_pct=59*|*cpu_avg_pct=60*) ok ;; *) bad "share from the CPU time between ticks: $line" ;; esac
+  has "$(cat "$FSG_LOG")" "TICK runaway by the cpu escalator" "logged"
+  has "$(cat "$FSG_FAKE/calls.log")" "sudo -n /" "restart happened"
+  has "$(cat "$FSG_STATE_DIR/last-heal")" "healed emergency" "the act threshold's path"
+
+  t "tick cpu escalator: a quiet tick, a small footprint or a new pid start over"
+  docker_default; install_fake --no-agent; mem 600M
+  "$G" tick; cpu_step 60; "$G" tick; cpu_step 60; "$G" tick
+  cpu_step 10; "$G" tick; eq $? 1 "a quiet tick"
+  has "$(grep ' TICK level=' "$FSG_LOG" | tail -n 1)" "cpu_streak=0" "streak reset"
+  cpu_step 60; "$G" tick; cpu_step 60; "$G" tick; eq $? 1 "2 more ticks: warn"
+  mem 300M; cpu_step 90; "$G" tick; eq $? 0 "below warn: ok"
+  has "$(grep ' TICK level=' "$FSG_LOG" | tail -n 1)" "cpu_streak=0" "below warn does not count"
+  mem 600M; cpu_step 60; "$G" tick; cpu_step 60; "$G" tick
+  echo 4300 > "$FSG_FAKE/fsev/pids"; echo 600M > "$FSG_FAKE/fsev/4300.mem"; echo 9:00.00 > "$FSG_FAKE/fsev/4300.time"
+  "$G" tick; eq $? 1 "a new pid: warn"
+  has "$(grep ' TICK level=' "$FSG_LOG" | tail -n 1)" "cpu_avg_pct= cpu_streak=0" "no share across pids"
+  printf 'epoch=%s\npid=4300\ncpu_ms=1\ncpu_pct=97\nstreak=3\n' "$(date +%s)" > "$FSG_STATE_DIR/tick-sample"
+  out=$("$G" status --json); eq $? 2 "status: the agent's streak counts"
+  has "$(jget "$out" 'd["reasons"][0]')" "cpu 97% of a core for 3 ticks in a row" "reason"
+  FSG_CPU_ESCALATE_PCT=0 "$G" status >/dev/null; eq $? 1 "0 turns it off"
+  FSG_CPU_ESCALATE_TICKS=4 "$G" status >/dev/null; eq $? 1 "4 ticks needed"
+  mem 300M; "$G" status >/dev/null; eq $? 0 "below warn: ok"
+  mem 600M; printf 'epoch=%s\npid=4300\ncpu_ms=1\ncpu_pct=97\nstreak=3\n' $(( $(date +%s) - 700 )) > "$FSG_STATE_DIR/tick-sample"
+  "$G" status >/dev/null; eq $? 1 "a record older than two intervals does not count"
+  printf 'epoch=%s\npid=4242\ncpu_ms=1\ncpu_pct=97\nstreak=3\n' "$(date +%s)" > "$FSG_STATE_DIR/tick-sample"
+  "$G" status >/dev/null; eq $? 1 "another pid's record does not count"
+
   t "tick stall confirmation"
   docker_default; install_fake --no-agent
   printf 'stalled\nok\n' > "$FSG_FAKE/probe-seq"; "$G" tick; eq $? 0 "one slow probe is not a stall"

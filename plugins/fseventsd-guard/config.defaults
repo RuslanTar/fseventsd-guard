@@ -20,6 +20,12 @@ FSG_BUDGET_MB=30
 FSG_WARN_MB=500
 # Emergency tier: the background agent heals (through the drain).
 FSG_ACT_MB=2048
+# CPU escalator: a footprint at or above warn with fseventsd at or above this share
+# of one core (percent, from the CPU time it used between two ticks) for
+# FSG_CPU_ESCALATE_TICKS ticks in a row counts as runaway, like the act threshold
+# (0 = off). A runaway pins a core; a healthy daemon does not.
+FSG_CPU_ESCALATE_PCT=50
+FSG_CPU_ESCALATE_TICKS=3
 # Seconds one `top` sample may take (it takes 1-2 s); a slower one counts as cannot
 # measure.
 FSG_TOP_TIMEOUT_S=15

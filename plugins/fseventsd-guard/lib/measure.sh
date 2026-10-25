@@ -10,6 +10,17 @@ fsg_etime_s() {
     else print "" }'
 }
 
+# ps time ([dd-][hh:]mm:ss.cc, cumulative CPU time) -> whole milliseconds.
+fsg_cputime_ms() {
+  echo "$1" | tr -d ' ' | awk '{
+    d = 0; s = $0; i = index(s, "-")
+    if (i) { d = substr(s, 1, i - 1); s = substr(s, i + 1) }
+    if (s == "" || d !~ /^[0-9]+$/) exit 1
+    n = split(s, f, ":"); t = 0
+    for (k = 1; k <= n; k++) { if (f[k] !~ /^[0-9]+(\.[0-9]+)?$/) exit 1; t = t * 60 + f[k] }
+    printf "%d\n", (d * 86400 + t) * 1000 }'
+}
+
 # top's MEM column (5504K, 612M, 17G, 1.5G, with an optional +/- trend) -> whole MB.
 fsg_parse_mem_mb() {
   echo "$1" | awk '{ v = $1; sub(/[+-]$/, "", v); u = substr(v, length(v), 1); n = substr(v, 1, length(v) - 1)
@@ -26,11 +37,12 @@ fsg_parse_swap_mb() {
   fsg_parse_mem_mb "$(printf '%s\n' "$1" | awk '{ for (i = 1; i < NF - 1; i++) if ($i == "used" && $(i + 1) == "=") { print $(i + 2); exit } }')"
 }
 
-# Measures fseventsd. Sets M_PID M_MB M_CPU M_UP M_ERR, and M_CMPRS_MB (compressed
-# memory) and M_PORTS (Mach ports), which are logged only. Returns 0, or 3 when it
-# cannot measure (M_ERR says why).
+# Measures fseventsd. Sets M_PID M_MB M_CPU M_UP M_ERR, M_CPU_MS (its CPU time so
+# far, for fsg_tick_sample), and M_CMPRS_MB (compressed memory) and M_PORTS (Mach
+# ports), which are logged only. Returns 0, or 3 when it cannot measure (M_ERR says
+# why).
 fsg_measure() {
-  M_PID=; M_MB=; M_CPU=; M_UP=; M_ERR=; M_CMPRS_MB=; M_PORTS=
+  M_PID=; M_MB=; M_CPU=; M_UP=; M_ERR=; M_CMPRS_MB=; M_PORTS=; M_CPU_MS=
   if [ "$(uname -s)" != Darwin ]; then M_ERR="not macOS"; return 3; fi
   local pids n raw row
   # Root-owned only: any user can start a process named fseventsd, and two
@@ -50,7 +62,45 @@ fsg_measure() {
   M_PORTS=$(printf '%s\n' "$row" | awk '{ v = $4; sub(/[+-]$/, "", v); if (v ~ /^[0-9]+$/) print v }')
   M_CPU=$(ps -o %cpu= -p "$M_PID" 2>/dev/null | tr -d ' ')
   M_UP=$(fsg_etime_s "$(ps -o etime= -p "$M_PID" 2>/dev/null)")
+  M_CPU_MS=$(fsg_cputime_ms "$(ps -o time= -p "$M_PID" 2>/dev/null)") || M_CPU_MS=
   return 0
+}
+
+# The agent's record between ticks (docs/DESIGN.md §4), in $FSG_STATE_DIR/tick-sample:
+# fseventsd's share of one core from the CPU time it used since the last tick (an
+# exact average, unlike the decayed ps %cpu) and how many ticks in a row found it at
+# or above FSG_CPU_ESCALATE_PCT with the footprint at or above warn. A new pid starts
+# over. Sets T_CPU_PCT (empty when unknown) and T_CPU_STREAK.
+fsg_tick_sample() {
+  local f="$FSG_STATE_DIR/tick-sample" now pe pc pst
+  T_CPU_PCT=; T_CPU_STREAK=0
+  now=$(fsg_now)
+  pe=$(fsg__kv "$f" epoch); pc=$(fsg__kv "$f" cpu_ms); pst=$(fsg__kv "$f" streak)
+  if [ "$(fsg__kv "$f" pid)" = "$M_PID" ] && fsg_is_uint "$pe" && [ "$now" -gt "$pe" ] &&
+     fsg_is_uint "$pc" && fsg_is_uint "$M_CPU_MS" && [ "$M_CPU_MS" -ge "$pc" ]; then
+    T_CPU_PCT=$(( (M_CPU_MS - pc) / ((now - pe) * 10) ))
+  fi
+  fsg_is_uint "$pst" || pst=0
+  if [ -n "$T_CPU_PCT" ] && [ "$FSG_CPU_ESCALATE_PCT" -gt 0 ] && [ "$T_CPU_PCT" -ge "$FSG_CPU_ESCALATE_PCT" ] &&
+     [ "$M_MB" -ge "$FSG_WARN_MB" ]; then
+    T_CPU_STREAK=$((pst + 1))
+  fi
+  mkdir -p "$FSG_STATE_DIR" 2>/dev/null
+  printf 'epoch=%s\npid=%s\ncpu_ms=%s\ncpu_pct=%s\nstreak=%s\n' "$now" "$M_PID" "$M_CPU_MS" "$T_CPU_PCT" "$T_CPU_STREAK" \
+    > "$f.new.$$" 2>/dev/null && mv -f "$f.new.$$" "$f" 2>/dev/null
+}
+
+# 0 when the agent's last FSG_CPU_ESCALATE_TICKS ticks in a row found this fseventsd
+# at or above warn and FSG_CPU_ESCALATE_PCT of a core. Sets C_PCT and C_STREAK. A
+# record older than two agent intervals does not count.
+fsg_cpu_escalated() {
+  local f="$FSG_STATE_DIR/tick-sample" e
+  C_PCT=; C_STREAK=
+  [ "$FSG_CPU_ESCALATE_PCT" -gt 0 ] && [ -f "$f" ] && [ "$(fsg__kv "$f" pid)" = "$M_PID" ] || return 1
+  e=$(fsg__kv "$f" epoch)
+  fsg_is_uint "$e" && [ $(( $(fsg_now) - e )) -le $((2 * FSG_AGENT_INTERVAL_S)) ] || return 1
+  C_PCT=$(fsg__kv "$f" cpu_pct); C_STREAK=$(fsg__kv "$f" streak)
+  fsg_is_uint "$C_STREAK" && [ "$C_STREAK" -gt 0 ] && [ "$C_STREAK" -ge "$FSG_CPU_ESCALATE_TICKS" ]
 }
 
 # Runs the delivery probe once. Sets P_RESULT (ok|stalled|error|unavailable),
@@ -80,13 +130,19 @@ fsg_probe() {
 # and S_REASONS (one per line).
 fsg_classify() {
   local mrc=$1
-  S_REASONS=
+  S_REASONS=; C_STREAK=
   if [ "$mrc" -ne 0 ]; then S_LEVEL=unknown; S_EXIT=3; S_REASONS=$M_ERR; return; fi
   S_LEVEL=ok; S_EXIT=0
   if [ "$M_MB" -ge "$FSG_ACT_MB" ]; then
     S_LEVEL=runaway; S_EXIT=2; S_REASONS="footprint $M_MB MB >= act threshold $FSG_ACT_MB MB"
   elif [ "$M_MB" -ge "$FSG_WARN_MB" ]; then
     S_LEVEL=warn; S_EXIT=1; S_REASONS="footprint $M_MB MB >= warn threshold $FSG_WARN_MB MB"
+    if fsg_cpu_escalated; then
+      S_LEVEL=runaway; S_EXIT=2
+      S_REASONS="$S_REASONS, and cpu ${C_PCT}% of a core for $C_STREAK ticks in a row (>= $FSG_CPU_ESCALATE_PCT% for $FSG_CPU_ESCALATE_TICKS ticks counts as runaway)"
+    else
+      C_STREAK=
+    fi
   fi
   if [ "${P_RESULT:-}" = stalled ]; then
     S_LEVEL=runaway; S_EXIT=2
