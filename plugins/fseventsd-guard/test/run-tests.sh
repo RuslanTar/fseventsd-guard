@@ -4763,6 +4763,30 @@ if ! skip_case claude-hook-wrapper; then
   eq "$(wrap prompt UserPromptSubmit 2>&1)" "rc=0" "a failing guard: exit 0, nothing printed"
   absent "$FSG_HINT_DIR" "nothing measured in any of these"
 
+  t "the hooks honour FSG_HINT from Claude Code's environment (a settings file's env)"
+  # Claude Code exports a settings file's env to its hook processes: here, the
+  # hooks.json command run with FSG_HINT in its environment.
+  # envrun MODE-EVENT VALUE: that command for EVENT, as Claude Code runs it.
+  envrun() {
+    local cmd
+    cmd=$(/usr/bin/python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["hooks"][sys.argv[2]][0]["hooks"][0]["command"])' "$GUARD_HOME/hooks/hooks.json" "$1")
+    printf '{"session_id":"e%s","hook_event_name":"%s","tool_name":"Bash"}' "$2" "$1" |
+      env FSG_HINT="$2" CLAUDE_PLUGIN_ROOT="$GUARD_HOME" bash -c "$cmd" 2>&1; echo "rc=$?"
+  }
+  mem 3G
+  for v in 0 no NO off Off false FALSE; do
+    eq "$(envrun UserPromptSubmit "$v")" "rc=0" "FSG_HINT=$v: no nudge"
+  done
+  absent "$FSG_HINT_DIR" "nothing measured"
+  has "$(envrun UserPromptSubmit 1)" "fseventsd is running away" "FSG_HINT=1: the nudge"
+  app_copy; bg sleep 120; own=$LAST_BG; heal_state restarting B "$own"
+  for v in 0 no off False; do
+    eq "$(envrun PreToolUse "$v")" "rc=0" "FSG_HINT=$v: no heal notice"
+  done
+  absent "$TMPDIR/fseventsd-guard-hook" "no heal notice stamped"
+  has "$(envrun PostToolUse yes)" "is in its Docker step" "FSG_HINT=yes: the heal notice"
+  killbg "$own"
+
   t "the hook wrapper reads all of its stdin on every path"
   # bigwrap MODE [ARGS]: a PostToolUse JSON larger than a pipe holds, written into the
   # wrapper; prints the writer's and the wrapper's exit codes (141: SIGPIPE).
