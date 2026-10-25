@@ -11,7 +11,7 @@
 # and fails `doctor`.
 #
 # The plugin's hooks read this file from their own copy, which Claude Code refreshes
-# only on a version bump ("Updates" in the repo README).
+# from main when it updates the plugin ("Updates" in the repo README).
 
 # --- Thresholds (MB of physical footprint, as top's MEM column reports it) ---------
 # Apple's own launchd memory budget for fseventsd. Reported only.

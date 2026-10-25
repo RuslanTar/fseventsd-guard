@@ -125,19 +125,16 @@ instead: turn the plugin off there with that line.
 
 ### Updates
 
-Claude Code updates the plugin only when the `version` in
-`plugins/fseventsd-guard/.claude-plugin/plugin.json` changes, so a release is a
-version bump, not every commit. That version always equals `FSG_VERSION` in
-`lib/common.sh` (a test checks it), and the marketplace entry sets none. Bump both
-whenever anything the hooks read changes: `hooks/`, the `fseventsd-guard` script,
-`config.defaults` (thresholds and the affected range) or a library the hooks
-load (`lib/hint.sh`, `lib/common.sh`, `lib/lease.sh`, `lib/measure.sh`). A change
-pushed without a bump never reaches users.
+Neither `plugins/fseventsd-guard/.claude-plugin/plugin.json` nor the marketplace
+entry sets a `version` (a test checks it), so Claude Code versions the plugin by the
+commit it was installed from. Merging to `main` is the release for the hooks: every
+merge reaches users at their next update. `FSG_VERSION` in `lib/common.sh` names the
+guard's own version (the app copy and its state), not the plugin's.
 
 The team settings above turn auto-update on. A personal install does not update
 by itself, as Claude Code leaves auto-update off for marketplaces it does not
-ship: turn it on for `fseventsd-guard` in `/plugin` > Marketplaces, or pull a
-release with `/plugin marketplace update fseventsd-guard`.
+ship: turn it on for `fseventsd-guard` in `/plugin` > Marketplaces, or pull the
+latest `main` with `/plugin marketplace update fseventsd-guard`.
 
 A plugin update changes only the hooks under `~/.claude/plugins`. The root helper
 (`/usr/local/libexec/fseventsd-guard-restart`), the root-steps copy, the sudoers

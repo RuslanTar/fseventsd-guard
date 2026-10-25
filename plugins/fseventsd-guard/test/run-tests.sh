@@ -4709,9 +4709,9 @@ if ! skip_case claude-hook-wrapper; then
   for f in "$GUARD_HOME/hooks/hooks.json" "$GUARD_HOME/.claude-plugin/plugin.json" "$MKT"; do
     /usr/bin/plutil -convert json -o /dev/null "$f" 2>/dev/null && ok || bad "not JSON: $f"
   done
-  out=$(/usr/bin/python3 - "$GUARD_HOME" "$MKT" "$(sed -n 's/^FSG_VERSION=//p' "$GUARD_HOME/lib/common.sh")" <<'PY'
+  out=$(/usr/bin/python3 - "$GUARD_HOME" "$MKT" <<'PY'
 import json, os, sys
-root, mkt, version = sys.argv[1:]
+root, mkt = sys.argv[1:]
 want = {"UserPromptSubmit": (None, "prompt"), "PreToolUse": ("Bash", "bash"), "PostToolUse": ("Bash", "bash")}
 hooks = json.load(open(os.path.join(root, "hooks/hooks.json")))["hooks"]
 if sorted(hooks) != sorted(want):
@@ -4729,10 +4729,13 @@ for ev, (matcher, mode) in want.items():
     if not (os.path.isfile(path) and os.access(path, os.X_OK)):
         print("%s: %s is not an executable file" % (ev, path))
 p = json.load(open(os.path.join(root, ".claude-plugin/plugin.json")))
-for k, v in (("name", "fseventsd-guard"), ("version", version), ("license", "MIT"),
+for k, v in (("name", "fseventsd-guard"), ("license", "MIT"),
              ("repository", "https://github.com/RuslanTar/fseventsd-guard")):
     if p.get(k) != v:
         print("plugin.json %s: %r, want %r" % (k, p.get(k), v))
+# No version anywhere: Claude Code then versions the plugin by the commit of main.
+if "version" in p:
+    print("plugin.json has a version: users would stay on it until it is bumped")
 m = json.load(open(mkt))
 if m.get("name") != "fseventsd-guard":
     print("marketplace name: %r" % m.get("name"))
@@ -4740,7 +4743,7 @@ es = [e for e in m.get("plugins", []) if e.get("name") == "fseventsd-guard"]
 if len(es) != 1 or es[0].get("source") != "./plugins/fseventsd-guard":
     print("marketplace entry: %r" % es)
 elif "version" in es[0]:
-    print("marketplace entry has a version: plugin.json alone sets it")
+    print("marketplace entry has a version: users would stay on it until it is bumped")
 elif not os.path.isfile(os.path.join(os.path.dirname(os.path.dirname(mkt)), "plugins/fseventsd-guard/.claude-plugin/plugin.json")):
     print("marketplace entry source has no plugin.json")
 PY
