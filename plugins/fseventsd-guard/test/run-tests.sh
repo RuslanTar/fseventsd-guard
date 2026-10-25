@@ -13,8 +13,37 @@ HERE=$(cd -P "$(dirname "$0")" && pwd)
 GUARD_HOME=$(cd -P "$HERE/.." && pwd)
 FILTER=${1:-}
 
+# Dirs of earlier runs killed outright (SIGKILL skips the trap below): only those
+# with this suite's owner file, and only once the run it names is gone.
+for d in "${TMPDIR:-/tmp}"/fsg-test.*; do
+  [ -f "$d/.owner" ] || continue
+  p=$(cat "$d/.owner" 2>/dev/null)
+  case $p in ''|*[!0-9]*) continue ;; esac
+  kill -0 "$p" 2>/dev/null || rm -rf "$d"
+done
 ROOT=$(mktemp -d "${TMPDIR:-/tmp}/fsg-test.XXXXXX") || exit 1
 ROOT=$(cd -P "$ROOT" && pwd)
+echo $$ > "$ROOT/.owner"
+BG_PIDS=""; INTERRUPTED=0
+cleanup() {
+  local p
+  if [ "$INTERRUPTED" = 0 ]; then
+    command -v agent_stop >/dev/null && agent_stop
+    for p in $BG_PIDS; do kill "$p" 2>/dev/null; done
+    wait 2>/dev/null
+  else
+    # No graceful waits (timeout -k allows 30 s). Agent ticks run in sessions of
+    # their own (stubs/launchctl), out of reach of a signal to this process group:
+    # each one of this run that still runs goes, with its children.
+    for p in $(cat "$ROOT"/case-*/fake/agent-ticks 2>/dev/null); do
+      /bin/ps -o command= -p "$p" 2>/dev/null | grep -qF "$ROOT/" && kill -KILL -- "-$p" 2>/dev/null
+    done
+    for p in $BG_PIDS; do kill -KILL "$p" 2>/dev/null; done
+  fi
+  rm -rf "$ROOT"
+}
+trap cleanup EXIT
+trap 'INTERRUPTED=1; exit 130' INT TERM HUP
 mkdir -p "$ROOT/tools"
 cp -R "$HERE/stubs" "$HERE/helper-tools" "$HERE/fixtures" "$ROOT/tools/"
 STUBS=$ROOT/tools/stubs
@@ -23,17 +52,6 @@ STUBS=$ROOT/tools/stubs
 mksock() { /usr/bin/perl -MIO::Socket::UNIX -e 'IO::Socket::UNIX->new(Type => SOCK_STREAM(), Local => $ARGV[0], Listen => 1) or die "socket $ARGV[0]: $!\n"' "$1"; }
 mksock "$ROOT/tools/docker.sock" && mksock "$ROOT/tools/other.sock" || { echo "SETUP: cannot create the fake engine sockets" >&2; exit 2; }
 TOOLS=$ROOT/tools/helper-tools
-BG_PIDS=""
-
-cleanup() {
-  local p
-  agent_stop
-  for p in $BG_PIDS; do kill "$p" 2>/dev/null; done
-  wait 2>/dev/null
-  rm -rf "$ROOT"
-}
-trap cleanup EXIT
-trap 'exit 130' INT TERM
 
 export PATH="$STUBS:/usr/bin:/bin:/usr/sbin:/sbin"
 for c in sudo docker curl launchctl osascript pgrep top ps sw_vers swiftc sysctl; do
