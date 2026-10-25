@@ -33,7 +33,8 @@ repos, Docker bind mounts. After cloning, this tells you:
 Background and prior work:
 
 - [anthropics/claude-code#98769](https://github.com/anthropics/claude-code/issues/98769):
-  fseventsd at 24 GB, file watching dead in every Claude Code session.
+  the issue body reports fseventsd at 24 GB on macOS 27.0 with a core pinned for
+  two days; the comments add more Macs where file watching stopped.
 - [talkstream/fseventsd-runaway@78396ba](https://github.com/talkstream/fseventsd-runaway/tree/78396ba):
   detection and a manual restart. With this guard installed, do not follow its
   plugin's raw `sudo kill` advice ([Reduce the trigger](plugins/fseventsd-guard/README.md#reduce-the-trigger)
