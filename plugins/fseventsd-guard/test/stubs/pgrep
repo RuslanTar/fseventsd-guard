@@ -1,7 +1,8 @@
 #!/bin/bash
 # Test stub: pgrep [-x] [-u UID] fseventsd reads the fake daemons (uid from
 # $FSEV/<pid>.uid, default 0); pgrep -f with a Docker pattern sees Docker Desktop
-# running when $FSG_FAKE/docker/desktop says so; anything else is the real pgrep.
+# running when $FSG_FAKE/docker/desktop says so (its backend's pid: docker/backend-pid,
+# default 7777); anything else is the real pgrep.
 . "$(dirname "$0")/_fake.sh"
 args=("$@"); exact=0; full=0; uid=""; name=""
 while [ $# -gt 0 ]; do
@@ -29,7 +30,8 @@ if [ "$full" = 1 ]; then
   case $name in
     *[Dd]ocker*)
       [ "$(cat "$FSG_FAKE/docker/desktop" 2>/dev/null)" = running ] || exit 1
-      echo 7777; exit 0 ;;
+      cat "$FSG_FAKE/docker/backend-pid" 2>/dev/null || echo 7777
+      exit 0 ;;
   esac
 fi
 exec /usr/bin/pgrep "${args[@]}"

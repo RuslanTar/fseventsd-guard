@@ -105,6 +105,8 @@ t() { # start a test: t NAME
   unset FSG_HINT CLAUDE_PROJECT_DIR CLAUDE_PLUGIN_ROOT 2>/dev/null
   # Docker Desktop's socket for the guard: the default context's.
   export FSG_DESKTOP_SOCKET="$C/fake/docker/docker.sock"
+  # Its backend socket (absent: gone).
+  export FSG_DESKTOP_BACKEND_SOCKET="$C/fake/docker/backend.sock"
   # The probe lives where install builds it; a fresh case starts with the stand-in.
   mkdir -p "$FSG_STATE_DIR/bin"; cp "$STUBS/fake-probe" "$FSG_STATE_DIR/bin/fsprobe"
   export FSG_TEST_HELPER_TOOLS="$TOOLS"
@@ -120,7 +122,7 @@ t() { # start a test: t NAME
   agent_env FSG_DRAIN_POLL_S=1 FSG_DRAIN_CAP_S=20 FSG_HEALTHY_TIMEOUT_S=6 FSG_CONTAINER_TIMEOUT_S=6 \
     FSG_DOCKER_TIMEOUT_S=10 FSG_DOCKER_QUERY_TIMEOUT_S=2 FSG_PROBE_TIMEOUT_S=2 FSG_RUN_POLL_S=1 \
     FSG_DETECT_COMMANDS=fsgtestrspec FSG_DETECT_DOCKER_CLI=0 FSG_DETECT_DOCKER_EXECS=1 FSG_DETECT_DOCKER_CONTAINERS=1 \
-    FSG_DESKTOP_SOCKET="$FSG_DESKTOP_SOCKET"
+    FSG_DESKTOP_SOCKET="$FSG_DESKTOP_SOCKET" FSG_DESKTOP_BACKEND_SOCKET="$FSG_DESKTOP_BACKEND_SOCKET"
   unset FSG_AFFECTED FSG_AFFECTED_VERSIONS FSG_LEASE_FILE FSG_PROBE_BIN 2>/dev/null
   echo 4242 > "$FSG_FAKE/fsev/pids"
   echo 5000K > "$FSG_FAKE/fsev/4242.mem"
@@ -2466,7 +2468,10 @@ if ! skip_case heal-rm-volumes; then
   t "the docker-before deadline counts the docker info after a failed listing"
   out=$( FSG_HOME=$GUARD_HOME; . "$GUARD_HOME/lib/common.sh"; . "$GUARD_HOME/lib/lease.sh"; . "$GUARD_HOME/lib/drain.sh"
     fsg_init_paths; fsg_load_config; fsg_phase_budget docker-before )
-  eq "$out" $((FSG_DOCKER_TIMEOUT_S + 100 + 3 * FSG_DOCKER_QUERY_TIMEOUT_S)) "status and info, docker ps again, info again, desktop stop and its polls"
+  eq "$out" $((60 + 95 + 3 * FSG_DOCKER_QUERY_TIMEOUT_S)) "status and info, docker ps again, info again, desktop stop and its polls (FSG_DESKTOP_STOP_WAIT_S beats the stop's timeout here)"
+  out=$( FSG_HOME=$GUARD_HOME; . "$GUARD_HOME/lib/common.sh"; . "$GUARD_HOME/lib/lease.sh"; . "$GUARD_HOME/lib/drain.sh"
+    fsg_init_paths; fsg_load_config; FSG_DOCKER_TIMEOUT_S=300; fsg_phase_budget docker-before )
+  eq "$out" $((300 + 10 + 95 + 3 * FSG_DOCKER_QUERY_TIMEOUT_S)) "the stop's timeout beats FSG_DESKTOP_STOP_WAIT_S"
 
   t "the record reads what a real engine's docker inspect printed"
   docker_default; live_containers
@@ -2790,6 +2795,67 @@ if ! skip_case docker-silent; then
   rm -f "$FSG_FAKE/docker/hang" "$FSG_FAKE/docker/hang-sticky"
   "$G" tick >/dev/null 2>&1
   FSG_RUN_MAX_WAIT_S=1 "$G" run -- true 2>/dev/null; eq $? 0 "released once Docker answers and verifies"
+fi
+
+# ======================================================================== docker-stop
+if ! skip_case docker-stop; then
+  # stop_record: variant B's stop record of the last heal.
+  stop_record() { cat "$(cat "$FSG_STATE_DIR/last-heal-dir")/docker-stop.txt" 2>/dev/null; }
+  heal_result() { cat "$(cat "$FSG_STATE_DIR/last-heal-dir")/result.txt" 2>/dev/null; }
+
+  t "B sees Docker Desktop stopped once its processes and sockets are gone, though status fails"
+  docker_default; install_fake; mem 3G
+  touch "$FSG_FAKE/docker/status-fail" "$FSG_FAKE/docker/sock-gone-on-stop"; echo 20 > "$FSG_FAKE/docker/status-delay"
+  heal --docker-variant B > "$C/o" 2>&1; eq $? 0 "healed ($(tail -n 1 "$C/o"))"
+  has "$(cat "$FSG_LOG")" "stopped (no Docker Desktop process runs and its sockets are gone)" "decided by processes and sockets"
+  hasnt "$(cat "$FSG_LOG")" "before-step failed" "not a failed stop"
+  has "$(stop_record)" "backend pid before the stop: 7777" "the record has the backend pid"
+  has "$(stop_record)" "== stop rc=0 in " "the record has the stop's code and duration"
+  has "$(stop_record)" "poll 1 +" "the record has the polls"
+  has "$(stop_record)" "procs=no backend=none sockets=none status=- rc=- in -s: (not asked)" "status not asked once processes and sockets decide"
+  has "$(stop_record)" "decision: stopped" "the record has the decision"
+  has "$(heal_result)" "docker_stop=rc=0 in " "result.txt has the stop"
+  v=$(heal_result | sed -n 's/^docker_before_s=//p'); [ "${v:-99}" -lt 8 ] && ok || bad "the stop did not wait out a slow status (docker_before_s=$v)"
+  exists "$FSG_FAKE/docker/docker.sock" "Docker Desktop's start put its socket back"
+
+  t "B asks a slow or failing status only within its bound, and gives up at FSG_DESKTOP_STOP_WAIT_S"
+  docker_default; install_fake; mem 3G
+  agent_env FSG_DESKTOP_STOP_WAIT_S=8
+  # The user socket stays: processes and sockets never decide, and status is slow.
+  echo 20 > "$FSG_FAKE/docker/status-delay"
+  s=$(date +%s); heal --docker-variant B > "$C/o" 2>&1; eq $? 0 "the heal goes on and heals ($(tail -n 1 "$C/o"))"
+  has "$(cat "$FSG_LOG")" "Docker Desktop did not stop within 8s of docker desktop stop (still there after 8s: processes no, sockets $FSG_FAKE/docker/docker.sock" "the reason names what was left"
+  has "$(stop_record)" "rc=124 in" "a status poll was cut at its bound"
+  has "$(stop_record)" "decision: not-stopped" "decision recorded"
+  v=$(heal_result | sed -n 's/^docker_before_s=//p'); [ "${v:-99}" -le 16 ] && ok || bad "the wait is bounded (docker_before_s=$v)"
+  rm -f "$FSG_FAKE/docker/status-delay"
+  echo 4242 > "$FSG_FAKE/fsev/pids"; mem 3G; rm -f "$FSG_PREFIX/Library/Logs/fseventsd-guard/last-restart"
+  touch "$FSG_FAKE/docker/status-fail"
+  heal --docker-variant B > "$C/o" 2>&1; eq $? 0 "healed again"
+  has "$(stop_record)" "backend.sock: connect: no such file or directory" "the raw status error is recorded"
+
+  t "B: something else starts Docker Desktop right after the stop"
+  docker_default; install_fake; mem 3G
+  touch "$FSG_FAKE/docker/foreign-start"
+  heal --docker-variant B > "$C/o" 2>&1; eq $? 0 "healed ($(tail -n 1 "$C/o"))"
+  has "$(cat "$FSG_LOG")" "something else started Docker Desktop during the heal (backend pid 8888; before the stop: 7777)" "logged"
+  hasnt "$(cat "$FSG_LOG")" "before-step failed" "not reported as a failed stop"
+  has "$(grep 'fseventsd healed' "$FSG_FAKE/notifications.log")" "something else started Docker Desktop during the heal" "the notice says it"
+  has "$(heal_result)" "docker_started_by_other=something else started" "recorded"
+  has "$(stop_record)" "decision: started-by-other" "the stop record says it"
+  hasnt "$(grep -v "^osascript" "$FSG_FAKE/calls.log")" "8888" "the guard does not kill it"
+
+  t "B: something else starts Docker Desktop during the fseventsd restart"
+  docker_default; install_fake; mem 3G
+  echo 3 > "$FSG_FAKE/sudo-delay"
+  foreign_at_restart() {
+    waitfor 60 grep -qs '^phase=restarting' "$FSG_STATE_DIR/drain/pending" &&
+      echo 8888 > "$FSG_FAKE/docker/backend-pid" && echo running > "$FSG_FAKE/docker/desktop"
+  }
+  bg foreign_at_restart
+  heal --docker-variant B > "$C/o" 2>&1; eq $? 0 "healed ($(tail -n 1 "$C/o"))"
+  has "$(cat "$FSG_LOG")" "something else started Docker Desktop during the heal (backend pid 8888; before the stop: 7777)" "logged"
+  has "$(grep 'fseventsd healed' "$FSG_FAKE/notifications.log")" "something else started Docker Desktop" "the notice says it"
 fi
 
 # ======================================================================== heal-signal

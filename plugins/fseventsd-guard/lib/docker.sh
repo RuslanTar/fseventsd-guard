@@ -88,6 +88,40 @@ fsg_desktop_procs() {
   pgrep -f 'Docker\.app/Contents/MacOS/(com\.docker\.backend|Docker Desktop)' >/dev/null 2>&1
 }
 
+# The pids of Docker Desktop's backend, sorted, on one line; empty when none runs.
+fsg_desktop_backend_pids() {
+  pgrep -f 'Docker\.app/Contents/MacOS/com\.docker\.backend' 2>/dev/null | sort -n | tr '\n' ' ' | sed 's/ $//'
+}
+
+# 0 when no pid of the second list is in the first.
+fsg__pids_disjoint() { # old new
+  local p
+  for p in $2; do case " $1 " in *" $p "*) return 1 ;; esac; done
+  return 0
+}
+
+# The Docker Desktop sockets that still exist: its backend socket, its user socket
+# and the pinned endpoint's. All gone once Docker Desktop has quit.
+fsg__desktop_socks_left() {
+  local p left=""
+  for p in "${FSG_DESKTOP_BACKEND_SOCKET:-$HOME/Library/Containers/com.docker.docker/Data/backend.sock}" \
+           "${FSG_DESKTOP_SOCKET:-$HOME/.docker/run/docker.sock}" "${DK_ENDPOINT#unix://}"; do
+    [ -n "$p" ] && [ -S "$p" ] && case " $left " in *" $p "*) ;; *) left="${left:+$left }$p" ;; esac
+  done
+  printf '%s\n' "$left"
+}
+
+# One bounded `docker desktop status`: sets DS_STATUS (the Status word or empty),
+# DS_RC, DS_S (seconds) and DS_OUT (stdout and stderr on one line, cut).
+fsg__desktop_status_poll() { # seconds
+  local t0 out
+  t0=$(fsg_now)
+  out=$(fsg_timeout "$1" docker desktop status --format json 2>&1); DS_RC=$?
+  DS_S=$(( $(fsg_now) - t0 ))
+  DS_STATUS=$(printf '%s' "$out" | tr -d ' \n\t' | sed -n 's/.*"Status":"\([A-Za-z]*\)".*/\1/p')
+  DS_OUT=$(printf '%s' "$out" | tr '\t\r\n' '   ' | cut -c1-300)
+}
+
 # 0 when the engine answers one bounded `docker info`.
 fsg_docker_answers() { fsg_timeout "$FSG_DOCKER_QUERY_TIMEOUT_S" docker info >/dev/null 2>&1; }
 
@@ -329,18 +363,64 @@ fsg_wait_engine() { # seconds
   return 1
 }
 
-fsg_wait_desktop() { # wanted-status seconds
-  local t0
-  t0=$(fsg_now)
-  while [ $(( $(fsg_now) - t0 )) -lt "$2" ]; do
-    [ "$(fsg_desktop_status)" = "$1" ] && return 0
-    fsg_sleep 2
+# Waits for Docker Desktop to stop, up to FSG_DESKTOP_STOP_WAIT_S from T0 (when
+# `docker desktop stop` was issued); one check always runs. Stopped: no Desktop
+# process runs and its sockets are gone, or status says stopped. Once Desktop has
+# quit, status fails only after ~16 s (it dials the missing backend socket), so the
+# processes and sockets are checked every second, and status, bounded to 3 s, only
+# when they do not decide, at most every 5 s. Each poll goes to LOG. Sets
+# DK_STOP_WHY. 0 stopped; 2 a new backend runs (something else started Docker
+# Desktop; DK_NEW_PIDS); 1 not stopped.
+fsg__wait_desktop_stopped() { # t0 backend-pids-before log
+  local procs pids socks st_next=0 gone=0 n=0 rc= last=unknown
+  while :; do
+    n=$((n + 1))
+    pids=$(fsg_desktop_backend_pids)
+    if fsg_desktop_procs; then procs=yes; else procs=no; gone=1; fi
+    socks=$(fsg__desktop_socks_left)
+    DS_STATUS=; DS_RC=; DS_S=; DS_OUT=
+    if [ $procs = no ] && [ -z "$socks" ]; then
+      rc=0; DK_STOP_WHY="no Docker Desktop process runs and its sockets are gone"
+    elif [ -n "$pids" ] && fsg__pids_disjoint "$2" "$pids" && { [ -n "$2" ] || [ $gone = 1 ]; }; then
+      rc=2; DK_NEW_PIDS=$pids; DK_STOP_WHY="a new Docker Desktop backend runs (pid $pids; before the stop: ${2:-none})"
+    elif [ "$(fsg_now)" -ge "$st_next" ]; then
+      fsg__desktop_status_poll 3
+      st_next=$(( $(fsg_now) + 5 ))
+      last="${DS_STATUS:-none (rc $DS_RC)}"
+      [ "$DS_STATUS" = stopped ] && { rc=0; DK_STOP_WHY="docker desktop status says stopped"; }
+    fi
+    printf 'poll %s +%ss: procs=%s backend=%s sockets=%s status=%s rc=%s in %ss: %s\n' "$n" $(( $(fsg_now) - $1 )) \
+      "$procs" "${pids:-none}" "${socks:-none}" "${DS_STATUS:--}" "${DS_RC:--}" "${DS_S:--}" "${DS_OUT:-(not asked)}" >> "$3"
+    [ -n "$rc" ] && return $rc
+    [ $(( $(fsg_now) - $1 )) -lt "$FSG_DESKTOP_STOP_WAIT_S" ] || break
+    fsg_sleep 1
   done
+  DK_STOP_WHY="still there after ${FSG_DESKTOP_STOP_WAIT_S}s: processes $procs, sockets ${socks:-none}, last status $last"
   return 1
+}
+
+# Something else started Docker Desktop during the heal (a new backend runs where
+# none ran, or none of the old ones): sets DK_FOREIGN, said in the record and the
+# notices. The guard does not fight it; the restore goes on as usual.
+fsg__desktop_foreign() { # backend-pids-now
+  DK_FOREIGN="something else started Docker Desktop during the heal (backend pid $1; before the stop: ${DK_PRE_PIDS:-none}); the guard left it running"
+  fsg_log "DOCKER $DK_FOREIGN"
+}
+
+# Before variant B's after-step: a backend that is not the one the stop saw, once
+# the stop was seen (or the old backend is gone), was started by something else.
+fsg__desktop_foreign_check() {
+  local now
+  [ -n "${DK_STOP_DECISION:-}" ] && [ -z "${DK_FOREIGN:-}" ] || return 0
+  now=$(fsg_desktop_backend_pids)
+  [ -n "$now" ] && fsg__pids_disjoint "${DK_PRE_PIDS:-}" "$now" || return 0
+  [ -n "${DK_PRE_PIDS:-}" ] || [ "$DK_STOP_DECISION" = stopped ] || return 0
+  fsg__desktop_foreign "$now"
 }
 
 # Runs the before-step. Returns non-zero on failure (DK_ERR says why).
 fsg_docker_before() { # variant
+  local t0 log wrc
   DK_ERR=
   case $1 in
     A)
@@ -351,9 +431,27 @@ fsg_docker_before() { # variant
         { DK_ERR="docker stop failed"; return 1; }
       ;;
     B)
-      fsg_log "DOCKER B desktop stop"
-      fsg_timeout $((FSG_DOCKER_TIMEOUT_S + 10)) docker desktop stop --timeout "$FSG_DOCKER_TIMEOUT_S" >/dev/null 2>&1
-      fsg_wait_desktop stopped 30 || { DK_ERR="Docker Desktop did not report stopped"; return 1; }
+      # The stop and each poll go to the heal record.
+      log=/dev/null; [ -n "${HEAL_DIR:-}" ] && log="$HEAL_DIR/docker-stop.txt"
+      DK_PRE_PIDS=$(fsg_desktop_backend_pids)
+      fsg_log "DOCKER B desktop stop (backend pid ${DK_PRE_PIDS:-none})"
+      echo "backend pid before the stop: ${DK_PRE_PIDS:-none}" >> "$log"
+      echo "== docker desktop stop output" >> "$log"
+      t0=$(fsg_now)
+      # Not in a subshell: a signal meanwhile lets the stop finish (fsg_tick_cleanup).
+      fsg_timeout $((FSG_DOCKER_TIMEOUT_S + 10)) docker desktop stop --timeout "$FSG_DOCKER_TIMEOUT_S" >> "$log" 2>&1
+      DK_STOP_RC=$?; DK_STOP_S=$(( $(fsg_now) - t0 ))
+      echo "== stop rc=$DK_STOP_RC in ${DK_STOP_S}s; polls (up to ${FSG_DESKTOP_STOP_WAIT_S}s from the stop):" >> "$log"
+      fsg__wait_desktop_stopped "$t0" "$DK_PRE_PIDS" "$log"; wrc=$?
+      case $wrc in
+        0) DK_STOP_DECISION=stopped ;;
+        2) DK_STOP_DECISION=started-by-other ;;
+        *) DK_STOP_DECISION=not-stopped ;;
+      esac
+      echo "decision: $DK_STOP_DECISION ($DK_STOP_WHY)" >> "$log"
+      fsg_log "DOCKER B stop rc=$DK_STOP_RC in ${DK_STOP_S}s: $DK_STOP_DECISION ($DK_STOP_WHY)"
+      if [ $wrc = 2 ]; then fsg__desktop_foreign "$DK_NEW_PIDS"; return 0; fi
+      [ $wrc = 0 ] || { DK_ERR="Docker Desktop did not stop within ${FSG_DESKTOP_STOP_WAIT_S}s of docker desktop stop ($DK_STOP_WHY)"; return 1; }
       ;;
   esac
   return 0
@@ -396,6 +494,7 @@ fsg_docker_after() { # variant
       fsg_timeout "$FSG_DOCKER_TIMEOUT_S" docker start $DK_IDS >/dev/null 2>&1 || { DK_ERR="docker start failed"; return 1; }
       ;;
     B)
+      fsg__desktop_foreign_check
       fsg_docker_desktop_start "B desktop start" || return 1
       fsg_docker_start_missing || { DK_ERR="docker start failed"; return 1; }
       ;;

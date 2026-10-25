@@ -77,6 +77,10 @@ FSG_DOCKER_TIMEOUT_S=300
 # whose process runs but answers neither counts as wedged, not stopped: the heal
 # restarts it and holds runs until it verifies.
 FSG_DOCKER_QUERY_TIMEOUT_S=20
+# Seconds variant B waits for Docker Desktop to stop, counted from the
+# `docker desktop stop` call. Stopped: its status says so, or no Docker Desktop
+# process runs and its sockets are gone.
+FSG_DESKTOP_STOP_WAIT_S=60
 # Seconds `docker stop -t` gives a container before SIGKILL.
 FSG_STOP_TIMEOUT_S=30
 # Seconds to wait for every recorded container to be running (and healthy, when it
