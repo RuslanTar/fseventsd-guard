@@ -704,6 +704,7 @@ EOF
     fsg_render_plist "$FSG_PLIST.new" "$FSG_STATE_DIR/app"
     plutil -lint "$FSG_PLIST.new" >/dev/null || { rm -f "$FSG_PLIST.new"; fsg_die 1 "install: the rendered plist is invalid"; }
     mv -f "$FSG_PLIST.new" "$FSG_PLIST"
+    fsg_agent_disabled && fsg_die 1 "install: $(fsg_agent_disabled_text), then run install again"
     launchctl bootout "gui/$(id -u)/$FSG_LABEL" >/dev/null 2>&1
     launchctl bootstrap "gui/$(id -u)" "$FSG_PLIST" || fsg_die 1 "install: launchctl bootstrap failed (run: fseventsd-guard doctor)"
     echo "  loaded; it checks every $(fsg_dur "$FSG_AGENT_INTERVAL_S")"
@@ -886,11 +887,15 @@ fsg_uninstall_tmp() {
   done | awk '!seen[$0]++'
 }
 
-# 0 when launchd still keeps the agent's label switched off (Login Items), a setting
-# that outlives the plist.
-fsg_uninstall_disabled() {
+# 0 when launchd keeps the agent's label switched off (Login Items), a setting that
+# outlives the plist. launchd does not load a label it keeps switched off.
+fsg_agent_disabled() {
   launchctl print-disabled "gui/$(id -u)" 2>/dev/null |
     grep -qF -e "\"$FSG_LABEL\" => disabled" -e "\"$FSG_LABEL\" => true"
+}
+
+fsg_agent_disabled_text() {
+  echo "launchd keeps the agent $FSG_LABEL switched off (Login Items), so it does not load it: switch fseventsd-guard back on in System Settings > General > Login Items & Extensions, or run: launchctl enable gui/$(id -u)/$FSG_LABEL"
 }
 
 # The Claude Code install hint's stamps (lib/hint.sh) that exist. Its off switch in
@@ -1111,7 +1116,7 @@ EOF
     else echo "  kept $p: the install created it, but it now holds other files"; fi
   done
   local what="no traces left"
-  if fsg_uninstall_disabled; then
+  if fsg_agent_disabled; then
     what="no files left, only the launchd setting named above"
     echo "  launchd still keeps $FSG_LABEL switched off (from Login Items); clear that setting with: launchctl enable gui/$(id -u)/$FSG_LABEL"
   fi
@@ -1351,6 +1356,8 @@ EOF
     if lc=$(launchctl print "gui/$(id -u)/$FSG_LABEL" 2>/dev/null); then
       fsg_doc ok "agent $FSG_LABEL is loaded"
       fsg_doctor_last_exit "$lc"
+    elif fsg_agent_disabled; then
+      fsg_doc fail "agent $FSG_LABEL is not loaded: $(fsg_agent_disabled_text); launchctl bootstrap gui/$(id -u) \"$FSG_PLIST\""
     else
       fsg_doc fail "agent $FSG_LABEL is not loaded: launchctl bootstrap gui/$(id -u) \"$FSG_PLIST\""
     fi
