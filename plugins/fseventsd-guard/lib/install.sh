@@ -191,7 +191,11 @@ fsg_status_install_text() {
   if [ -n "$FSG_ROOT_STALE" ]; then
     echo "install: root code changed ($(printf '%s\n' "$FSG_ROOT_STALE" | head -n 1)): $FSG_REDO_HERE; it asks for sudo"
   elif [ "$(fsg_app_sum "$app")" != "$(fsg_app_sum "$FSG_HOME")" ]; then
-    echo "install: the app copy differs from $FSG_HERE and the root code is unchanged: $FSG_REDO_HERE; it needs no sudo"
+    if [ "$tu" -gt 0 ]; then
+      echo "install: the app copy differs from $FSG_HERE and the root code is unchanged: $FSG_REDO_HERE; it asks for sudo only to end the trial window (pass --trial-hours to keep one)"
+    else
+      echo "install: the app copy differs from $FSG_HERE and the root code is unchanged: $FSG_REDO_HERE; it needs no sudo"
+    fi
   fi
 }
 

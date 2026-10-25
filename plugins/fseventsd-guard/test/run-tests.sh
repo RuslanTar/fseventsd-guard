@@ -684,6 +684,9 @@ if ! skip_case install; then
   out=$("$G" status 2>&1)
   has "$out" "helper: trial window open until" "status shows the window"
   hasnt "$out" "root code changed" "status from the checkout: a trial window is no root code change"
+  cp "$FSG_STATE_DIR/app/config.defaults" "$C/cfg.keep"; echo "# app copy changed" >> "$FSG_STATE_DIR/app/config.defaults"
+  has "$("$G" status 2>&1)" "it asks for sudo only to end the trial window" "status: a plain re-install ends the window, which needs sudo"
+  cat "$C/cfg.keep" > "$FSG_STATE_DIR/app/config.defaults"
   HP="$FSG_PREFIX/usr/local/libexec/fseventsd-guard-restart"
   sed "s/^TRIAL_UNTIL=.*/TRIAL_UNTIL=$(( $(date +%s) - 3600 ))/" "$HP" > "$C/h" && cat "$C/h" > "$HP"
   hasnt "$("$G" status 2>&1)" "root code changed" "nor once the window has ended"
