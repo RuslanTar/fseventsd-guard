@@ -1647,6 +1647,7 @@ if ! skip_case heal; then
     absent "$FSG_STATE_DIR/docker-intent" "Docker intent cleared"
     has "$(cat "$FSG_FAKE/notifications.log")" "fseventsd healed" "success notification"
     has "$(cat "$FSG_FAKE/notifications.log")" "Time Machine" "costs in the notification"
+    has "$(cat "$FSG_FAKE/notifications.log")" "If a session stops seeing file changes after the heal, restart it." "watcher advice in the notification"
     grep -q '^bind_mount=ok' "$(cat "$FSG_STATE_DIR/last-heal-dir")/result.txt" && ok || bad "bind mount verified"
   done
 
@@ -4406,6 +4407,7 @@ if ! skip_case claude-hook-bash; then
   has "$x" "fseventsd-guard: a heal of fseventsd (trigger manual; Docker step B" "which heal"
   has "$x" "ran from $(date -r $((e - 95)) +%H:%M) to $(date -r $e +%H:%M) and ended: fseventsd restarted, and Docker and its containers verified." "when, and the result"
   has "$x" "A docker, docker compose or test failure in that window is likely the heal, not the code, and is worth re-running." "re-run advice"
+  has "$x" "If a session stops seeing file changes after the heal, restart it." "watcher advice after a restart"
   eq "$(hook bash PostToolUse s1)" "" "once after it ended"
 
   t "claude-hook bash: a heal that left Docker not verified, or was stopped part way"
@@ -4433,6 +4435,7 @@ if ! skip_case claude-hook-bash; then
   echo "$e aborted-at-cap wave B 30 /x" > "$FSG_STATE_DIR/last-heal"
   x=$(hook_ctx "$(hook bash PostToolUse s1)")
   has "$x" "and ended: it gave up at the drain cap, and nothing was stopped or restarted." "the result"
+  hasnt "$x" "stops seeing file changes" "no watcher advice without a restart"
   hasnt "$x" "worth re-running" "no failure to explain"
   echo "$((e - 1)) healed manual none 30 /x" > "$FSG_STATE_DIR/last-heal"
   x=$(hook_ctx "$(hook bash PostToolUse s1)")

@@ -148,6 +148,10 @@ Say this out loud before you heal by hand; the notifications repeat it.
   limitations" ([`docs/DESIGN.md` §6](docs/DESIGN.md#6-docker-step)).
 - Dev servers (a Rails server, background workers) reconnect to Postgres and Redis
   on the next request. Restart one if it logs connection errors.
+- Running Claude Code sessions may keep a file watcher that does not come back
+  after the restart (one report of watchers not recovering; not tested yet, see
+  [`docs/DOCKER-TRIALS.md`](docs/DOCKER-TRIALS.md)). If a session stops seeing file
+  changes after the heal, restart it.
 
 ## Install
 
@@ -421,7 +425,7 @@ root `README.md`.
 | Hook | Speaks when | Says | How often, at what cost |
 |---|---|---|---|
 | `UserPromptSubmit` (`prompt`): the install nudge | The guard is not installed (no agent plist, no app copy) on an affected macOS version | fseventsd's footprint in MB and as a multiple of the 30 MB budget, its uptime and level, why that matters, and what to run in a new terminal window (install asks for sudo): `[ -d ~/fseventsd-guard ] \|\| git clone https://github.com/RuslanTar/fseventsd-guard.git ~/fseventsd-guard; ~/fseventsd-guard/plugins/fseventsd-guard/fseventsd-guard install`, then the same path with `doctor`. A short warning for you (`systemMessage`) and the facts for Claude, which says that you have not been told yet | At most hourly at runaway (2 GB and up), every 3 hours at warn (500 MB and up), daily below that; the stamps in `~/Library/Caches/fseventsd-guard-hint` are shared by every session. It measures (`top`, about 2 s) at most once an hour; any other prompt costs a file read (about 25 ms in all, through the wrapper) |
-| `PreToolUse` and `PostToolUse` on Bash (`bash`): the heal notice | The guard is installed and a heal is draining, in its Docker step, holding runs because Docker did not verify, or ended in the last 10 minutes | To Claude only: since when, the trigger, what the heal's Docker step does to Docker, that `docker`, `docker compose` and test commands may fail or hang until it ends, that leased runs resume by themselves, that restarting Docker by hand interferes, and `status`; once it ended, the result and that a failure in that window is likely the heal | Once per heal, phase (draining, Docker step, held, ended) and session; a subagent that Claude Code names (`agent_id`) gets its own. Stamps in `$TMPDIR/fseventsd-guard-hook`, removed after a day. It reads the guard's state files only, never Docker or fseventsd: about 15-20 ms per Bash call with no heal, through the wrapper |
+| `PreToolUse` and `PostToolUse` on Bash (`bash`): the heal notice | The guard is installed and a heal is draining, in its Docker step, holding runs because Docker did not verify, or ended in the last 10 minutes | To Claude only: since when, the trigger, what the heal's Docker step does to Docker, that `docker`, `docker compose` and test commands may fail or hang until it ends, that leased runs resume by themselves, that restarting Docker by hand interferes, and `status`; once it ended, the result, that a failure in that window is likely the heal, and (when fseventsd restarted) to restart a session that stops seeing file changes | Once per heal, phase (draining, Docker step, held, ended) and session; a subagent that Claude Code names (`agent_id`) gets its own. Stamps in `$TMPDIR/fseventsd-guard-hook`, removed after a day. It reads the guard's state files only, never Docker or fseventsd: about 15-20 ms per Bash call with no heal, through the wrapper |
 
 Once the guard is installed the nudge stops, and the agent heals unattended.
 To silence both hooks, set `FSG_HINT=0` in the environment Claude Code starts with

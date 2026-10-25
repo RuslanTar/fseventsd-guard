@@ -264,16 +264,19 @@ fsg_hint_heal_text() {
       out="fseventsd-guard: a heal of fseventsd (trigger ${HN_TRIGGER:-?}; $(fsg_hint_step "$HN_VARIANT")) did not get Docker verified (since $at: $HN_WHY). Docker may still be stopped or partly up, so docker, docker compose and test commands may fail. New runs under a drain lease stay held until the guard's agent sees Docker back (it checks every 5 minutes), or until someone brings Docker back by hand (docker desktop start, docker compose up -d) and runs $g release. Details: $g status"
       printf '%s\n' "$out"; return 0 ;;
     ended)
+      local restarted=0
       case $HN_RESULT in
-        healed) r="fseventsd restarted, and Docker and its containers verified" ;;
+        healed) r="fseventsd restarted, and Docker and its containers verified"; restarted=1 ;;
         restart-failed) r="the fseventsd restart failed ($g doctor says why), and Docker was brought back" ;;
-        restored-partly) r="fseventsd restarted, but the heal ended incomplete (fseventsd not healthy in time, or Docker not fully back; $g status says what is left)" ;;
+        restored-partly) r="fseventsd restarted, but the heal ended incomplete (fseventsd not healthy in time, or Docker not fully back; $g status says what is left)"; restarted=1 ;;
         aborted-at-cap) r="it gave up at the drain cap, and nothing was stopped or restarted"; docker=0 ;;
         refused-*) r="it was refused before its Docker step, and nothing was stopped or restarted"; docker=0 ;;
         drain-not-marked|intent-not-written) r="it could not write its state, and nothing was stopped"; docker=0 ;;
       esac
       out="fseventsd-guard: a heal of fseventsd (trigger $HN_TRIGGER; $(fsg_hint_step "$HN_VARIANT")) ran from $(date -r $((HN_ID - HN_WALL)) +%H:%M 2>/dev/null) to $(date -r "$HN_ID" +%H:%M 2>/dev/null) and ended: $r."
       [ $docker = 1 ] && out="$out A docker, docker compose or test failure in that window is likely the heal, not the code, and is worth re-running."
+      # Untested: watchers may not re-register after a restart (DOCKER-TRIALS.md).
+      [ $restarted = 1 ] && out="$out If a session stops seeing file changes after the heal, restart it."
       printf '%s Details: %s status\n' "$out" "$g"; return 0 ;;
   esac
   out="$out Runs under a drain lease (fseventsd-guard run, integrated runners) are held and start by themselves when it ends; other new runs are not held."

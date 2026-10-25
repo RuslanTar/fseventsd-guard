@@ -22,7 +22,7 @@
 #     did not list its containers, so none could be checked (nothing was stopped)
 # 130 the agent was stopped during the heal                          64 usage
 
-FSG_COSTS="Restart costs: every FSEvents client rescans (Spotlight, IDEs, Docker file sharing, file watchers); Time Machine may run a longer backup next time."
+FSG_COSTS="Restart costs: every FSEvents client rescans (Spotlight, IDEs, Docker file sharing, file watchers); Time Machine may run a longer backup next time. If a session stops seeing file changes after the heal, restart it."
 FSG_MANUAL_FIX='sudo kill -TERM $(pgrep -x fseventsd)'
 
 fsg_helper_meaning() {
