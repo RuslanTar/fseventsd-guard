@@ -1320,7 +1320,7 @@ fsg_tick_check() {
   fi
   rm -f "$FSG_STATE_DIR/blind-ticks"
   DO_PROBE=$FSG_AGENT_PROBE
-  P_RESULT=; P_LATENCY_MS=; P_START_MS=; P_DETAIL=
+  P_RESULT=; P_LATENCY_MS=; P_START_MS=; P_DETAIL=; P_EID=
   if [ "$DO_PROBE" = 1 ]; then
     fsg_probe
     if [ "$P_RESULT" = stalled ]; then
@@ -1332,7 +1332,7 @@ fsg_tick_check() {
   fsg_tick_sample
   fsg_classify 0
   TICK_LEVEL=$S_LEVEL
-  fsg_log "TICK level=$S_LEVEL pid=$M_PID mb=$M_MB cmprs_mb=${M_CMPRS_MB:-} ports=${M_PORTS:-} cpu=${M_CPU:-} cpu_avg_pct=${T_CPU_PCT:-} cpu_streak=$T_CPU_STREAK up_s=${M_UP:-} swap_used_mb=$(fsg_parse_swap_mb "$(sysctl -n vm.swapusage 2>/dev/null)") probe=${P_RESULT:-skipped}${P_LATENCY_MS:+/${P_LATENCY_MS}ms}${P_START_MS:+ start_ms=$P_START_MS}"
+  fsg_log "TICK level=$S_LEVEL pid=$M_PID mb=$M_MB cmprs_mb=${M_CMPRS_MB:-} ports=${M_PORTS:-} cpu=${M_CPU:-} cpu_avg_pct=${T_CPU_PCT:-} cpu_streak=$T_CPU_STREAK up_s=${M_UP:-} swap_used_mb=$(fsg_parse_swap_mb "$(sysctl -n vm.swapusage 2>/dev/null)") probe=${P_RESULT:-skipped}${P_LATENCY_MS:+/${P_LATENCY_MS}ms}${P_START_MS:+ start_ms=$P_START_MS} eid=$P_EID ev_s=$T_EV_S"
   [ "$S_LEVEL" = ok ] && return 0
   [ -n "$C_STREAK" ] && fsg_log "TICK runaway by the cpu escalator: ${C_PCT}% of a core for $C_STREAK ticks at $M_MB MB"
 

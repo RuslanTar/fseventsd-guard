@@ -4,11 +4,13 @@
 //
 // Watches <dir> with an FSEvents stream, writes one uniquely named file into it and
 // times how long the event for that file takes to arrive.
-//   exit 0, prints "result=ok latency_ms=N start_ms=S"     the event arrived
-//   exit 2, prints "result=stalled timeout_s=N start_ms=S" no event within the timeout
-//   exit 3, prints "result=error ..."                      the probe itself could not run
-// start_ms is how long FSEventStreamStart took (a healthy daemon: 0-1 ms). A stalled
-// line has none when the start itself had not returned by the timeout.
+//   exit 0, prints "result=ok latency_ms=N start_ms=S eid=E"     the event arrived
+//   exit 2, prints "result=stalled timeout_s=N start_ms=S eid=E" no event within the timeout
+//   exit 3, prints "result=error ..."                            the probe itself could not run
+// start_ms is how long FSEventStreamStart took (a healthy daemon: 0-1 ms); eid is
+// FSEventsGetCurrentEventId() right after it, so callers can rate events between
+// probes. A stalled line has neither when the start itself had not returned by the
+// timeout.
 //
 // A watchdog on a separate queue enforces the timeout even if the FSEvents calls
 // block inside a wedged daemon. Built by `fseventsd-guard install` with swiftc.
@@ -37,7 +39,8 @@ let target = dir + "/" + name
 func cleanup() { try? fm.removeItem(atPath: target) }
 
 var startMs: Int? = nil
-func startField() -> String { startMs.map { " start_ms=\($0)" } ?? "" }
+var eventId: UInt64? = nil
+func startField() -> String { (startMs.map { " start_ms=\($0)" } ?? "") + (eventId.map { " eid=\($0)" } ?? "") }
 
 DispatchQueue.global().asyncAfter(deadline: .now() + timeout) {
     cleanup()
@@ -71,6 +74,7 @@ guard started else {
     print("result=error FSEventStreamStart failed")
     exit(3)
 }
+eventId = FSEventsGetCurrentEventId()
 // Give the stream a moment to attach before the write.
 DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
     queue.sync { written = Date() }

@@ -983,6 +983,14 @@ goes into each tick's `TICK` log line, `status --probe` and `status --json`
 (`probe.start_ms`). No heal acts on it yet: a threshold needs readings from sick
 daemons on more Macs first.
 
+After the start the probe also prints `FSEventsGetCurrentEventId()` as `eid`. The
+tick logs it with `ev_s`, the system-wide event rate since the previous tick (no
+root needed). The rate starts over when the fseventsd pid or the boot time changes,
+because event ids jump by billions after a boot. It is logged only: it records the
+flood that a restart erases, and gives the thresholds data (§12, question 1). One
+machine measured 50-200 events/s normally and 2,117-5,715 on flood days
+([talkstream/fseventsd-runaway@78396ba](https://github.com/talkstream/fseventsd-runaway/tree/78396ba)).
+
 ## 11. Changes from the original plan
 
 | Plan | Built | Why |

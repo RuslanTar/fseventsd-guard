@@ -68,17 +68,24 @@ fsg_measure() {
 
 # The agent's record between ticks (docs/DESIGN.md §4), in $FSG_STATE_DIR/tick-sample:
 # fseventsd's share of one core from the CPU time it used since the last tick (an
-# exact average, unlike the decayed ps %cpu) and how many ticks in a row found it at
-# or above FSG_CPU_ESCALATE_PCT with the footprint at or above warn. A new pid starts
-# over. Sets T_CPU_PCT (empty when unknown) and T_CPU_STREAK.
+# exact average, unlike the decayed ps %cpu), how many ticks in a row found it at or
+# above FSG_CPU_ESCALATE_PCT with the footprint at or above warn, and the system's
+# FSEvents rate from the probe's event ids. A new pid starts over; so does the rate
+# after a reboot, as event ids jump then. Sets T_CPU_PCT and T_EV_S (empty when
+# unknown) and T_CPU_STREAK.
 fsg_tick_sample() {
-  local f="$FSG_STATE_DIR/tick-sample" now pe pc pst
-  T_CPU_PCT=; T_CPU_STREAK=0
+  local f="$FSG_STATE_DIR/tick-sample" now pe pc pst pi boot same=0
+  T_CPU_PCT=; T_CPU_STREAK=0; T_EV_S=
   now=$(fsg_now)
-  pe=$(fsg__kv "$f" epoch); pc=$(fsg__kv "$f" cpu_ms); pst=$(fsg__kv "$f" streak)
-  if [ "$(fsg__kv "$f" pid)" = "$M_PID" ] && fsg_is_uint "$pe" && [ "$now" -gt "$pe" ] &&
-     fsg_is_uint "$pc" && fsg_is_uint "$M_CPU_MS" && [ "$M_CPU_MS" -ge "$pc" ]; then
+  boot=$(sysctl -n kern.boottime 2>/dev/null | sed -n 's/^{ sec = \([0-9]*\),.*/\1/p')
+  pe=$(fsg__kv "$f" epoch); pc=$(fsg__kv "$f" cpu_ms); pst=$(fsg__kv "$f" streak); pi=$(fsg__kv "$f" eid)
+  [ "$(fsg__kv "$f" pid)" = "$M_PID" ] && fsg_is_uint "$pe" && [ "$now" -gt "$pe" ] && same=1
+  if [ $same = 1 ] && fsg_is_uint "$pc" && fsg_is_uint "$M_CPU_MS" && [ "$M_CPU_MS" -ge "$pc" ]; then
     T_CPU_PCT=$(( (M_CPU_MS - pc) / ((now - pe) * 10) ))
+  fi
+  if [ $same = 1 ] && [ -n "$boot" ] && [ "$(fsg__kv "$f" boot)" = "$boot" ] &&
+     fsg_is_uint "$pi" && fsg_is_uint "$P_EID" && [ "$P_EID" -ge "$pi" ]; then
+    T_EV_S=$(( (P_EID - pi) / (now - pe) ))
   fi
   fsg_is_uint "$pst" || pst=0
   if [ -n "$T_CPU_PCT" ] && [ "$FSG_CPU_ESCALATE_PCT" -gt 0 ] && [ "$T_CPU_PCT" -ge "$FSG_CPU_ESCALATE_PCT" ] &&
@@ -86,8 +93,8 @@ fsg_tick_sample() {
     T_CPU_STREAK=$((pst + 1))
   fi
   mkdir -p "$FSG_STATE_DIR" 2>/dev/null
-  printf 'epoch=%s\npid=%s\ncpu_ms=%s\ncpu_pct=%s\nstreak=%s\n' "$now" "$M_PID" "$M_CPU_MS" "$T_CPU_PCT" "$T_CPU_STREAK" \
-    > "$f.new.$$" 2>/dev/null && mv -f "$f.new.$$" "$f" 2>/dev/null
+  printf 'epoch=%s\npid=%s\ncpu_ms=%s\ncpu_pct=%s\nstreak=%s\nboot=%s\neid=%s\n' "$now" "$M_PID" "$M_CPU_MS" "$T_CPU_PCT" \
+    "$T_CPU_STREAK" "$boot" "$P_EID" > "$f.new.$$" 2>/dev/null && mv -f "$f.new.$$" "$f" 2>/dev/null
 }
 
 # 0 when the agent's last FSG_CPU_ESCALATE_TICKS ticks in a row found this fseventsd
@@ -104,11 +111,12 @@ fsg_cpu_escalated() {
 }
 
 # Runs the delivery probe once. Sets P_RESULT (ok|stalled|error|unavailable),
-# P_LATENCY_MS and P_START_MS (how long FSEventStreamStart took; logged only). The
-# probe has its own watchdog; the outer bound catches a probe wedged inside the
-# FSEvents framework.
+# P_LATENCY_MS, P_START_MS (how long FSEventStreamStart took; logged only) and P_EID
+# (the system's current FSEvents event id, for the tick's event rate). The probe has
+# its own watchdog; the outer bound catches a probe wedged inside the FSEvents
+# framework.
 fsg_probe() {
-  P_RESULT=unavailable; P_LATENCY_MS=; P_START_MS=; P_DETAIL=
+  P_RESULT=unavailable; P_LATENCY_MS=; P_START_MS=; P_DETAIL=; P_EID=
   if [ ! -x "$FSG_PROBE_BIN" ]; then P_DETAIL="probe not built (run: fseventsd-guard install)"; return 0; fi
   local dir out rc
   dir="$FSG_STATE_DIR/probe-dir"
@@ -121,7 +129,9 @@ fsg_probe() {
     *) P_RESULT=error; P_DETAIL=$(printf '%s' "$out" | tr '\n' ' ' | cut -c1-200) ;;
   esac
   case $P_RESULT in
-    ok|stalled) P_START_MS=$(printf '%s\n' "$out" | sed -n 's/.*start_ms=\([0-9]*\).*/\1/p' | head -n 1) ;;
+    ok|stalled)
+      P_START_MS=$(printf '%s\n' "$out" | sed -n 's/.*start_ms=\([0-9]*\).*/\1/p' | head -n 1)
+      P_EID=$(printf '%s\n' "$out" | sed -n 's/.* eid=\([0-9]*\).*/\1/p' | head -n 1) ;;
   esac
   return 0
 }
@@ -329,7 +339,7 @@ fsg_cmd_status() {
   done
   local mrc
   fsg_measure; mrc=$?
-  P_RESULT=; P_LATENCY_MS=; P_START_MS=; P_DETAIL=
+  P_RESULT=; P_LATENCY_MS=; P_START_MS=; P_DETAIL=; P_EID=
   if [ "$DO_PROBE" = 1 ] && [ $mrc -eq 0 ]; then fsg_probe; fi
   fsg_classify $mrc
   fsg_affected

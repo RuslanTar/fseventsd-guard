@@ -3748,6 +3748,19 @@ if ! skip_case tick; then
   printf 'epoch=%s\npid=4242\ncpu_ms=1\ncpu_pct=97\nstreak=3\n' "$(date +%s)" > "$FSG_STATE_DIR/tick-sample"
   "$G" status >/dev/null; eq $? 1 "another pid's record does not count"
 
+  t "tick logs the FSEvents rate from the probe's event ids"
+  docker_default; install_fake --no-agent
+  echo 5000000 > "$FSG_FAKE/probe-eid"; "$G" tick; eq $? 0 "ok"
+  has "$(grep ' TICK level=' "$FSG_LOG" | tail -n 1)" "start_ms=0 eid=5000000 ev_s=" "event id, no rate on the first tick"
+  cpu_step 0; echo 5060000 > "$FSG_FAKE/probe-eid"; "$G" tick
+  line=$(grep ' TICK level=' "$FSG_LOG" | tail -n 1)
+  case $line in *"eid=5060000 ev_s=200"|*"eid=5060000 ev_s=199"|*"eid=5060000 ev_s=198") ok ;; *) bad "60000 events in about 300 s: $line" ;; esac
+  echo "{ sec = 1760009999, usec = 0 } Thu Oct  9 11:39:59 2025" > "$FSG_FAKE/boottime"
+  cpu_step 0; echo 9000000000 > "$FSG_FAKE/probe-eid"; "$G" tick
+  has "$(grep ' TICK level=' "$FSG_LOG" | tail -n 1)" "eid=9000000000 ev_s=" "a reboot starts the rate over"
+  cpu_step 0; rm -f "$FSG_FAKE/probe-eid"; "$G" tick; eq $? 0 "a probe without an event id still parses"
+  has "$(grep ' TICK level=' "$FSG_LOG" | tail -n 1)" "start_ms=0 eid= ev_s=" "no id, no rate"
+
   t "tick stall confirmation"
   docker_default; install_fake --no-agent
   printf 'stalled\nok\n' > "$FSG_FAKE/probe-seq"; "$G" tick; eq $? 0 "one slow probe is not a stall"
