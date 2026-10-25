@@ -155,8 +155,9 @@ Say this out loud before you heal by hand; the notifications repeat it.
 - Dev servers (a Rails server, background workers) reconnect to Postgres and Redis
   on the next request. Restart one if it logs connection errors.
 - Running Claude Code sessions may keep a file watcher that does not come back
-  after the restart (one report of watchers not recovering; not tested yet, see
-  [`docs/DOCKER-TRIALS.md`](docs/DOCKER-TRIALS.md)). If a session stops seeing file
+  after the restart (one report of watchers not recovering). Still untested: a
+  scripted check on 2026-10-25 never got fseventsd restarted, see
+  [`docs/DOCKER-TRIALS.md`](docs/DOCKER-TRIALS.md). If a session stops seeing file
   changes after the heal, restart it.
 
 ## Reduce the trigger
