@@ -4703,6 +4703,24 @@ if ! skip_case claude-hook-wrapper; then
   eq "$(wrap prompt UserPromptSubmit 2>&1)" "rc=0" "a failing guard: exit 0, nothing printed"
   absent "$FSG_HINT_DIR" "nothing measured in any of these"
 
+  t "the hook wrapper reads all of its stdin on every path"
+  # bigwrap MODE [ARGS]: a PostToolUse JSON larger than a pipe holds, written into the
+  # wrapper; prints the writer's and the wrapper's exit codes (141: SIGPIPE).
+  bigwrap() {
+    { printf '{"session_id":"b1","hook_event_name":"PostToolUse","tool_name":"Bash","tool_response":"'
+      head -c 400000 /dev/zero | tr '\0' x; printf '"}'; } | bash "$WRAP" "$1" > /dev/null 2>&1
+    echo "${PIPESTATUS[0]} ${PIPESTATUS[1]}"
+  }
+  eq "$(bigwrap bash)" "0 0" "not installed"
+  app_copy
+  eq "$(bigwrap bash)" "0 0" "installed, no heal"
+  eq "$(FSG_HINT=0 bigwrap bash)" "0 0" "switched off"
+  eq "$(bigwrap other)" "0 0" "an unknown mode"
+  fake_uname "$C/u-l" Linux; eq "$(PATH="$C/u-l:$PATH" bigwrap bash)" "0 0" "off macOS"
+  bg sleep 120; own=$LAST_BG; heal_state restarting B "$own"
+  eq "$(bigwrap bash)" "0 0" "with a heal notice"
+  killbg "$own"
+
   t "the plugin's hooks.json runs the wrapper, and the manifests name the plugin"
   # The marketplace sits at the repository root, two levels above the plugin.
   MKT=$(cd -P "$HERE/../../.." && pwd)/.claude-plugin/marketplace.json
