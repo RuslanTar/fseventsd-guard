@@ -639,8 +639,6 @@ EOF
       sed -n 's/^\(FSG_[A-Z0-9_]*=.*\)/# \1/p' "$FSG_STATE_DIR/app/config.defaults"
     } > "$FSG_STATE_DIR/config"
   fi
-  # The Claude Code install hint's stamps (lib/hint.sh) are moot once installed.
-  fsg_uninstall_path_ok "$FSG_HINT_DIR" fseventsd-guard-hint && fsg_hint_stamps_rm
 
   echo "[2/5] delivery probe"
   if [ $no_probe = 1 ]; then
@@ -710,6 +708,8 @@ EOF
     launchctl bootstrap "gui/$(id -u)" "$FSG_PLIST" || fsg_die 1 "install: launchctl bootstrap failed (run: fseventsd-guard doctor)"
     echo "  loaded; it checks every $(fsg_dur "$FSG_AGENT_INTERVAL_S")"
   fi
+  # The Claude Code install hint's stamps (lib/hint.sh) are moot once installed.
+  fsg_uninstall_path_ok "$FSG_HINT_DIR" fseventsd-guard-hint && fsg_hint_stamps_rm
   fsg_log "INSTALL version=$FSG_VERSION prefix=${FSG_PREFIX:-/} trial_until=$trial_until agent=$((1 - no_agent)) probe=$((1 - no_probe)) root=$root"
   echo
   fsg_cmd_doctor

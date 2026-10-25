@@ -40,6 +40,11 @@ fsg_cmd_claude_hook() { # prompt|bash
 # app copy, as doctor and uninstall look for them.
 fsg_hint_installed() { [ -f "$FSG_PLIST" ] || [ -d "$FSG_STATE_DIR/app" ]; }
 
+# 0 once an install got past its root steps: the agent's plist or the root helper. An
+# install stopped at the root question or at sudo leaves only the app copy, and the
+# nudge goes on.
+fsg_hint_nudge_done() { [ -f "$FSG_PLIST" ] || [ -e "$FSG_HELPER_PATH" ]; }
+
 # The epoch in the hint stamp NAME, or nothing.
 fsg_hint_stamp() {
   local v=
@@ -57,7 +62,7 @@ fsg_hint_every() { case $1 in runaway) echo 3600 ;; warn) echo 10800 ;; *) echo 
 # read; the measurement (top takes about 2 s) runs at most once an hour.
 fsg_hint_prompt() {
   local now t l every
-  fsg_hint_installed && return 0
+  fsg_hint_nudge_done && return 0
   now=$(fsg_now)
   t=$(fsg_hint_stamp checked)
   [ -n "$t" ] && [ $((now - t)) -ge 0 ] && [ $((now - t)) -lt 3600 ] && return 0

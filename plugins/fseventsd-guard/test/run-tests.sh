@@ -4554,9 +4554,11 @@ if ! skip_case claude-hook-prompt; then
 
   t "claude-hook prompt: silent when installed, not affected, off macOS or switched off"
   mem 3G
-  app_copy; eq "$(hook prompt)" "" "app copy installed"; rm -rf "$FSG_STATE_DIR/app"
   : > "$FSG_LAUNCH_AGENTS_DIR/io.github.ruslantar.fseventsd-guard.plist"; eq "$(hook prompt)" "" "agent plist installed"
   rm "$FSG_LAUNCH_AGENTS_DIR/io.github.ruslantar.fseventsd-guard.plist"
+  HP="$FSG_PREFIX/usr/local/libexec/fseventsd-guard-restart"
+  mkdir -p "$(dirname "$HP")"; : > "$HP"; eq "$(hook prompt)" "" "root helper installed (install --no-agent)"
+  mv "$HP" "$C/helper.was"
   absent "$FSG_HINT_DIR" "an installed guard is neither measured nor stamped"
   echo 15.5 > "$FSG_FAKE/sw_vers"; eq "$(hook prompt)" "" "a version before the range"; rm "$FSG_FAKE/sw_vers"
   rm -rf "$FSG_HINT_DIR"; eq "$(FSG_AFFECTED=no hook prompt)" "" "FSG_AFFECTED=no"
@@ -4569,6 +4571,13 @@ if ! skip_case claude-hook-prompt; then
   rm "$FSG_HINT_DIR/off"; has "$(hook prompt)" "running away" "shown otherwise"
   eq "$("$G" claude-hook < /dev/null; echo "rc=$?")" "rc=0" "no mode: nothing, exit 0"
   eq "$("$G" claude-hook other < /dev/null; echo "rc=$?")" "rc=0" "an unknown mode: nothing, exit 0"
+
+  t "claude-hook prompt: an install stopped at sudo leaves the nudge and its stamps"
+  mem 3G; hint_stamp checked 3700; hint_stamp last-runaway 3700; c0=$(cat "$FSG_HINT_DIR/checked")
+  echo 1 > "$FSG_FAKE/sudo-rc"; install_fake; eq $? 1 "the root steps fail"
+  exists "$FSG_STATE_DIR/app" "the app copy is in place"
+  eq "$(cat "$FSG_HINT_DIR/checked" 2>/dev/null)" "$c0" "the stamps are untouched"
+  has "$(hook prompt)" "running away" "the nudge goes on"
 
   t "claude-hook prompt: silent when fseventsd cannot be measured"
   : > "$FSG_FAKE/fsev/pids"; eq "$(hook prompt)" "" "no daemon"
