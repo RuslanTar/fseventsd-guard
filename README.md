@@ -35,7 +35,9 @@ Background and prior work:
 - [anthropics/claude-code#98769](https://github.com/anthropics/claude-code/issues/98769):
   fseventsd at 24 GB, file watching dead in every Claude Code session.
 - [talkstream/fseventsd-runaway@78396ba](https://github.com/talkstream/fseventsd-runaway/tree/78396ba):
-  detection and a manual restart.
+  detection and a manual restart. With this guard installed, do not follow its
+  plugin's raw `sudo kill` advice ([Reduce the trigger](plugins/fseventsd-guard/README.md#reduce-the-trigger)
+  says why and how to make the runaway rarer).
 
 ## Install the guard (macOS)
 

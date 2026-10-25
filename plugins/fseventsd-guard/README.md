@@ -153,6 +153,27 @@ Say this out loud before you heal by hand; the notifications repeat it.
   [`docs/DOCKER-TRIALS.md`](docs/DOCKER-TRIALS.md)). If a session stops seeing file
   changes after the heal, restart it.
 
+## Reduce the trigger
+
+The guard heals the runaway; fewer file events make it rarer. What seems to feed
+it (the cause is not proven):
+
+- **Temp-file churn in watched trees.** Every file created, renamed or deleted is
+  an event. One runaway started after about 10k uniquely named temp files
+  ([`docs/DESIGN.md` §9](docs/DESIGN.md#9-affected-versions), the 27.0.1 row).
+- **Test suites that create thousands of uniquely named files**, such as a fresh
+  `mktemp` dir or git repo per test. Reuse a fixed dir per worker and empty it.
+- **Throwaway dirs inside watched roots.** Keep them outside the trees your IDE,
+  dev servers and agents watch, or on a volume none of them watches.
+- **Docker bind mounts.** Writes inside a container become events on the Mac.
+  Bind-mount only the folders a container needs, not your home directory.
+
+Prior work: [talkstream/fseventsd-runaway@78396ba](https://github.com/talkstream/fseventsd-runaway/tree/78396ba),
+a case study of one Mac with a check script, a manual restart script and a Claude
+Code plugin; its author calls the causes unproven. Do not follow its plugin's
+advice to run `sudo kill -TERM $(pgrep -x fseventsd)` while this guard is
+installed: two healers race, and the raw kill skips the drain and the Docker step.
+
 ## Install
 
 macOS only, and only on affected versions
