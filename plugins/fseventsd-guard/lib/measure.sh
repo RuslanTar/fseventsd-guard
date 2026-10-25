@@ -41,11 +41,12 @@ fsg_measure() {
   return 0
 }
 
-# Runs the delivery probe once. Sets P_RESULT (ok|stalled|error|unavailable) and
-# P_LATENCY_MS. The probe has its own watchdog; the outer bound catches a probe
-# wedged inside the FSEvents framework.
+# Runs the delivery probe once. Sets P_RESULT (ok|stalled|error|unavailable),
+# P_LATENCY_MS and P_START_MS (how long FSEventStreamStart took; logged only). The
+# probe has its own watchdog; the outer bound catches a probe wedged inside the
+# FSEvents framework.
 fsg_probe() {
-  P_RESULT=unavailable; P_LATENCY_MS=; P_DETAIL=
+  P_RESULT=unavailable; P_LATENCY_MS=; P_START_MS=; P_DETAIL=
   if [ ! -x "$FSG_PROBE_BIN" ]; then P_DETAIL="probe not built (run: fseventsd-guard install)"; return 0; fi
   local dir out rc
   dir="$FSG_STATE_DIR/probe-dir"
@@ -56,6 +57,9 @@ fsg_probe() {
     0) P_RESULT=ok; P_LATENCY_MS=$(printf '%s\n' "$out" | sed -n 's/.*latency_ms=\([0-9]*\).*/\1/p' | head -n 1) ;;
     2|124) P_RESULT=stalled; P_DETAIL="no event within ${FSG_PROBE_TIMEOUT_S}s" ;;
     *) P_RESULT=error; P_DETAIL=$(printf '%s' "$out" | tr '\n' ' ' | cut -c1-200) ;;
+  esac
+  case $P_RESULT in
+    ok|stalled) P_START_MS=$(printf '%s\n' "$out" | sed -n 's/.*start_ms=\([0-9]*\).*/\1/p' | head -n 1) ;;
   esac
   return 0
 }
@@ -197,9 +201,9 @@ EOF
   reasons_json="$reasons_json]"
   local probe_json
   if [ "$DO_PROBE" = 1 ]; then
-    probe_json="{\"ran\":true,\"result\":$(fsg_json_str "$P_RESULT"),\"latency_ms\":$(fsg_json_num "$P_LATENCY_MS"),\"timeout_s\":$FSG_PROBE_TIMEOUT_S}"
+    probe_json="{\"ran\":true,\"result\":$(fsg_json_str "$P_RESULT"),\"latency_ms\":$(fsg_json_num "$P_LATENCY_MS"),\"timeout_s\":$FSG_PROBE_TIMEOUT_S,\"start_ms\":$(fsg_json_num "$P_START_MS")}"
   else
-    probe_json="{\"ran\":false,\"result\":\"skipped\",\"latency_ms\":null,\"timeout_s\":$FSG_PROBE_TIMEOUT_S}"
+    probe_json="{\"ran\":false,\"result\":\"skipped\",\"latency_ms\":null,\"timeout_s\":$FSG_PROBE_TIMEOUT_S,\"start_ms\":null}"
   fi
   local last_json=null lh
   lh=$(cat "$FSG_STATE_DIR/last-heal" 2>/dev/null)
@@ -257,7 +261,7 @@ fsg_cmd_status() {
   done
   local mrc
   fsg_measure; mrc=$?
-  P_RESULT=; P_LATENCY_MS=; P_DETAIL=
+  P_RESULT=; P_LATENCY_MS=; P_START_MS=; P_DETAIL=
   if [ "$DO_PROBE" = 1 ] && [ $mrc -eq 0 ]; then fsg_probe; fi
   fsg_classify $mrc
   fsg_affected
@@ -274,6 +278,7 @@ fsg_cmd_status() {
     else
       echo "fseventsd: $S_LEVEL - pid $M_PID, footprint $(fsg_size "$M_MB") (budget $FSG_BUDGET_MB MB, warn $FSG_WARN_MB, act $FSG_ACT_MB), cpu ${M_CPU:-?}%, up $(fsg_dur "${M_UP:-0}")"
       [ "$DO_PROBE" = 1 ] && echo "delivery probe: $P_RESULT${P_LATENCY_MS:+ (${P_LATENCY_MS} ms)}${P_DETAIL:+ - $P_DETAIL}"
+      [ -n "$P_START_MS" ] && echo "probe stream start: $P_START_MS ms (a healthy fseventsd takes 0-1 ms; logged only, no heal acts on it)"
     fi
     [ -n "$S_REASONS" ] && [ $mrc -eq 0 ] && printf '%s\n' "$S_REASONS" | sed 's/^/  reason: /'
     if [ "$D_PENDING" = true ]; then echo "drain: pending (phase $D_PHASE; $D_REASON); live leases: $D_LEASES"

@@ -267,7 +267,16 @@ if ! skip_case status; then
   eq $rc 2 "stalled probe is runaway"; eq "$(jget "$out" 'd["probe"]["result"]')" stalled "probe result"
   echo ok > "$FSG_FAKE/probe"; out=$("$G" status --json --probe)
   eq "$(jget "$out" 'd["probe"]["latency_ms"]')" 7 "latency"
+  eq "$(jget "$out" 'd["probe"]["start_ms"]')" 0 "stream start time"
   FSG_STATUS_PROBE=1 "$G" status >/dev/null; eq $? 0 "probe via config"
+  echo 7735 > "$FSG_FAKE/probe-start-ms"; out=$("$G" status --probe); eq $? 0 "a slow stream start is not a trigger"
+  has "$out" "probe stream start: 7735 ms (a healthy fseventsd takes 0-1 ms" "status line"
+  echo stalled > "$FSG_FAKE/probe"; out=$("$G" status --json --probe)
+  eq "$(jget "$out" 'd["probe"]["start_ms"]')" 7735 "stream start time of a stalled probe"
+  out=$("$G" status --json); eq "$(jget "$out" 'd["probe"]["start_ms"]')" None "null without a probe"
+  printf '#!/bin/bash\necho "result=ok latency_ms=5"\n' > "$FSG_STATE_DIR/bin/fsprobe"
+  echo ok > "$FSG_FAKE/probe"; out=$("$G" status --probe); eq $? 0 "a probe without start_ms still parses"
+  has "$out" "delivery probe: ok (5 ms)" "latency from the old format"; hasnt "$out" "stream start" "no start line"
 
   t "status thresholds precedence"
   mem 300M
@@ -3677,6 +3686,7 @@ if ! skip_case tick; then
   docker_default; install_fake --no-agent
   printf 'stalled\nok\n' > "$FSG_FAKE/probe-seq"; "$G" tick; eq $? 0 "one slow probe is not a stall"
   has "$(cat "$FSG_LOG")" "probe stalled once, then ok" "logged"
+  has "$(grep ' TICK level=' "$FSG_LOG" | tail -n 1)" "probe=ok/7ms start_ms=0" "the stream start time in the tick line"
   mem 300M; printf 'stalled\nstalled\nstalled\n' > "$FSG_FAKE/probe-seq"; : > "$FSG_FAKE/calls.log"
   "$G" tick >/dev/null 2>&1; rc=$?
   eq $rc 0 "confirmed stall above the floor heals"

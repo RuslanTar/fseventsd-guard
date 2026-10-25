@@ -870,7 +870,7 @@ change. New fields may be added. A breaking change bumps the schema to `/2`.
   "cpu_pct": 4.2,
   "uptime_s": 8821,
   "thresholds": {"budget_mb": 30, "warn_mb": 500, "act_mb": 2048},
-  "probe": {"ran": true, "result": "ok|stalled|error|unavailable|skipped", "latency_ms": 11, "timeout_s": 10},
+  "probe": {"ran": true, "result": "ok|stalled|error|unavailable|skipped", "latency_ms": 11, "timeout_s": 10, "start_ms": 0},
   "drain": {"pending": false, "phase": null, "reason": null, "live_leases": 0},
   "last_heal": null,
   "docker_intent": null,
@@ -900,6 +900,8 @@ change. New fields may be added. A breaking change bumps the schema to `/2`.
   is judged by its `TICK` lines only, and not at all without one (§13). `requests`
   is true when the installed app copy serves heal requests (`FSG_REQUEST_PROTOCOL`
   matches the caller's).
+- `probe.start_ms` is how long the probe's `FSEventStreamStart` took (§10), `null`
+  when no probe ran or the probe did not report it.
 - `reasons` lists why the level is not ok; `error` says why it could not measure.
 - `os.affected` is `true`, `false` or `null` (unknown).
 
@@ -958,6 +960,14 @@ A watchdog on a separate dispatch queue enforces the timeout even if the FSEvent
 calls block inside a wedged daemon. The shell adds an outer bound of timeout + 5 s.
 Measured on the owner's Mac with a healthy daemon: 3-11 ms. The probe adds one
 create and one delete per check: 2 events every 5 minutes.
+
+The probe also times `FSEventStreamStart` and appends it as `start_ms` to its ok
+and stalled lines (absent when the start had not returned by the timeout; parsers
+that read `latency_ms` are unaffected). A healthy daemon takes 0-1 ms; a sick one
+took 13-7,735 ms in [bun#43870](https://github.com/oven-sh/bun/issues/43870). It
+goes into each tick's `TICK` log line, `status --probe` and `status --json`
+(`probe.start_ms`). No heal acts on it yet: a threshold needs readings from sick
+daemons on more Macs first.
 
 ## 11. Changes from the original plan
 

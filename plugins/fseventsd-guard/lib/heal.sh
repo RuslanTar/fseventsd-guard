@@ -1320,7 +1320,7 @@ fsg_tick_check() {
   fi
   rm -f "$FSG_STATE_DIR/blind-ticks"
   DO_PROBE=$FSG_AGENT_PROBE
-  P_RESULT=; P_LATENCY_MS=; P_DETAIL=
+  P_RESULT=; P_LATENCY_MS=; P_START_MS=; P_DETAIL=
   if [ "$DO_PROBE" = 1 ]; then
     fsg_probe
     if [ "$P_RESULT" = stalled ]; then
@@ -1331,7 +1331,7 @@ fsg_tick_check() {
   fi
   fsg_classify 0
   TICK_LEVEL=$S_LEVEL
-  fsg_log "TICK level=$S_LEVEL pid=$M_PID mb=$M_MB cpu=${M_CPU:-} up_s=${M_UP:-} probe=${P_RESULT:-skipped}${P_LATENCY_MS:+/${P_LATENCY_MS}ms}"
+  fsg_log "TICK level=$S_LEVEL pid=$M_PID mb=$M_MB cpu=${M_CPU:-} up_s=${M_UP:-} probe=${P_RESULT:-skipped}${P_LATENCY_MS:+/${P_LATENCY_MS}ms}${P_START_MS:+ start_ms=$P_START_MS}"
   [ "$S_LEVEL" = ok ] && return 0
 
   local now last_t=0 last_mb=0 renotify=0
