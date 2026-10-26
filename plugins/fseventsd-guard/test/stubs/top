@@ -1,9 +1,19 @@
 #!/bin/bash
 # Test stub: top -l 1 -pid P -stats LIST for the fake fseventsd. Prints the header
-# only when P is not the fake daemon, like the real top. Waits $FSG_FAKE/top-delay
-# seconds first when that file exists.
+# only when P is not the fake daemon, like the real top. Waits first: the seconds on
+# the first line of $FSG_FAKE/top-delay-seq (one line per call, consumed in order),
+# else those in $FSG_FAKE/top-delay when that file exists. Each call's arguments go to
+# $FSG_FAKE/top-calls first, so a call cut off by a timeout counts too.
 . "$(dirname "$0")/_fake.sh"
-[ -f "$FSG_FAKE/top-delay" ] && /bin/sleep "$(cat "$FSG_FAKE/top-delay")" > /dev/null
+printf '%s\n' "$*" >> "$FSG_FAKE/top-calls"
+d=
+if [ -s "$FSG_FAKE/top-delay-seq" ]; then
+  d=$(head -n 1 "$FSG_FAKE/top-delay-seq")
+  tail -n +2 "$FSG_FAKE/top-delay-seq" > "$FSG_FAKE/top-delay-seq.tmp" && mv "$FSG_FAKE/top-delay-seq.tmp" "$FSG_FAKE/top-delay-seq"
+elif [ -f "$FSG_FAKE/top-delay" ]; then
+  d=$(cat "$FSG_FAKE/top-delay")
+fi
+[ -n "$d" ] && [ "$d" != 0 ] && /bin/sleep "$d" > /dev/null
 pid=""; stats=mem
 while [ $# -gt 0 ]; do
   case $1 in

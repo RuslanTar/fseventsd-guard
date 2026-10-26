@@ -30,7 +30,7 @@ decision from an accident. The user-facing summary is `../README.md`.
 | Sudoers drop-in | `/etc/sudoers.d/fseventsd-guard` (root:wheel 0440) | Standard include dir. No dot in the name (sudo skips dotted names; the installer's temp file uses that). |
 | Root evidence | `/Library/Logs/fseventsd-guard/` | Root writes its evidence where the user cannot alter it. |
 | User log | `~/Library/Logs/fseventsd-guard.log` | The standard per-user log dir; bounded to 5000 lines. |
-| launchd agent | `~/Library/LaunchAgents/io.github.ruslantar.fseventsd-guard.plist` | Per-user, no root. The only process that heals (§5.3). It runs the app copy's `fseventsd-guard` script directly (`#!/bin/bash`), so Background Items lists it by the guard's name, not as "bash". `doctor` reports launchctl's last exit status for it: a tick exits 0-3 (its level), 4-11 (an emergency heal's code, or 10 when it cannot take its lock), 14 (its emergency heal refused to stop Docker for data safety, §6: `doctor` names the last heal's result and record, with no reinstall advice) or 130 (stopped by a signal, after its trap cleaned up), so any other code is a warning. Another plist in the LaunchAgents dir that runs the app copy under another label (an install left under an older label) would heal next to it: `install` refuses before it changes anything, and `doctor` fails, naming the plist, its label and the fix. |
+| launchd agent | `~/Library/LaunchAgents/io.github.ruslantar.fseventsd-guard.plist` | Per-user, no root. The only process that heals (§5.3). It runs the app copy's `fseventsd-guard` script directly (`#!/bin/bash`), so Background Items lists it by the guard's name, not as "bash". It runs as `ProcessType` `Interactive`, unthrottled, so it can measure on a loaded Mac (§5.3; `doctor` warns on a plist without it). `doctor` reports launchctl's last exit status for it: a tick exits 0-3 (its level), 4-11 (an emergency heal's code, or 10 when it cannot take its lock), 14 (its emergency heal refused to stop Docker for data safety, §6: `doctor` names the last heal's result and record, with no reinstall advice) or 130 (stopped by a signal, after its trap cleaned up), so any other code is a warning. Another plist in the LaunchAgents dir that runs the app copy under another label (an install left under an older label) would heal next to it: `install` refuses before it changes anything, and `doctor` fails, naming the plist, its label and the fix. |
 
 The runner-side lease code (`lib/lease.sh`) is POSIX sh so that sh, bash and zsh
 scripts can source it. The root helper is `/bin/sh` with absolute tool paths.
@@ -211,7 +211,7 @@ scripts can source it. The root helper is `/bin/sh` with absolute tool paths.
 | wave back-off | a wave heal gave up at the drain cap < 60 min ago | wave heals exit 11 without draining | 60 min | a never-free machine would otherwise get an hour-long hold at every wave boundary; whether a warn alone should drain at all is an open question (§12) |
 | emergency | footprint ≥ `FSG_ACT_MB`, or a **confirmed** stalled probe | the tick's own emergency heal (cap policy proceed) | 2 GB | well above warn, before the machine suffers |
 | CPU escalator | footprint ≥ `FSG_WARN_MB` and fseventsd at ≥ `FSG_CPU_ESCALATE_PCT` of one core for `FSG_CPU_ESCALATE_TICKS` ticks in a row | counts as runaway, so as emergency above; `status` says runaway too (a wave boundary drains with the full cap) | 50%, 3 ticks | a runaway pins a core: 1.2 GB at 100% CPU ([claude-code#96008](https://github.com/anthropics/claude-code/issues/96008)) sat between warn and act. macOS's own CPU report fires at 50% over 180 s ([talkstream/fseventsd-runaway@78396ba](https://github.com/talkstream/fseventsd-runaway/tree/78396ba)) |
-| emergency interval | last guard restart, last heal attempt that reached the Docker step (or an emergency heal refused there, exit 14), or the helper's root stamp < 3 h ago | notify only | 10800 s | the original requirements: "at most once per ~3 h", "no restart loops". Counted from the newest of the three, so a wave heal plus an emergency heal cannot loop, and neither can a helper that keeps failing after Docker was stopped, nor a drain repeated every tick for a `--rm` container that keeps running (§6) |
+| emergency interval | last guard restart, last heal attempt that reached the Docker step (or an emergency heal refused there, exit 14, or ended there by a `top` that missed again, exit 3), or the helper's root stamp < 3 h ago | notify only | 10800 s | the original requirements: "at most once per ~3 h", "no restart loops". Counted from the newest of the three, so a wave heal plus an emergency heal cannot loop, and neither can a helper that keeps failing after Docker was stopped, nor a drain repeated every tick for a `--rm` container that keeps running (§6) or on a Mac too loaded for `top` (§5.3) |
 | helper floor | helper refuses below | n/a | 150 MB | above healthy (≤ 90 MB), below warn |
 | helper interval | helper refuses within | n/a | 1800 s | hard backstop under every tier |
 | emergency ceiling | footprint ≥ `FSG_EMERGENCY_CUT_MB` during an emergency drain | stop waiting, proceed | 8 GB | the daemon reached 17 GB on a 96%-full disk; waiting 60 min more risks the machine |
@@ -391,12 +391,59 @@ load and on a kickstart, never twice at once. In order:
      the request log links to, then writes `after.txt`, the Docker Desktop logs and
      `summary.txt`.
      Inside the tick, heal paths return their code instead of calling `exit`.
-5. The emergency check (§4), once per tick. It does not heal while an earlier intent
+5. The emergency check (§4), once per tick, its `top` sample tried again when it
+   does not answer in time (below). It does not heal while an earlier intent
    stays unverified; it notifies instead (throttled).
 6. Back to step 4 while a request is queued. Then release the lock, write the
    heartbeat, and exit with the level or the emergency heal's code (§2).
 
 The newest 20 finished requests (`.run`, `.log`, `.result`) are kept.
+
+**Measuring on a loaded Mac.** A runaway comes with a busy machine, and no heal runs
+without a measurement, so a `top` that misses `FSG_TOP_TIMEOUT_S` (15 s) must not
+blind the agent at once. Two parts:
+
+- The plist sets `ProcessType` to `Interactive`. Without one, launchd applies "light
+  resource limits" that throttle the job's CPU and I/O (launchd.plist(5)). Measured
+  with temporary agents at load average 107-131 on macOS 27.0.1: unset or
+  `Standard` ran the job as spawn type daemon at priority 20, and its `top` took
+  10-27 s, often past 15 s; `Interactive` ran it at priority 31, and `top` took
+  1.3-1.5 s. `Adaptive` (priority 4 for a job without XPC transactions) and
+  `Background` (priority 4) were slower still: no `top` result in 40 s. The cost: a
+  tick, and any heal it runs, competes at app priority; a tick is short and a drain
+  mostly sleeps. The root helper runs under `sudo` as the tick's child, so it most
+  likely gets the same priority (inferred, not checked: it needs sudo). `install`
+  writes the plist, so an older install gets the key when `install` runs again;
+  until then `doctor` warns.
+- The agent's emergency check (step 5) and a heal's precheck, so every heal (also
+  `heal --dry-run`), try a `top` that did not answer up to `FSG_MEASURE_TRIES` (3)
+  times in all, `FSG_MEASURE_RETRY_S` (5 s) apart: about a minute at most. Each
+  slow try is logged (`MEASURE top did not answer within 15s (try 1 of 3)`). Any
+  other failure (no fseventsd, two of them, an unreadable footprint) is final at
+  once. After the last try the reason gives the number of tries and the daemon's
+  resident size from `ps -o rss`, a lower bound on the footprint (it leaves out
+  compressed and swapped pages), for the log and the notices; no decision uses it
+  (`footprint -p` as the user fails). A blind tick counts once toward
+  `FSG_BLIND_NOTIFY_TICKS`, whatever its tries. `status`, the hooks, and the
+  measurements inside a heal (the healthy wait, which polls anyway, the verify
+  step, and the drain's emergency ceiling) try once.
+- A heal whose precheck needed more than one try takes one more `top`, a single
+  try, right before its Docker step: after the drain and the `--rm` volume checks,
+  before the Docker intent, and only when that step acts on Docker (B, C, or A with
+  containers to stop; not `none`, nor a Docker that is stopped or not local). The
+  root helper takes one `top` sample of its own, bounded at 15 s and not tried
+  again, and refuses (70) when it misses, after the Docker step ran; this check
+  keeps that from bouncing Docker for nothing on a Mac that has just missed. When
+  this `top` misses too, the heal ends with exit 3 and Docker untouched: logged
+  (`HEAL busy: top missed again before the Docker step; Docker left alone`),
+  recorded as `refused-cannot-measure`, a `cannot heal` notice (cannot measure)
+  naming that reason, and the drain ends as after the refusals before it (exit 14).
+  Like those, an emergency heal ending here counts as an attempt (the emergency
+  interval), else the agent would drain again every tick while the Mac stays
+  loaded; a precheck that cannot measure ends before the drain and does not count.
+  When it answers, or fails another way (the helper checks for itself), the heal
+  goes on unchanged; its measurement is logged only. A precheck that answered at
+  once measures no more. The helper can still miss after this check answered.
 
 Tests install with `--prefix` and the stub `launchctl`: `bootstrap` marks the agent
 loaded, `bootout` unloads it (heal and trial then exit 9), and `kickstart` starts the
@@ -421,7 +468,9 @@ drain/pending phase=draining (a hold in place is saved aside, §5.5)
    │                        └▶ policy proceed: notify which runs are cut
    │          drained with mid-drain starts ──▶ notify which runs are cut
    ▼
-phase=docker-before (docker-intent written; cannot ──▶ 10, nothing stopped)
+phase=docker-before (--rm volume checks ──▶ 14; precheck needed a second top:
+   │          one more, missed ──▶ 3; nothing stopped)
+   │ docker-intent written; cannot ──▶ 10, nothing stopped
    ─▶ phase=restarting (sudo -n helper) ─▶ phase=waiting-healthy
    ─▶ phase=docker-after (always, even if the restart failed) ─▶ phase=verifying
    ─▶ Docker verified: release the drain, notify, record
@@ -570,10 +619,18 @@ Docker before-step only gets its saved hold back, or its drain ended. Either way
 running request gets result 130 (its heal's own code if that heal had already
 returned) and the lock is released. The plist sets
 `ExitTimeOut` to 3 × `FSG_DOCKER_TIMEOUT_S` + 180 s plus the longest single bounded
-call (the larger of `FSG_HELPER_TIMEOUT_S` and `FSG_DOCKER_TIMEOUT_S` + 10 s) so
-launchd does not SIGKILL that wait and restore (its default is 20 s), and `install` refuses to reload the agent while a
-heal is in progress. A SIGKILL runs no trap: the intent and a hold saved aside
-(`drain/pending.saved.<pid>`) stay, and the next tick puts that hold back (unless a
+call (the larger of `FSG_HELPER_TIMEOUT_S` and `FSG_DOCKER_TIMEOUT_S` + 10 s), the
+time that wait and restore can take, but launchd does not grant it: it caps a user
+agent's exit timeout at 60 s. Measured on macOS 27.0.1 (26A434) with temporary
+agents: 30, 59 and 60 read back as such in `launchctl print`, 61, 120 and 1390 as
+60 (1390 also with `ProcessType` Interactive, Adaptive or Background), and no value
+as 5 s (launchd.plist(5) says only "system-defined"). An agent with 1390 that
+ignored SIGTERM was SIGKILLed exactly 60 s after `launchctl bootout`, which itself
+returned at once. So a restore that outlasts that minute is cut off; the intent and
+the next tick then recover Docker (below), as after any SIGKILL. `doctor` reports
+the value launchd uses when it is below the plist's. `install` refuses to reload
+the agent while a heal is in progress. A SIGKILL runs no trap: the intent and a
+hold saved aside (`drain/pending.saved.<pid>`) stay, and the next tick puts that hold back (unless a
 live drain or hold is in place) before it recovers. Until then leased runs hold
 behind the intent itself (§5.2), so they do not start against the Docker the killed
 tick stopped, even if no tick runs again.
@@ -867,7 +924,7 @@ one was a trial's.
 | Command | Codes |
 |---|---|
 | `status` | 0 ok, 1 warn, 2 runaway, 3 cannot measure |
-| `heal` | 0 healed, 3 cannot measure, 4 drain cap reached (abort), 6 helper would refuse (healthy / rate limited / stalled below the floor), 7 restart failed (Docker restored), 8 restarted but Docker restore or verify failed, or refused while an earlier heal's Docker is still not verified (nothing was stopped), 9 not installed (helper, drop-in or agent missing, the agent not loaded or older than the request protocol, or `sudo -n -l` refuses the helper; checked before the drain), 10 the request, the drain marker or the Docker intent could not be written, or the request stayed unclaimed for 2 agent intervals while no tick ran or for `FSG_REQUEST_MAX_AGE_S`: disk full or state dir not writable (nothing was stopped), 11 wave back-off: a wave heal gave up at the drain cap less than `FSG_WAVE_RETRY_MIN` (60) minutes ago, so no new drain, 12 queued or still running (`--no-wait`, `--result ID --no-wait`), 13 dropped before it started (too old), 14 refused after the drain: the Docker step would stop a running `--rm` container with an anonymous volume, which Docker deletes with it, or Docker answers but did not list its containers, so none could be checked (nothing was stopped or restarted, §6), 130 the agent was stopped during the heal (§5.5), 64 usage or an invalid request. A joined request (§5.3) returns the code of the heal it joined: 0, 7 or 8 |
+| `heal` | 0 healed, 3 cannot measure (in the precheck; or after the drain, when a precheck that needed a second `top` is followed by one that misses right before the Docker step: nothing was stopped or restarted, §5.3), 4 drain cap reached (abort), 6 helper would refuse (healthy / rate limited / stalled below the floor), 7 restart failed (Docker restored), 8 restarted but Docker restore or verify failed, or refused while an earlier heal's Docker is still not verified (nothing was stopped), 9 not installed (helper, drop-in or agent missing, the agent not loaded or older than the request protocol, or `sudo -n -l` refuses the helper; checked before the drain), 10 the request, the drain marker or the Docker intent could not be written, or the request stayed unclaimed for 2 agent intervals while no tick ran or for `FSG_REQUEST_MAX_AGE_S`: disk full or state dir not writable (nothing was stopped), 11 wave back-off: a wave heal gave up at the drain cap less than `FSG_WAVE_RETRY_MIN` (60) minutes ago, so no new drain, 12 queued or still running (`--no-wait`, `--result ID --no-wait`), 13 dropped before it started (too old), 14 refused after the drain: the Docker step would stop a running `--rm` container with an anonymous volume, which Docker deletes with it, or Docker answers but did not list its containers, so none could be checked (nothing was stopped or restarted, §6), 130 the agent was stopped during the heal (§5.5), 64 usage or an invalid request. A joined request (§5.3) returns the code of the heal it joined: 0, 7 or 8 |
 | `trial` | the heal's code; 13 dropped before it started (its requester was gone); 64 usage (also `--no-wait`) |
 | `run` | the command's own code; 75 when it gave up waiting for a drain |
 | `release` | 0 released or nothing held; 1 a running heal holds the drain (it releases it itself) |
@@ -918,7 +975,7 @@ change. New fields may be added. A breaking change bumps the schema to `/2`.
 ```
 
 - `pid`, `footprint_mb`, `cpu_pct`, `uptime_s` are `null` when level is `unknown`.
-- `last_heal`, when present, is `{"epoch", "result" (healed|restart-failed|restored-partly|aborted-at-cap|refused-anonymous-volumes|refused-unlisted|drain-not-marked|intent-not-written), "trigger", "docker_variant", "wall_s"}`.
+- `last_heal`, when present, is `{"epoch", "result" (healed|restart-failed|restored-partly|aborted-at-cap|refused-anonymous-volumes|refused-unlisted|refused-cannot-measure|drain-not-marked|intent-not-written), "trigger", "docker_variant", "wall_s"}`.
 - `docker_intent` is `null`, or `{"owner_pid", "owner_alive", "trigger", "docker_variant", "since_epoch", "after_step_done"}` while a heal's Docker step has not verified (§5.5). `owner_alive` is true while the tick that wrote it is still in that heal; false means that heal is gone, Docker may be down and the next tick recovers it. `after_step_done` is true once the after-step ran and every container in the restore set was started.
 - `requests` is the agent's queue (§5.3): `queued`, the number of requests not yet claimed, and `running`, `null` or `{"id", "trigger", "requester_pid", "requester_alive", "phase"}`.
 - `agent` is the background agent's heartbeat (`heartbeat` in the state dir), which
@@ -942,7 +999,8 @@ change. New fields may be added. A breaking change bumps the schema to `/2`.
 
 Footprint comes from `top -l 1 -pid P -stats pid,mem,cmprs,ports` (MEM is the
 physical footprint, the figure Apple's budget refers to), bounded by
-`FSG_TOP_TIMEOUT_S` (15 s; a slower sample counts as cannot measure). Each tick's
+`FSG_TOP_TIMEOUT_S` (15 s; a slower sample counts as cannot measure; `status` tries
+once, the agent's check and a heal's precheck try again, §5.3). Each tick's
 `TICK` log line also carries the compressed memory (`cmprs_mb`) and Mach ports
 (`ports`) from that sample and the swap in use (`swap_used_mb`, from `sysctl
 vm.swapusage`); they are logged only. Ports tell many live clients apart from
@@ -1072,6 +1130,18 @@ machine measured 50-200 events/s normally and 2,117-5,715 on flood days
     the tick. Checked in the first live B or C trial (`DOCKER-TRIALS.md` §2); if
     Docker shares the group, the plist needs `AbandonProcessGroup` or the agent must
     start Docker Desktop with `open -a Docker` (owner decision).
+11. The root helper measures with its own `top`, bounded at 15 s and tried once: on
+    a Mac loaded enough to miss that, it refuses with 70 after the drain and the
+    Docker before-step ran (exit 7). A heal whose precheck needed a second `top`
+    takes one more right before the Docker step and ends with 3, Docker untouched,
+    when it misses (§5.3); a helper `top` that misses after that one answered, or
+    after a precheck that answered at once, still ends this way. Retrying in the
+    helper changes root code, so every install asks for sudo again (owner
+    decision). With `ProcessType` `Interactive` it most likely runs at the agent's
+    priority (§5.3, not checked).
+12. A tick that cannot measure returns before its probe, so a delivery stall goes
+    unseen while the agent is blind. It could still probe and notify a stall
+    (it cannot heal without a measurement).
 
 ## 13. Agents from before heal requests
 

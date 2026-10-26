@@ -737,12 +737,12 @@ fsg_cmd_heal() {
   fsg_req_submit "$trigger" "$cap" "$policy" "$variant" "$force" "" "$nowait"
 }
 
-# Measures and checks whether the root helper would accept a restart, before any
-# drain, so runs are not held for a restart that would be refused. Sets H_MRC (the
-# measure's code), H_INSTALLED, H_REFUSE (why it would refuse, or empty), H_AGE and
-# H_OLD_PID.
+# Measures (a slow top is tried again: fsg_measure_retry) and checks whether the
+# root helper would accept a restart, before any drain, so runs are not held for a
+# restart that would be refused. Sets H_MRC (the measure's code), H_TRIES (its top
+# tries), H_INSTALLED, H_REFUSE (why it would refuse, or empty), H_AGE and H_OLD_PID.
 fsg_heal_precheck() { # force
-  fsg_measure; H_MRC=$?
+  fsg_measure_retry; H_MRC=$?; H_TRIES=$M_TRIES
   HEAL_MB_BEFORE=$M_MB; H_OLD_PID=$M_PID
   # The probe tells a stall apart from a merely large daemon.
   P_RESULT=; P_DETAIL=
@@ -891,6 +891,30 @@ fsg__heal_helper_done() {
   case $HELPER_RC in 0|72|73) fsg_now > "$FSG_STATE_DIR/last-restart" ;; esac
 }
 
+# 0 when the heal's Docker step acts on Docker: B and C always, A when it has
+# containers to stop; never none, nor skip (Docker stopped or not local).
+fsg__heal_docker_acts() { case $HEAL_VARIANT in B|C) return 0 ;; A) [ -n "$DK_STOP_IDS" ] ;; *) return 1 ;; esac; }
+
+# One more top, right before the Docker step of a heal whose precheck needed more
+# than one try: the root helper takes a single top sample of its own and refuses
+# (70) when it misses, after the Docker step. 1 when top did not answer again
+# (H_GATE_ERR says so); any other result goes on, and the precheck's measurement
+# stays as it was.
+fsg__heal_top_gate() {
+  local M_PID M_MB M_CPU M_UP M_ERR M_CMPRS_MB M_PORTS M_CPU_MS M_SLOW
+  H_GATE_ERR=
+  if fsg_measure; then
+    fsg_log "HEAL top answered again before the Docker step (the precheck needed $H_TRIES tries)"
+    return 0
+  fi
+  if [ "$M_SLOW" != 1 ]; then
+    fsg_log "HEAL measure before the Docker step: $M_ERR (not a slow top; the heal goes on)"
+    return 0
+  fi
+  H_GATE_ERR=$M_ERR
+  return 1
+}
+
 # The part of a heal past the precheck: drain, Docker before-step, restart, Docker
 # after-step, verify. fsg_heal_main ends the drain.
 fsg_heal_run() { # t0 old_pid cap policy
@@ -979,6 +1003,20 @@ fsg_heal_run() { # t0 old_pid cap policy
     # C lists them again before its restart (fsg_docker_after).
     [ "$HEAL_VARIANT" != C ] && fsg_docker_unchecked "$HEAL_VARIANT" &&
       DK_NOTE="Docker step $HEAL_VARIANT ran unchecked: Docker did not answer docker info (wedged), so its containers were not listed, and any --rm container with an anonymous volume that it stopped lost that volume"
+  fi
+  # A precheck that needed a second top ran on a Mac that misses FSG_TOP_TIMEOUT_S;
+  # if top misses again now, the helper's own single sample likely would too, after
+  # Docker was stopped. Ends like the other refusals here: fsg_heal_main ends the drain,
+  # and an emergency heal counts as an attempt, else the agent would drain again every
+  # tick while the Mac stays loaded.
+  if [ "${H_TRIES:-1}" -gt 1 ] && fsg__heal_docker_acts && ! fsg__heal_top_gate; then
+    fsg_log "HEAL busy: top missed again before the Docker step; Docker left alone ($H_GATE_ERR)"
+    fsg_heal_record refused-cannot-measure $(( $(fsg_now) - t0 ))
+    [ "$HEAL_TRIGGER" = emergency ] && fsg_now > "$FSG_STATE_DIR/last-attempt"
+    fsg_notify "fseventsd-guard: cannot heal" "cannot measure" \
+      "top missed again before the Docker step; Docker left alone ($H_GATE_ERR; the precheck needed $H_TRIES tries). Nothing was stopped or restarted. Next: fseventsd-guard doctor."
+    fsg_say "heal: cannot measure fseventsd before the Docker step ($H_GATE_ERR); Docker left alone, nothing was stopped or restarted"
+    return 3
   fi
   rm_txt=""
   if fsg_docker_stops_containers "$HEAL_VARIANT"; then
@@ -1311,10 +1349,11 @@ fsg_req_run() { # id
   unset HEAL_REQ_CHAIN HEAL_REQ_PID HEAL_REQ_LSTART HEAL_REQ_WAITS
 }
 
-# Tick step 5: the emergency tier (docs/DESIGN.md §4), once per tick.
+# Tick step 5: the emergency tier (docs/DESIGN.md §4), once per tick (a slow top is
+# tried again; a tick blind after its tries counts once).
 fsg_tick_check() {
   local mrc
-  fsg_measure; mrc=$?
+  fsg_measure_retry; mrc=$?
   if [ $mrc -ne 0 ]; then
     # A blind guard must not be silent: after FSG_BLIND_NOTIFY_TICKS failed ticks
     # in a row, notify (once per renotify window).

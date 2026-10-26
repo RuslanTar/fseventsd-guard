@@ -23,6 +23,12 @@
 		<key>FSG_LOG</key>
 		<string>@USER_LOG@</string>
 	</dict>
+	<!-- Without a ProcessType launchd throttles the job's CPU and I/O: on a loaded
+	     Mac its top sample took 10-27 s and missed FSG_TOP_TIMEOUT_S; as Interactive
+	     it took 1-2 s. A tick is short and a drain mostly sleeps (docs/DESIGN.md
+	     §5.3). -->
+	<key>ProcessType</key>
+	<string>Interactive</string>
 	<key>RunAtLoad</key>
 	<true/>
 	<key>StartInterval</key>

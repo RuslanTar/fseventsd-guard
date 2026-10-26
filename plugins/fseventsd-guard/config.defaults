@@ -27,8 +27,15 @@ FSG_ACT_MB=2048
 FSG_CPU_ESCALATE_PCT=50
 FSG_CPU_ESCALATE_TICKS=3
 # Seconds one `top` sample may take (it takes 1-2 s); a slower one counts as cannot
-# measure.
+# measure, unless another try below answers.
 FSG_TOP_TIMEOUT_S=15
+# The agent's check and a heal's precheck try a `top` that did not answer in time up
+# to this many times in all, this many seconds apart (a loaded Mac; with the
+# defaults about a minute at most). status, the hooks and the checks inside a heal
+# try once; a heal whose precheck needed more than one try checks once more before
+# its Docker step and stops there (exit 3, Docker untouched) if top misses again.
+FSG_MEASURE_TRIES=3
+FSG_MEASURE_RETRY_S=5
 
 # --- Delivery probe -----------------------------------------------------------------
 # Seconds the probe waits for its own write to come back as an FSEvent.

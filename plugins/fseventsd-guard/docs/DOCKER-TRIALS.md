@@ -202,7 +202,9 @@ trial, `fswatch -r -t` (an FSEvents stream) and Node's
 `fs.watch(dir, { recursive: true })`, each saw 5 of 5 new files. Then three
 `trial --variant none` runs each ended with exit 3 ("cannot measure fseventsd (top
 did not answer within 15s)" in the agent's tick, at load averages of 33 to 48 from
-a parallel test suite), with the same fseventsd pid throughout. Afterwards both
+a parallel test suite), with the same fseventsd pid throughout (the agent then ran
+throttled, with no `ProcessType`, and tried `top` once; it now runs as
+`Interactive` and tries three times, docs/DESIGN.md §5.3). Afterwards both
 watchers, and a third one started fresh as a control, saw 3 of 3 more files. So
 the notices keep the line. Re-run on a quiet machine (load well under 20). A pass
 there covers native FSEvents clients and Node watchers (Node's recursive watch on
