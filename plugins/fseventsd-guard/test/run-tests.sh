@@ -1363,6 +1363,17 @@ if ! skip_case install-heal; then
   FSG_HELPER_TIMEOUT_S=5 install_fake
   et=$(plutil -extract ExitTimeOut raw "$P" 2>/dev/null)
   eq "$et" $((3 * FSG_DOCKER_TIMEOUT_S + 180 + FSG_DOCKER_TIMEOUT_S + 10)) "or the interrupted docker desktop call, when that is longer"
+
+  t "launchd runs the agent unthrottled (ProcessType Interactive)"
+  docker_default; install_fake; eq $? 0 "install"
+  P="$FSG_LAUNCH_AGENTS_DIR/io.github.ruslantar.fseventsd-guard.plist"
+  eq "$(plutil -extract ProcessType raw -o - "$P" 2>/dev/null)" Interactive "ProcessType"
+  "$G" doctor --prefix "$FSG_PREFIX" > "$C/doc.out" 2>&1; eq $? 0 "doctor clean"
+  plutil -remove ProcessType "$P"
+  "$G" doctor --prefix "$FSG_PREFIX" > "$C/doc.out" 2>&1; eq $? 1 "doctor warns on a plist without it"
+  has "$(cat "$C/doc.out")" "WARN  agent plist sets no ProcessType Interactive" "doctor names it"
+  has "$(grep 'ProcessType' "$C/doc.out")" "re-run install" "and the fix"
+  install_fake; eq "$(plutil -extract ProcessType raw -o - "$P" 2>/dev/null)" Interactive "install puts it back"
 fi
 
 # ======================================================================== leases
