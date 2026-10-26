@@ -560,7 +560,8 @@ None of them lets a non-root user gain root.
   the helper refuses (70) after the drain and the Docker step, and the heal ends
   with exit 7, Docker restored. A heal whose precheck needed a second try takes one
   more `top` right before the Docker step and, if that misses too, ends with exit 3
-  before it touches Docker; the helper can still miss after that one answered.
+  before it touches Docker (an emergency heal ending this way waits out the 3-hour
+  emergency interval); the helper can still miss after that one answered.
   Retrying in the helper is root code (a sudo install).
 - **An agent killed outright mid-heal.** A caller cannot stop a heal, but the
   agent's tick can still be killed (`kill -9`, or launchd's SIGKILL at the end of

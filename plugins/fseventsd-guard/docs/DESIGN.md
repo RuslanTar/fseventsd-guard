@@ -211,7 +211,7 @@ scripts can source it. The root helper is `/bin/sh` with absolute tool paths.
 | wave back-off | a wave heal gave up at the drain cap < 60 min ago | wave heals exit 11 without draining | 60 min | a never-free machine would otherwise get an hour-long hold at every wave boundary; whether a warn alone should drain at all is an open question (§12) |
 | emergency | footprint ≥ `FSG_ACT_MB`, or a **confirmed** stalled probe | the tick's own emergency heal (cap policy proceed) | 2 GB | well above warn, before the machine suffers |
 | CPU escalator | footprint ≥ `FSG_WARN_MB` and fseventsd at ≥ `FSG_CPU_ESCALATE_PCT` of one core for `FSG_CPU_ESCALATE_TICKS` ticks in a row | counts as runaway, so as emergency above; `status` says runaway too (a wave boundary drains with the full cap) | 50%, 3 ticks | a runaway pins a core: 1.2 GB at 100% CPU ([claude-code#96008](https://github.com/anthropics/claude-code/issues/96008)) sat between warn and act. macOS's own CPU report fires at 50% over 180 s ([talkstream/fseventsd-runaway@78396ba](https://github.com/talkstream/fseventsd-runaway/tree/78396ba)) |
-| emergency interval | last guard restart, last heal attempt that reached the Docker step (or an emergency heal refused there, exit 14), or the helper's root stamp < 3 h ago | notify only | 10800 s | the original requirements: "at most once per ~3 h", "no restart loops". Counted from the newest of the three, so a wave heal plus an emergency heal cannot loop, and neither can a helper that keeps failing after Docker was stopped, nor a drain repeated every tick for a `--rm` container that keeps running (§6) |
+| emergency interval | last guard restart, last heal attempt that reached the Docker step (or an emergency heal refused there, exit 14, or ended there by a `top` that missed again, exit 3), or the helper's root stamp < 3 h ago | notify only | 10800 s | the original requirements: "at most once per ~3 h", "no restart loops". Counted from the newest of the three, so a wave heal plus an emergency heal cannot loop, and neither can a helper that keeps failing after Docker was stopped, nor a drain repeated every tick for a `--rm` container that keeps running (§6) or on a Mac too loaded for `top` (§5.3) |
 | helper floor | helper refuses below | n/a | 150 MB | above healthy (≤ 90 MB), below warn |
 | helper interval | helper refuses within | n/a | 1800 s | hard backstop under every tier |
 | emergency ceiling | footprint ≥ `FSG_EMERGENCY_CUT_MB` during an emergency drain | stop waiting, proceed | 8 GB | the daemon reached 17 GB on a 96%-full disk; waiting 60 min more risks the machine |
@@ -438,11 +438,12 @@ blind the agent at once. Two parts:
   (`HEAL busy: top missed again before the Docker step; Docker left alone`),
   recorded as `refused-cannot-measure`, a `cannot heal` notice (cannot measure)
   naming that reason, and the drain ends as after the refusals before it (exit 14).
-  Unlike those, an emergency heal ending here does not count as an attempt (the
-  emergency interval), as a precheck that cannot measure does not. When it answers,
-  or fails another way (the helper checks for itself), the heal goes on unchanged;
-  its measurement is logged only. A precheck that answered at once measures no
-  more. The helper can still miss after this check answered.
+  Like those, an emergency heal ending here counts as an attempt (the emergency
+  interval), else the agent would drain again every tick while the Mac stays
+  loaded; a precheck that cannot measure ends before the drain and does not count.
+  When it answers, or fails another way (the helper checks for itself), the heal
+  goes on unchanged; its measurement is logged only. A precheck that answered at
+  once measures no more. The helper can still miss after this check answered.
 
 Tests install with `--prefix` and the stub `launchctl`: `bootstrap` marks the agent
 loaded, `bootout` unloads it (heal and trial then exit 9), and `kickstart` starts the
