@@ -1375,6 +1375,17 @@ if ! skip_case install-heal; then
   has "$(cat "$C/doc.out")" "WARN  agent plist sets no ProcessType Interactive" "doctor names it"
   has "$(grep 'ProcessType' "$C/doc.out")" "re-run install" "and the fix"
   install_fake; eq "$(plutil -extract ProcessType raw -o - "$P" 2>/dev/null)" Interactive "install puts it back"
+
+  t "doctor names launchd's cap on the agent's exit time"
+  docker_default; install_fake
+  P="$FSG_LAUNCH_AGENTS_DIR/io.github.ruslantar.fseventsd-guard.plist"
+  want=$(plutil -extract ExitTimeOut raw -o - "$P" 2>/dev/null)
+  printf '\texit timeout = 60\n\tlast exit code = 0\n' > "$FSG_FAKE/launchctl-print"
+  out=$("$G" doctor --prefix "$FSG_PREFIX" 2>&1); rc=$?
+  has "$out" "info  launchctl: launchd gives the agent 60 s from SIGTERM to SIGKILL, not the plist's ExitTimeOut of $want s" "the cap"
+  eq $rc 0 "info only"
+  printf '\texit timeout = %s\n\tlast exit code = 0\n' "$want" > "$FSG_FAKE/launchctl-print"
+  hasnt "$("$G" doctor --prefix "$FSG_PREFIX" 2>&1)" "from SIGTERM to SIGKILL" "nothing when launchd honours it"
 fi
 
 # ======================================================================== leases

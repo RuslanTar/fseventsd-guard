@@ -126,12 +126,14 @@ fsg_agent_path() {
   echo "$p"
 }
 
-# Seconds launchd waits between SIGTERM and SIGKILL when it stops the agent. A heal
-# stopped part way first lets the bounded call the signal cut into finish (the root
-# helper, or a docker desktop stop|start|restart), then restores Docker from its EXIT
-# trap: docker desktop start (timeout + 10 s), the engine wait (timeout) and docker
-# start (timeout), plus the per-container inspects. launchd's default (20 s) would
-# SIGKILL it mid-restore.
+# Seconds launchd should wait between SIGTERM and SIGKILL when it stops the agent. A
+# heal stopped part way first lets the bounded call the signal cut into finish (the
+# root helper, or a docker desktop stop|start|restart), then restores Docker from its
+# EXIT trap: docker desktop start (timeout + 10 s), the engine wait (timeout) and
+# docker start (timeout), plus the per-container inspects. launchd caps a user
+# agent's value at 60 s (macOS 27.0.1; 5 s when unset), so past that minute the
+# intent and the next tick recover Docker (docs/DESIGN.md §5.5); doctor shows the
+# value launchd uses.
 fsg_agent_exit_timeout() {
   local call=$((FSG_DOCKER_TIMEOUT_S + 10))
   [ "$FSG_HELPER_TIMEOUT_S" -gt "$call" ] && call=$FSG_HELPER_TIMEOUT_S
@@ -866,7 +868,8 @@ fsg_uninstall_live() {
 
 # After bootout: waits until nothing of the guard runs, so nothing writes into what
 # is removed next (a helper still running would make /Library/Logs/fseventsd-guard
-# again). launchd SIGKILLs the agent's tick ExitTimeOut seconds after bootout.
+# again). launchd SIGKILLs the agent's tick ExitTimeOut seconds after bootout (60 s
+# where launchd caps it); the plist's value stays the bound.
 fsg_uninstall_wait() {
   local bound t0 w said=-30 what
   bound=$(plutil -extract ExitTimeOut raw -o - "$FSG_PLIST" 2>/dev/null)
@@ -1249,6 +1252,16 @@ fsg_doctor_last_exit() { # launchctl-print-output
   fi
 }
 
+# Reports an exit timeout in `launchctl print` output below the plist's ExitTimeOut:
+# launchd caps a user agent's (60 s on macOS 27.0.1).
+fsg_doctor_exit_timeout() { # launchctl-print-output
+  local got want
+  got=$(printf '%s\n' "$1" | sed -n 's/^[[:space:]]*exit timeout = \([0-9][0-9]*\).*/\1/p' | head -n 1)
+  want=$(plutil -extract ExitTimeOut raw -o - "$FSG_PLIST" 2>/dev/null)
+  fsg_is_uint "$got" && fsg_is_uint "$want" && [ "$got" -lt "$want" ] || return 0
+  fsg_doc info "launchctl: launchd gives the agent $got s from SIGTERM to SIGKILL, not the plist's ExitTimeOut of $want s (launchd caps it), so a heal stopped part way (logout, launchctl bootout) can be killed in its Docker restore; its Docker intent stays, and the next tick restores Docker (docs/DESIGN.md §5.5)"
+}
+
 fsg_cmd_doctor() {
   local affected_only=0
   while [ $# -gt 0 ]; do
@@ -1399,6 +1412,7 @@ EOF
     if lc=$(launchctl print "gui/$(id -u)/$FSG_LABEL" 2>/dev/null); then
       fsg_doc ok "agent $FSG_LABEL is loaded"
       fsg_doctor_last_exit "$lc"
+      fsg_doctor_exit_timeout "$lc"
     elif fsg_agent_disabled; then
       fsg_doc fail "agent $FSG_LABEL is not loaded: $(fsg_agent_disabled_text); launchctl bootstrap gui/$(id -u) \"$FSG_PLIST\""
     else
