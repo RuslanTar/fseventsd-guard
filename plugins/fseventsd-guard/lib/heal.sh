@@ -1006,10 +1006,13 @@ fsg_heal_run() { # t0 old_pid cap policy
   fi
   # A precheck that needed a second top ran on a Mac that misses FSG_TOP_TIMEOUT_S;
   # if top misses again now, the helper's own single sample likely would too, after
-  # Docker was stopped. Ends like the other refusals here: fsg_heal_main ends the drain.
+  # Docker was stopped. Ends like the other refusals here: fsg_heal_main ends the drain,
+  # and an emergency heal counts as an attempt, else the agent would drain again every
+  # tick while the Mac stays loaded.
   if [ "${H_TRIES:-1}" -gt 1 ] && fsg__heal_docker_acts && ! fsg__heal_top_gate; then
     fsg_log "HEAL busy: top missed again before the Docker step; Docker left alone ($H_GATE_ERR)"
     fsg_heal_record refused-cannot-measure $(( $(fsg_now) - t0 ))
+    [ "$HEAL_TRIGGER" = emergency ] && fsg_now > "$FSG_STATE_DIR/last-attempt"
     fsg_notify "fseventsd-guard: cannot heal" "cannot measure" \
       "top missed again before the Docker step; Docker left alone ($H_GATE_ERR; the precheck needed $H_TRIES tries). Nothing was stopped or restarted. Next: fseventsd-guard doctor."
     fsg_say "heal: cannot measure fseventsd before the Docker step ($H_GATE_ERR); Docker left alone, nothing was stopped or restarted"

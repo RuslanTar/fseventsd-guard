@@ -2845,10 +2845,30 @@ if ! skip_case slow-top; then
   eq "$(cat "$FSG_FAKE/docker/desktop")" running "Docker still running"
   absent "$FSG_STATE_DIR/docker-intent" "no Docker intent left"
   absent "$FSG_STATE_DIR/drain/pending" "the drain is released"
-  absent "$FSG_STATE_DIR/last-attempt" "not counted as an attempt on Docker"
+  absent "$FSG_STATE_DIR/last-attempt" "a manual heal leaves the agent's emergency interval alone"
   has "$(cat "$FSG_STATE_DIR/last-heal")" " refused-cannot-measure manual " "recorded"
   eq "$(grep -c 'cannot heal' "$FSG_FAKE/notifications.log")" 1 "one cannot-heal notice"
   has "$(grep 'cannot heal' "$FSG_FAKE/notifications.log")" "top missed again before the Docker step; Docker left alone" "the notice names the reason"
+
+  t "an emergency heal whose top misses again before the Docker step counts against the emergency interval"
+  docker_default; install_fake --no-agent; mem 3G
+  : > "$FSG_FAKE/notifications.log"
+  # A Mac that stays loaded, each tick alike: the tick's own check answers at once,
+  # the precheck's first top is slow and its second answers, the one before the
+  # Docker step is slow again.
+  printf '0\n5\n0\n5\n' > "$FSG_FAKE/top-delay-seq"
+  FSG_TOP_TIMEOUT_S=2 FSG_MEASURE_RETRY_S=0 "$G" tick > "$C/o" 2>&1; eq $? 3 "the agent's emergency heal ends with 3 ($(tail -n 1 "$C/o"))"
+  has "$(cat "$FSG_LOG")" "HEAL busy: top missed again before the Docker step; Docker left alone" "refused before the Docker step"
+  hasnt "$(cat "$FSG_FAKE/calls.log")" "docker desktop stop" "Docker Desktop not stopped"
+  hasnt "$(cat "$FSG_FAKE/calls.log")" "sudo -n /" "no restart"
+  has "$(cat "$FSG_STATE_DIR/last-heal")" " refused-cannot-measure emergency " "recorded"
+  exists "$FSG_STATE_DIR/last-attempt" "stamped"
+  printf '0\n5\n0\n5\n' > "$FSG_FAKE/top-delay-seq"
+  FSG_TOP_TIMEOUT_S=2 FSG_MEASURE_RETRY_S=0 "$G" tick > "$C/o" 2>&1; eq $? 2 "the next tick notifies only"
+  eq "$(grep -c 'HEAL start trigger=emergency' "$FSG_LOG")" 1 "no second drain"
+  eq "$(grep -c 'fseventsd: healing' "$FSG_FAKE/notifications.log")" 1 "one healing notice"
+  eq "$(grep -c 'cannot heal' "$FSG_FAKE/notifications.log")" 1 "one cannot-heal notice"
+  eq "$(cat "$FSG_FAKE/docker/desktop")" running "Docker still running"
 
   t "a heal whose precheck answered at once measures no more before the Docker step"
   docker_default; install_fake; mem 3G
