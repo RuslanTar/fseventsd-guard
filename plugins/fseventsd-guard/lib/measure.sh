@@ -235,7 +235,8 @@ fsg_status_drain_fields() {
 # The background agent's liveness from its heartbeat (lib/heal.sh). Sets
 # A_INSTALLED (the plist exists), A_REQUESTS (the installed app copy serves this
 # checkout's heal requests), A_EPOCH, A_AGE, A_RESULT, A_EXIT, A_RUNNING (the tick
-# that wrote it still runs), A_STALE and A_TEXT (one line). Stale: the last write,
+# that wrote it still runs), A_SINCE (the seconds judged below, empty when not
+# judged), A_STALE and A_TEXT (one line). Stale: the last write,
 # or with no heartbeat the newest TICK line in the user log or else the install, is
 # older than twice the interval. A tick that is still in a heal is not stale: a
 # drain takes up to its cap. An agent from before heartbeats (A_LEGACY: no
@@ -243,7 +244,7 @@ fsg_status_drain_fields() {
 # tick of it writes; without one it is not judged.
 fsg_agent_fields() {
   local f="$FSG_STATE_DIR/heartbeat" now limit since pid t pl
-  A_INSTALLED=false; A_REQUESTS=false; A_LEGACY=false; A_EPOCH=; A_AGE=; A_RESULT=; A_EXIT=; A_RUNNING=false; A_STALE=false; A_TEXT=
+  A_INSTALLED=false; A_REQUESTS=false; A_LEGACY=false; A_EPOCH=; A_AGE=; A_RESULT=; A_EXIT=; A_RUNNING=false; A_SINCE=; A_STALE=false; A_TEXT=
   [ -f "$FSG_PLIST" ] && A_INSTALLED=true
   [ "$(sed -n 's/^FSG_REQUEST_PROTOCOL=//p' "$FSG_STATE_DIR/app/lib/common.sh" 2>/dev/null | head -n 1)" = "$FSG_REQUEST_PROTOCOL" ] &&
     A_REQUESTS=true
@@ -296,6 +297,7 @@ fsg_agent_fields() {
     return 0
   fi
   [ "$A_INSTALLED" = true ] || { A_TEXT="$A_TEXT; the agent is not installed"; return 0; }
+  A_SINCE=$since
   [ "$since" -gt "$limit" ] || return 0
   if [ "$A_RUNNING" = true ] && fsg_heal_running; then
     A_TEXT="$A_TEXT (in a heal)"

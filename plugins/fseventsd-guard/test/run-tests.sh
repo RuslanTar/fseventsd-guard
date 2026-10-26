@@ -5137,6 +5137,111 @@ if ! skip_case claude-hook-bash; then
   killbg "$own"
 fi
 
+# agent_plist: the installed agent's plist. hb SECONDS-AGO [RESULT [PID]]: its heartbeat
+# as a tick wrote it that long ago (RESULT running with a live PID: a tick that still
+# runs). booted / woke SECONDS-AGO: kern.boottime and kern.waketime (stubs/sysctl).
+agent_plist() { touch "$FSG_LAUNCH_AGENTS_DIR/io.github.ruslantar.fseventsd-guard.plist"; }
+hb() {
+  local x=0 l=gone
+  [ "${2:-ok}" = running ] && x=
+  [ -n "${3:-}" ] && l=$(lstart "$3")
+  mkdir -p "$FSG_STATE_DIR"
+  printf 'epoch=%s\nresult=%s\nexit=%s\npid=%s\nlstart=%s\n' $(( $(date +%s) - $1 )) "${2:-ok}" "$x" "${3:-999999}" "$l" > "$FSG_STATE_DIR/heartbeat"
+}
+booted() { echo "{ sec = $(( $(date +%s) - $1 )), usec = 0 } Mon Oct 26 00:00:00 2026" > "$FSG_FAKE/boottime"; }
+woke() { echo "{ sec = $(( $(date +%s) - $1 )), usec = 0 } Mon Oct 26 00:00:00 2026" > "$FSG_FAKE/waketime"; }
+
+# ======================================================================== claude-hook-agent
+if ! skip_case claude-hook-agent; then
+  t "claude-hook prompt: silent while the installed agent ticks"
+  mem 3G; agent_plist; hb 60
+  eq "$(hook prompt)" "" "a heartbeat a minute old"
+  hb 500; eq "$(hook prompt)" "" "under twice the 5-minute interval"
+  absent "$FSG_HINT_DIR" "nothing stamped"
+  absent "$FSG_FAKE/top-calls" "fseventsd not measured"
+  hasnt "$(cat "$FSG_FAKE/calls.log")" "launchctl" "launchctl not asked"
+
+  t "claude-hook prompt: an agent that stopped ticking is named, with the doctor command"
+  mem 3G; agent_plist; hb 7200
+  out=$(hook prompt); rc=$?
+  eq $rc 0 "exit"; json_ok "$out"
+  eq "$(jget "$out" 'd["hookSpecificOutput"]["hookEventName"]')" UserPromptSubmit "event name"
+  m=$(hook_msg "$out"); x=$(hook_ctx "$out")
+  has "$m" "fseventsd-guard: the agent's last tick was 2h00m ago (more than twice the 5m00s interval), so the guard is not watching fseventsd." "the user's line"
+  has "$m" "It may be unloaded, switched off in Login Items & Extensions, or hung: run $(appg) doctor in a terminal." "the causes, and doctor from the installed app copy"
+  has "$m" "Silence: FSG_HINT=0, or mkdir -p $FSG_HINT_DIR && touch $FSG_HINT_DIR/off" "how to silence it"
+  has "$x" "The guard is installed on this Mac, but its background agent last ticked 2h00m ago, more than twice its 5m00s interval" "the facts"
+  has "$x" "switched off in System Settings > General > Login Items & Extensions, or hung" "the causes"
+  has "$x" "$(appg) doctor" "the command"
+  has "$x" "at most every 6 hours" "the cadence"
+  has "$x" "FSG_HINT=0 in Claude Code's environment, or a file $FSG_HINT_DIR/off, silences it" "how to silence it"
+  has "$x" "The user has not been told about this in the conversation yet." "to relay once"
+  [ ${#x} -lt 1100 ] && ok || bad "context under 1,100 chars (${#x})"
+  hasnt "$out" "running away" "no install nudge"
+  hasnt "$out" "$REPO" "no checkout assumed"
+  hasnt "$out" "permissionDecision" "never allows or denies"
+  exists "$FSG_HINT_DIR/last-agent-stopped" "stamped"
+  absent "$FSG_FAKE/top-calls" "fseventsd not measured"
+  hasnt "$(cat "$FSG_FAKE/calls.log")" "launchctl" "launchctl not asked"
+  eq "$(jget "$("$G" status --json 2>/dev/null)" 'd["agent"]["stale"]')" True "status --json calls the same agent stale"
+
+  t "claude-hook prompt: the stopped-agent warning at most every 6 hours, for every session"
+  agent_plist; hb 7200
+  has "$(hook prompt UserPromptSubmit a)" "last tick was" "the first prompt"
+  eq "$(hook prompt UserPromptSubmit b)" "" "another session soon after"
+  hint_stamp last-agent-stopped 21000; eq "$(hook prompt)" "" "warned 5h50m ago"
+  hint_stamp last-agent-stopped 21700; has "$(hook prompt)" "last tick was" "warned over 6 h ago: again"
+
+  t "claude-hook prompt: no stopped-agent warning in the first two intervals after a boot or a wake"
+  agent_plist; hb 7200
+  booted 300; eq "$(hook prompt)" "" "booted 5 minutes ago: the agent's first tick may not have run"
+  absent "$FSG_HINT_DIR" "not stamped"
+  booted 700; has "$(hook prompt)" "last tick was" "booted over two intervals ago"
+  rm -rf "$FSG_HINT_DIR"
+  woke 120; eq "$(hook prompt)" "" "woke 2 minutes ago: launchd runs the interval missed asleep on wake"
+  woke 700; has "$(hook prompt)" "last tick was" "woke over two intervals ago"
+
+  t "claude-hook prompt: a tick in a heal is not stale, a hung one is"
+  agent_plist; bg sleep 120; own=$LAST_BG
+  hb 1800 running "$own"
+  mkdir -p "$FSG_STATE_DIR/heal.lock"; printf 'pid=%s\nlstart=%s\n' "$own" "$(lstart "$own")" > "$FSG_STATE_DIR/heal.lock/owner"
+  heal_state draining B "$own"
+  eq "$(hook prompt)" "" "a tick 30 minutes into a heal's drain"
+  rm -f "$FSG_STATE_DIR/drain/pending"
+  has "$(hook_msg "$(hook prompt)")" "the agent's last tick was 30m" "the same tick in no heal: hung"
+  killbg "$own"
+
+  t "claude-hook prompt: an agent with no heartbeat is judged as doctor judges it"
+  agent_plist; eq "$(hook prompt)" "" "installed just now, no tick yet"
+  touch_ago 1d "$FSG_LAUNCH_AGENTS_DIR/io.github.ruslantar.fseventsd-guard.plist"
+  booted 300; eq "$(hook prompt)" "" "installed a day ago, booted 5 minutes ago"
+  rm -f "$FSG_FAKE/boottime"
+  has "$(hook_msg "$(hook prompt)")" "fseventsd-guard: the agent has recorded no tick for 24h0" "installed a day ago, never ticked"
+  rm -rf "$FSG_HINT_DIR"
+  echo "$(TZ=UTC0 date -v-20S +%Y-%m-%dT%H:%M:%SZ) TICK level=ok pid=4242 mb=5" > "$FSG_LOG"
+  eq "$(hook prompt)" "" "a TICK line 20 s ago in the user log"
+
+  t "claude-hook prompt: the stopped-agent check follows the config and keeps out of the guard's log"
+  agent_plist; hb 7200
+  eq "$(FSG_AGENT_INTERVAL_S=3600 hook prompt)" "" "within twice a 1-hour interval"
+  printf 'FSG_AGENT_INTERVAL_S=1800\nnot a setting\n' > "$FSG_STATE_DIR/config"
+  has "$(hook_msg "$(hook prompt)")" "(more than twice the 30m00s interval)" "the interval from the user config"
+  absent "$FSG_LOG" "the config's bad line is not logged from the hook"
+
+  t "claude-hook prompt: the stopped-agent warning is silenced like the nudge; without the agent, the nudge as before"
+  mem 3G; agent_plist; hb 7200
+  for v in 0 off False; do eq "$(FSG_HINT=$v hook prompt)" "" "FSG_HINT=$v"; done
+  mkdir -p "$FSG_HINT_DIR"; : > "$FSG_HINT_DIR/off"; eq "$(hook prompt)" "" "the off file"; rm "$FSG_HINT_DIR/off"
+  not_darwin "$C/bin"; eq "$(PATH="$C/bin:$PATH" hook prompt)" "" "not macOS"
+  absent "$FSG_HINT_DIR/last-agent-stopped" "none of those stamps it"
+  rm "$FSG_LAUNCH_AGENTS_DIR/io.github.ruslantar.fseventsd-guard.plist"
+  out=$(hook prompt)
+  has "$(hook_msg "$out")" "fseventsd is running away: 3.0 GB" "no agent plist: the install nudge"
+  hasnt "$out" "last tick" "and no agent warning"
+  HP="$FSG_PREFIX/usr/local/libexec/fseventsd-guard-restart"; mkdir -p "$(dirname "$HP")"; : > "$HP"
+  rm -rf "$FSG_HINT_DIR"; eq "$(hook prompt)" "" "the root helper only (install --no-agent): no nudge, no agent to watch"
+fi
+
 # ======================================================================== claude-hook-wrapper
 # The plugin's hooks/fseventsd-guard-hook.sh, which Claude Code runs, its wiring in
 # hooks/hooks.json, and the plugin and marketplace manifests.

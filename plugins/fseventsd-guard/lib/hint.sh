@@ -5,7 +5,8 @@
 # run on every prompt and Bash call, so the entry script loads only this file and
 # what it sources here.
 #
-#   prompt  UserPromptSubmit: the install nudge (fsg_hint_prompt)
+#   prompt  UserPromptSubmit: the install nudge (fsg_hint_prompt), or with the agent
+#           installed, the warning that it stopped ticking (fsg_hint_agent)
 #   bash    PreToolUse and PostToolUse on Bash: the heal notice (fsg_hint_bash)
 #
 # FSG_HINT=0 in Claude Code's environment, or a file $FSG_HINT_DIR/off, silences them.
@@ -52,8 +53,8 @@ fsg_hint_stamp() {
   fsg_is_uint "$v" && printf '%s' "$v"
 }
 
-# Seconds between two install nudges at a level.
-fsg_hint_every() { case $1 in runaway) echo 3600 ;; warn) echo 10800 ;; *) echo 86400 ;; esac; }
+# Seconds between two install nudges at a level, or two stopped-agent warnings.
+fsg_hint_every() { case $1 in runaway) echo 3600 ;; warn) echo 10800 ;; agent-stopped) echo 21600 ;; *) echo 86400 ;; esac; }
 
 # The install nudge, on an affected Mac without the guard: fseventsd's footprint and
 # what to run, at most every hour (runaway), 3 hours (warn) or day (ok); a nudge at
@@ -62,7 +63,10 @@ fsg_hint_every() { case $1 in runaway) echo 3600 ;; warn) echo 10800 ;; *) echo 
 # read; the measurement (top takes about 2 s) runs at most once an hour.
 fsg_hint_prompt() {
   local now t l every
-  fsg_hint_nudge_done && return 0
+  if fsg_hint_nudge_done; then
+    [ -f "$FSG_PLIST" ] && fsg_hint_agent
+    return 0
+  fi
   now=$(fsg_now)
   t=$(fsg_hint_stamp checked)
   [ -n "$t" ] && [ $((now - t)) -ge 0 ] && [ $((now - t)) -lt 3600 ] && return 0
@@ -111,6 +115,73 @@ fsg_hint_nudge_json() {
   msg="fseventsd-guard: $lead (up $(fsg_dur "${M_UP:-0}")). On macOS $FSG_OS_VER it can grow without limit and silently stop delivering file events. Install the guard in a new terminal window (it asks for sudo): $cmd. Why: $doc. Silence: FSG_HINT=0, or mkdir -p $off && touch $off/off"
   off="$off/off"
   ctx="fseventsd-guard install hint (from its Claude Code plugin; $every at this level). Measured now: fseventsd, the macOS file-events daemon, has a footprint of $M_MB MB ($x), uptime $(fsg_dur "${M_UP:-0}"), level $S_LEVEL (the guard warns at $FSG_WARN_MB MB and heals at $FSG_ACT_MB MB). On macOS $FSG_OS_VER fseventsd has a known bug: its memory grows without limit and it silently stops delivering file events, so the IDE, dev servers, Docker bind mounts and Claude Code stop seeing file changes until it is restarted as root. fseventsd-guard, which restarts it safely (it lets test runs finish and brings Docker back), is not installed here. Install asks for sudo, so it runs in a new terminal window, not through Claude: $cmd, then the same path with doctor. Why and what it costs: $doc. The hint stops once the guard is installed; FSG_HINT=0 in Claude Code's environment, or a file $off, silences it. The user has not been told about this in the conversation yet."
+  printf '{"systemMessage":%s,"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":%s}}\n' \
+    "$(fsg_json_str "$msg")" "$(fsg_json_str "$ctx")"
+}
+
+# The stopped-agent warning, with the agent's plist installed: its last tick is older
+# than twice FSG_AGENT_INTERVAL_S (the stale rule of status and doctor,
+# fsg_agent_fields), so it is unloaded, switched off or hung and nothing watches
+# fseventsd. At most every 6 hours (the stamp is shared by every session), and not in
+# the first two intervals after a boot or a wake: launchd runs the agent at login
+# (RunAtLoad) and on wake (an interval missed asleep), and a prompt can come first. A
+# fresh heartbeat costs the config and one file read with builtins; it never measures
+# fseventsd or asks launchctl.
+fsg_hint_agent() {
+  local now k v t up log=$FSG_LOG e=
+  # The hooks only read the guard's state: a bad config line is the agent's to log.
+  FSG_LOG=/dev/null
+  fsg_load_config 2>/dev/null
+  FSG_LOG=$log
+  now=$(fsg_now)
+  while IFS='=' read -r k v; do
+    [ "$k" = epoch ] && { e=$v; break; }
+  done 2>/dev/null < "$FSG_STATE_DIR/heartbeat"
+  fsg_is_uint "$e" && [ $((now - e)) -le $((2 * FSG_AGENT_INTERVAL_S)) ] && return 0
+  t=$(fsg_hint_stamp last-agent-stopped)
+  [ -n "$t" ] && [ $((now - t)) -ge 0 ] && [ $((now - t)) -lt "$(fsg_hint_every agent-stopped)" ] && return 0
+  up=$(fsg_hint_awake "$now")
+  [ -n "$up" ] && [ "$up" -gt $((2 * FSG_AGENT_INTERVAL_S)) ] || return 0
+  # shellcheck source=lib/measure.sh
+  . "$FSG_HOME/lib/measure.sh"
+  # shellcheck source=lib/heal.sh
+  . "$FSG_HOME/lib/heal.sh"
+  fsg_agent_fields
+  [ "$A_STALE" = true ] || return 0
+  # Stamped first: no stamp, no warning, else it would repeat on every prompt.
+  { mkdir -p "$FSG_HINT_DIR" && echo "$now" > "$FSG_HINT_DIR/last-agent-stopped"; } 2>/dev/null || return 0
+  fsg_hint_agent_json
+}
+
+# Seconds since the system booted or last woke, whichever came later; nothing when
+# neither is known (kern.boottime and kern.waketime: "{ sec = EPOCH, usec = N } ...").
+fsg_hint_awake() { # now
+  local n v t=
+  for n in boottime waketime; do
+    v=$(sysctl -n "kern.$n" 2>/dev/null)
+    v=${v#*sec = }; v=${v%%,*}
+    fsg_is_uint "$v" && [ "$v" -gt 0 ] && { [ -z "$t" ] || [ "$v" -gt "$t" ]; } && t=$v
+  done
+  [ -n "$t" ] && printf '%s' $(($1 - t))
+}
+
+# The stopped-agent warning as hook JSON, in the nudge's shape. Its command names the
+# installed app copy, as the heal notice does: the agent's own version.
+fsg_hint_agent_json() {
+  local g="$FSG_STATE_DIR/app/fseventsd-guard" off what age every iv ctx msg
+  case $g in "$HOME"/*) g="\$HOME${g#"$HOME"}" ;; esac
+  g="\"$g\""
+  off=$FSG_HINT_DIR
+  case $off in "$HOME"/*) off="~${off#"$HOME"}" ;; esac
+  age=$(fsg_dur "$A_SINCE"); iv=$(fsg_dur "$FSG_AGENT_INTERVAL_S")
+  every=$(( $(fsg_hint_every agent-stopped) / 3600 ))
+  if [ -n "$A_EPOCH" ]; then
+    msg="the agent's last tick was $age ago"; what="its background agent last ticked $age ago"
+  else
+    msg="the agent has recorded no tick for $age"; what="its background agent has recorded no tick for $age"
+  fi
+  msg="fseventsd-guard: $msg (more than twice the $iv interval), so the guard is not watching fseventsd. It may be unloaded, switched off in Login Items & Extensions, or hung: run $g doctor in a terminal. Silence: FSG_HINT=0, or mkdir -p $off && touch $off/off"
+  ctx="fseventsd-guard agent warning (from its Claude Code plugin; at most every $every hours). The guard is installed on this Mac, but $what, more than twice its $iv interval, so nothing watches fseventsd, the macOS file-events daemon, or restarts it when it runs away and stops delivering file events. The agent (launchd job $FSG_LABEL) may be unloaded, switched off in System Settings > General > Login Items & Extensions, or hung. $g doctor, run by the user in a terminal, says which and how to fix it. FSG_HINT=0 in Claude Code's environment, or a file $off/off, silences it. The user has not been told about this in the conversation yet."
   printf '{"systemMessage":%s,"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":%s}}\n' \
     "$(fsg_json_str "$msg")" "$(fsg_json_str "$ctx")"
 }
