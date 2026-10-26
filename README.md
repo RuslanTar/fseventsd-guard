@@ -121,7 +121,10 @@ claude plugin install fseventsd-guard@fseventsd-guard --scope local
 claude plugin list   # fseventsd-guard@fseventsd-guard ... Scope: local  Status: enabled
 ```
 
-Then start Claude Code in the project again, so the session loads the hooks.
+Then start Claude Code in the project again, so the session loads the hooks. The CLI
+install leaves auto-update off for the marketplace (checked with 2.1.310: its
+`known_marketplaces.json` entry has no `autoUpdate`), so turn it on once in a
+session: `/plugin` > Marketplaces > `fseventsd-guard` > Enable auto-update.
 `--scope local` writes only the git-ignored `.claude/settings.local.json` and
 `~/.claude/plugins`: the tracked `.claude/settings.json` is left as it is, and other
 projects do not get the plugin. From a linked git worktree it writes the main
@@ -165,9 +168,9 @@ commit it was installed from. Merging to `main` is the release for the hooks: ev
 merge reaches users at their next update. `FSG_VERSION` in `lib/common.sh` names the
 guard's own version (the app copy and its state), not the plugin's.
 
-The team settings above turn auto-update on (not checked yet when `--scope local`
-declares the marketplace again in `settings.local.json`; the update command below
-works either way). A personal install does not update
+The team settings above ask for auto-update, but the CLI install leaves it off, so
+each teammate turns it on once (see above; the update command below works either
+way). A personal install does not update
 by itself, as Claude Code leaves auto-update off for marketplaces it does not
 ship: turn it on for `fseventsd-guard` in `/plugin` > Marketplaces, or pull the
 latest `main` with `/plugin marketplace update fseventsd-guard`.
