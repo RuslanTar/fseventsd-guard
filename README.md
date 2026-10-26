@@ -77,6 +77,10 @@ It lists what it removes, asks once, then asks for your password once.
 /plugin install fseventsd-guard@fseventsd-guard
 ```
 
+From a shell, the same is `claude plugin marketplace add RuslanTar/fseventsd-guard`
+and `claude plugin install fseventsd-guard@fseventsd-guard`. Adding the marketplace
+tries SSH first and falls back to HTTPS by itself, so no GitHub SSH key is needed.
+
 | Hook | Speaks when | Says |
 |---|---|---|
 | `UserPromptSubmit` | macOS on an affected version, guard not installed | fseventsd's footprint and the install commands above; at most once an hour (runaway), every 3 hours (growing) or once a day (fine) |
@@ -106,15 +110,47 @@ In a project's `.claude/settings.json`:
 }
 ```
 
-Claude Code adds the marketplace once each teammate trusts the folder. The plugin
-lives inside the marketplace, so no separate install step is needed.
+These entries turn the plugin on for the project but do not install it. Claude Code
+(checked with 2.1.310) does not add a marketplace that only a project's settings
+declare, so a session reports the plugin as enabled but not installed. Each
+teammate installs it once, from the project's directory:
 
-To turn it off for yourself in that project, add this to
-`.claude/settings.local.json`:
+```sh
+claude plugin marketplace add RuslanTar/fseventsd-guard --scope local
+claude plugin install fseventsd-guard@fseventsd-guard --scope local
+claude plugin list   # fseventsd-guard@fseventsd-guard ... Scope: local  Status: enabled
+```
+
+Then start Claude Code in the project again, so the session loads the hooks. The CLI
+install leaves auto-update off for the marketplace (checked with 2.1.310: its
+`known_marketplaces.json` entry has no `autoUpdate`), so turn it on once in a
+session: `/plugin` > Marketplaces > `fseventsd-guard` > Enable auto-update.
+`--scope local` writes only the git-ignored `.claude/settings.local.json` and
+`~/.claude/plugins`: the tracked `.claude/settings.json` is left as it is, and other
+projects do not get the plugin. From a linked git worktree it writes the main
+clone's `.claude/settings.local.json`, so one install covers every worktree of that
+clone. `--scope user` works too, but turns the plugin on in every project.
+
+To turn it off for yourself in that project:
+
+```sh
+claude plugin disable fseventsd-guard@fseventsd-guard --scope local
+```
+
+That writes this to `.claude/settings.local.json`, which you can also add by hand:
 
 ```json
 { "enabledPlugins": { "fseventsd-guard@fseventsd-guard": false } }
 ```
+
+`claude plugin uninstall fseventsd-guard@fseventsd-guard --scope local` removes the
+install, but the project's settings still turn the plugin on, so sessions report it
+as enabled but not installed again: to opt out, use `disable`. Do not run
+`claude plugin marketplace remove fseventsd-guard` in such a project: it also
+deletes the marketplace and the plugin entry from the tracked
+`.claude/settings.json`. To drop a marketplace added with `--scope local`, delete
+its `extraKnownMarketplaces` entry from `.claude/settings.local.json` by hand.
+Removing the plugin leaves the guard installed; see "Uninstall the guard" above.
 
 ### Windows and Linux
 
@@ -132,7 +168,9 @@ commit it was installed from. Merging to `main` is the release for the hooks: ev
 merge reaches users at their next update. `FSG_VERSION` in `lib/common.sh` names the
 guard's own version (the app copy and its state), not the plugin's.
 
-The team settings above turn auto-update on. A personal install does not update
+The team settings above ask for auto-update, but the CLI install leaves it off, so
+each teammate turns it on once (see above; the update command below works either
+way). A personal install does not update
 by itself, as Claude Code leaves auto-update off for marketplaces it does not
 ship: turn it on for `fseventsd-guard` in `/plugin` > Marketplaces, or pull the
 latest `main` with `/plugin marketplace update fseventsd-guard`.

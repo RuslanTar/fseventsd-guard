@@ -112,7 +112,10 @@ something else starts Docker Desktop during the heal (another session's
 running and restores as usual. The bind-mount check needs its probe dir in Docker
 Desktop's File Sharing list: the guard picks one there (or set `FSG_PROBE_DIR`),
 and a probe Docker refuses ("Mounts denied") is reported as skipped, not as a
-broken Docker. `doctor` warns when the probe dir is not shared.
+broken Docker. `doctor` warns when the probe dir is not shared. macOS can keep the
+launchd agent from reading Docker Desktop's settings while a terminal reads them
+(app-data protection), so `install` caches the list for the agent: re-run
+`install` after you change File Sharing (`doctor` warns when the copy is stale).
 
 The `healing` notification and `status` name what the drain waits for (command,
 pid, age). At a cap a manual or pre-run (`--trigger wave`) heal gives up and tells you what was
@@ -152,8 +155,9 @@ Say this out loud before you heal by hand; the notifications repeat it.
 - Dev servers (a Rails server, background workers) reconnect to Postgres and Redis
   on the next request. Restart one if it logs connection errors.
 - Running Claude Code sessions may keep a file watcher that does not come back
-  after the restart (one report of watchers not recovering; not tested yet, see
-  [`docs/DOCKER-TRIALS.md`](docs/DOCKER-TRIALS.md)). If a session stops seeing file
+  after the restart (one report of watchers not recovering). Still untested: a
+  scripted check on 2026-10-25 never got fseventsd restarted, see
+  [`docs/DOCKER-TRIALS.md`](docs/DOCKER-TRIALS.md). If a session stops seeing file
   changes after the heal, restart it.
 
 ## Reduce the trigger
@@ -445,8 +449,9 @@ with no output, and so does the wrapper; the repo's `.gitattributes` keeps every
 file LF on a Windows checkout too. Each prints hook JSON or nothing, always exits 0,
 and never allows, denies or asks. Install the plugin in Claude Code with
 `/plugin marketplace add RuslanTar/fseventsd-guard`, then
-`/plugin install fseventsd-guard@fseventsd-guard`; for a team's settings, see the
-root `README.md`.
+`/plugin install fseventsd-guard@fseventsd-guard`. A team's project settings turn
+the plugin on but do not install it: each teammate still runs the one-time
+`claude plugin` install the root `README.md` gives ("For a team").
 
 | Hook | Speaks when | Says | How often, at what cost |
 |---|---|---|---|
@@ -494,6 +499,12 @@ None of them lets a non-root user gain root.
 - **Stale Docker Desktop sockets.** A Docker Desktop that crashed and left its
   socket files behind is seen as stopped only through its status; otherwise B's
   stop wait runs out (logged; the heal goes on). Accepted.
+- **The agent's File Sharing list is install's copy.** Where macOS app-data
+  protection refuses the agent Docker Desktop's settings (seen on 2026-10-25), the
+  bind-mount probe picks its dir from the list `install` cached. Change File Sharing
+  later and the agent works from the old list until `install` runs again; `doctor`
+  reports the difference. A wrong pick only makes the check skip, never fail. With
+  no copy (install could not read the list either), set `FSG_PROBE_DIR`.
 - **PID reuse between the re-check and the kill.** Tens of milliseconds; macOS
   hands out pids in sequence, so reuse there is not practical, and a respawn in
   that window makes `kill` fail with ESRCH (exit 71). Accepted.

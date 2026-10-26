@@ -103,8 +103,10 @@ FSG_VERIFY_BIND_MOUNT=1
 FSG_PROBE_IMAGE=
 # Host dir for the bind-mount probe (quote a path with spaces). Empty = the state
 # dir's mountprobe when Docker Desktop shares it, else a dir in the first folder
-# under your home in its File Sharing list. A probe dir Docker Desktop does not
-# share skips the check (doctor warns).
+# under your home in its File Sharing list. macOS may keep the agent from reading
+# that list, so the agent then uses the copy install cached (re-run install after
+# changing File Sharing). A probe dir Docker Desktop does not share skips the check
+# (doctor warns).
 FSG_PROBE_DIR=
 
 # --- Heal ---------------------------------------------------------------------------

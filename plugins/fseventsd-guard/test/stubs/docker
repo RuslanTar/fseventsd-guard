@@ -20,7 +20,8 @@
 #                NAMEhLnI), as a healthcheck probe in flight is
 #   bind-broken  present = bind mounts do not carry files (the failure we heal)
 #   mounts-denied  present = `docker run -v` fails as for a dir Docker Desktop's File
-#                Sharing does not cover ("Mounts denied")
+#                Sharing does not cover ("Mounts denied"); dirs in it (one per line)
+#                are shared, with what is under them
 #   status-fail  present = `docker desktop status` of a stopped Docker Desktop fails
 #                as once Desktop has quit (it dials the missing backend socket)
 #   status-delay seconds `docker desktop status` of a stopped Docker Desktop takes
@@ -326,7 +327,11 @@ case $cmd in
     known=$( { cat "$D/images" 2>/dev/null; awk '{ print $5 }' "$CF"; } | grep -cxF "$img")
     [ "$known" -gt 0 ] || { echo "Unable to find image '$img' locally" >&2; exit 125; }
     host=${vol%:*}
-    if [ -f "$D/mounts-denied" ]; then
+    shared=no
+    [ -f "$D/mounts-denied" ] && while IFS= read -r s; do
+      [ -n "$s" ] && case $host in "$s"|"$s"/*) shared=yes ;; esac
+    done < "$D/mounts-denied"
+    if [ -f "$D/mounts-denied" ] && [ $shared = no ]; then
       printf 'docker: Error response from daemon: Mounts denied: \nThe path %s is not shared from the host and is not known to Docker.\nYou can configure shared paths from Docker -> Preferences... -> Resources -> File Sharing.\n' "$host" >&2
       exit 125
     fi

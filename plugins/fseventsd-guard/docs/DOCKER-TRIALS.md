@@ -85,7 +85,9 @@ usual way. Then record:
    - **The VM / engine**: `docker info` errors in `after.txt`.
    - **File sharing / bind mounts**: `bind_mount=failed` in `result.txt`
      (`bind_mount=skipped ... not shared` means the probe dir is not in Docker
-     Desktop's File Sharing list: set `FSG_PROBE_DIR`, see `doctor`). Or check by
+     Desktop's File Sharing list: set `FSG_PROBE_DIR`, see `doctor`; with "no
+     cached list" the agent could not read that list, so re-run `install` from a
+     terminal first). Or check by
      hand: `docker run --rm -v "$PWD:/w" alpine:3 ls /w` (use any local image that
      has `/bin/sh`).
    - **Containers**: `containers_failed=` in `result.txt`, `docker ps -a`.
@@ -194,7 +196,18 @@ until checked. Check it once, with any variant:
    watcher. If running sessions do see the change, remove the line from
    `lib/heal.sh` (`FSG_COSTS`), `lib/hint.sh` and the README.
 
-Result: _not checked yet._
+Result: _not checked yet._ A scripted attempt on 2026-10-25 gave no evidence
+either way, because fseventsd never restarted. Two watchers started before the
+trial, `fswatch -r -t` (an FSEvents stream) and Node's
+`fs.watch(dir, { recursive: true })`, each saw 5 of 5 new files. Then three
+`trial --variant none` runs each ended with exit 3 ("cannot measure fseventsd (top
+did not answer within 15s)" in the agent's tick, at load averages of 33 to 48 from
+a parallel test suite), with the same fseventsd pid throughout. Afterwards both
+watchers, and a third one started fresh as a control, saw 3 of 3 more files. So
+the notices keep the line. Re-run on a quiet machine (load well under 20). A pass
+there covers native FSEvents clients and Node watchers (Node's recursive watch on
+macOS is an FSEvents stream, through libuv); Claude Code's own watcher counts as
+covered only once steps 1-5 above ran, since Bun implements its own `fs.watch`.
 
 ## 3. Results
 
