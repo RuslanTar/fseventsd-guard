@@ -71,11 +71,13 @@ fsg_measure() {
 # as a runaway comes on a loaded Mac and no heal runs without a measurement. Other
 # failures return at once. After the last try M_ERR also gives the number of tries
 # and ps's resident size, a lower bound on the footprint (ps leaves out compressed
-# and swapped pages), for the log and the notices only.
+# and swapped pages), for the log and the notices only. Sets M_TRIES to the number
+# of tries it took.
 fsg_measure_retry() {
   local i=1 n=$FSG_MEASURE_TRIES rss note=
   [ "$n" -ge 1 ] || n=1
   while :; do
+    M_TRIES=$i
     fsg_measure && return 0
     [ "$M_SLOW" = 1 ] || return 3
     fsg_log "MEASURE $M_ERR (try $i of $n)"

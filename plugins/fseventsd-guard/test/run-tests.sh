@@ -2812,6 +2812,69 @@ if ! skip_case slow-top; then
   has "$(cat "$FSG_LOG")" "MEASURE top did not answer within 2s (try 1 of 3)" "the slow try is logged"
   has "$(cat "$FSG_STATE_DIR/last-heal")" "healed manual" "recorded"
 
+  # The guard's own top calls (fsg_measure's stats) before the root helper's first
+  # (it asks for mem only), from the stub's record of every call.
+  guard_tops() { awk '/-stats mem$/ { exit } /-stats pid,mem,cmprs,ports$/ { n++ } END { print n + 0 }' "$FSG_FAKE/top-calls"; }
+
+  t "a heal whose precheck needed a second try measures once more before the Docker step"
+  docker_default; install_fake; mem 3G
+  agent_env FSG_TOP_TIMEOUT_S=2 FSG_MEASURE_RETRY_S=0
+  echo 5 > "$FSG_FAKE/top-delay-seq"; : > "$FSG_FAKE/top-calls"
+  heal > "$C/o" 2>&1; eq $? 0 "healed ($(tail -n 1 "$C/o"))"
+  eq "$(guard_tops)" 3 "the precheck's two tries, then one before the Docker step"
+  has "$(cat "$FSG_LOG")" "HEAL top answered again before the Docker step (the precheck needed 2 tries)" "the extra measure is logged"
+  before "$FSG_LOG" "HEAL top answered again before the Docker step" "DOCKER B desktop stop"
+  hasnt "$(cat "$FSG_LOG")" "HEAL busy" "not refused"
+  has "$(cat "$FSG_FAKE/calls.log")" "sudo -n /" "restart happened"
+  has "$(cat "$FSG_STATE_DIR/last-heal")" "healed manual" "recorded"
+
+  t "a heal whose top misses again before the Docker step ends with 3, Docker untouched"
+  # Warn, not runaway: the tick's own check after the request starts no emergency heal.
+  docker_default; install_fake; mem 600M
+  agent_env FSG_TOP_TIMEOUT_S=2 FSG_MEASURE_RETRY_S=0
+  printf '5\n0\n5\n' > "$FSG_FAKE/top-delay-seq"; : > "$FSG_FAKE/top-calls"
+  : > "$FSG_FAKE/calls.log"; : > "$FSG_FAKE/notifications.log"
+  heal > "$C/o" 2>&1; eq $? 3 "cannot measure ($(tail -n 1 "$C/o"))"
+  has "$(cat "$FSG_LOG")" "HEAL start trigger=manual" "the drain ran"
+  has "$(cat "$FSG_LOG")" "HEAL busy: top missed again before the Docker step; Docker left alone" "logged"
+  has "$(cat "$C/o")" "top did not answer within 2s" "the caller is told why"
+  hasnt "$(cat "$FSG_FAKE/calls.log")" "docker desktop stop" "Docker Desktop not stopped"
+  hasnt "$(cat "$FSG_FAKE/calls.log")" "docker stop" "no container stopped"
+  hasnt "$(cat "$FSG_FAKE/calls.log")" "docker desktop restart" "Docker Desktop not restarted"
+  hasnt "$(cat "$FSG_FAKE/calls.log")" "sudo -n /" "no restart"
+  eq "$(cat "$FSG_FAKE/docker/desktop")" running "Docker still running"
+  absent "$FSG_STATE_DIR/docker-intent" "no Docker intent left"
+  absent "$FSG_STATE_DIR/drain/pending" "the drain is released"
+  absent "$FSG_STATE_DIR/last-attempt" "not counted as an attempt on Docker"
+  has "$(cat "$FSG_STATE_DIR/last-heal")" " refused-cannot-measure manual " "recorded"
+  eq "$(grep -c 'cannot heal' "$FSG_FAKE/notifications.log")" 1 "one cannot-heal notice"
+  has "$(grep 'cannot heal' "$FSG_FAKE/notifications.log")" "top missed again before the Docker step; Docker left alone" "the notice names the reason"
+
+  t "a heal whose precheck answered at once measures no more before the Docker step"
+  docker_default; install_fake; mem 3G
+  agent_env FSG_TOP_TIMEOUT_S=2 FSG_MEASURE_RETRY_S=0
+  : > "$FSG_FAKE/top-calls"
+  heal > "$C/o" 2>&1; eq $? 0 "healed ($(tail -n 1 "$C/o"))"
+  eq "$(guard_tops)" 1 "the precheck's one top only"
+  hasnt "$(cat "$FSG_LOG")" "before the Docker step" "no extra measure"
+
+  t "a heal with no Docker step measures no more after a slow precheck"
+  docker_default; install_fake; mem 3G
+  agent_env FSG_TOP_TIMEOUT_S=2 FSG_MEASURE_RETRY_S=0
+  echo 5 > "$FSG_FAKE/top-delay-seq"; : > "$FSG_FAKE/top-calls"
+  heal --docker-variant none > "$C/o" 2>&1; eq $? 0 "healed ($(tail -n 1 "$C/o"))"
+  eq "$(guard_tops)" 2 "the precheck's two tries only"
+  hasnt "$(cat "$FSG_LOG")" "before the Docker step" "no extra measure"
+
+  t "a heal with Docker stopped measures no more after a slow precheck"
+  docker_default; echo stopped > "$FSG_FAKE/docker/desktop"; : > "$FSG_FAKE/docker/containers"
+  install_fake; mem 3G
+  agent_env FSG_TOP_TIMEOUT_S=2 FSG_MEASURE_RETRY_S=0
+  echo 5 > "$FSG_FAKE/top-delay-seq"; : > "$FSG_FAKE/top-calls"
+  heal > "$C/o" 2>&1; eq $? 0 "healed ($(tail -n 1 "$C/o"))"
+  eq "$(guard_tops)" 2 "the precheck's two tries only"
+  hasnt "$(cat "$FSG_LOG")" "before the Docker step" "no extra measure"
+
   t "a top that never answers: bounded tries, then one blind tick"
   docker_default; install_fake --no-agent; : > "$FSG_FAKE/notifications.log"
   echo 8 > "$FSG_FAKE/top-delay"; s=$(date +%s)

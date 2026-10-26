@@ -32,7 +32,8 @@ FSG_TOP_TIMEOUT_S=15
 # The agent's check and a heal's precheck try a `top` that did not answer in time up
 # to this many times in all, this many seconds apart (a loaded Mac; with the
 # defaults about a minute at most). status, the hooks and the checks inside a heal
-# try once.
+# try once; a heal whose precheck needed more than one try checks once more before
+# its Docker step and stops there (exit 3, Docker untouched) if top misses again.
 FSG_MEASURE_TRIES=3
 FSG_MEASURE_RETRY_S=5
 
