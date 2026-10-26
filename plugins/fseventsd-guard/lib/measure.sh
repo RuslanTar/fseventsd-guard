@@ -40,9 +40,9 @@ fsg_parse_swap_mb() {
 # Measures fseventsd. Sets M_PID M_MB M_CPU M_UP M_ERR, M_CPU_MS (its CPU time so
 # far, for fsg_tick_sample), and M_CMPRS_MB (compressed memory) and M_PORTS (Mach
 # ports), which are logged only. Returns 0, or 3 when it cannot measure (M_ERR says
-# why).
+# why; M_SLOW=1 when top did not answer in time).
 fsg_measure() {
-  M_PID=; M_MB=; M_CPU=; M_UP=; M_ERR=; M_CMPRS_MB=; M_PORTS=; M_CPU_MS=
+  M_PID=; M_MB=; M_CPU=; M_UP=; M_ERR=; M_CMPRS_MB=; M_PORTS=; M_CPU_MS=; M_SLOW=0
   if [ "$(uname -s)" != Darwin ]; then M_ERR="not macOS"; return 3; fi
   local pids n raw row
   # Root-owned only: any user can start a process named fseventsd, and two
@@ -54,7 +54,7 @@ fsg_measure() {
   M_PID=$pids
   # top takes a second or two; bounded, so a wedged system cannot hang a tick or a hook.
   raw=$(fsg_timeout "$FSG_TOP_TIMEOUT_S" top -l 1 -pid "$M_PID" -stats pid,mem,cmprs,ports 2>/dev/null)
-  if [ $? -eq 124 ]; then M_ERR="top did not answer within ${FSG_TOP_TIMEOUT_S}s"; return 3; fi
+  if [ $? -eq 124 ]; then M_SLOW=1; M_ERR="top did not answer within ${FSG_TOP_TIMEOUT_S}s"; return 3; fi
   row=$(printf '%s\n' "$raw" | awk -v p="$M_PID" '$1 == p { print; exit }')
   M_MB=$(fsg_parse_mem_mb "$(printf '%s\n' "$row" | awk '{ print $2 }')") || M_MB=
   if [ -z "$M_MB" ]; then M_ERR="cannot read the footprint of pid $M_PID (top said: ${row:-$(printf '%s\n' "$raw" | tail -n 1)})"; return 3; fi
@@ -64,6 +64,30 @@ fsg_measure() {
   M_UP=$(fsg_etime_s "$(ps -o etime= -p "$M_PID" 2>/dev/null)")
   M_CPU_MS=$(fsg_cputime_ms "$(ps -o time= -p "$M_PID" 2>/dev/null)") || M_CPU_MS=
   return 0
+}
+
+# fsg_measure for the agent's tick and a heal's precheck: a top that did not answer
+# in time is tried again, up to FSG_MEASURE_TRIES tries FSG_MEASURE_RETRY_S apart,
+# as a runaway comes on a loaded Mac and no heal runs without a measurement. Other
+# failures return at once. After the last try M_ERR also gives the number of tries
+# and ps's resident size, a lower bound on the footprint (ps leaves out compressed
+# and swapped pages), for the log and the notices only.
+fsg_measure_retry() {
+  local i=1 n=$FSG_MEASURE_TRIES rss note=
+  [ "$n" -ge 1 ] || n=1
+  while :; do
+    fsg_measure && return 0
+    [ "$M_SLOW" = 1 ] || return 3
+    fsg_log "MEASURE $M_ERR (try $i of $n)"
+    [ "$i" -lt "$n" ] || break
+    i=$((i + 1))
+    fsg_sleep "$FSG_MEASURE_RETRY_S"
+  done
+  rss=$(ps -o rss= -p "$M_PID" 2>/dev/null | tr -d ' ')
+  [ "$i" -gt 1 ] && note="$i tries"
+  fsg_is_uint "$rss" && note="${note:+$note; }ps: resident $(fsg_size $((rss / 1024))), a lower bound on the footprint"
+  M_ERR="$M_ERR${note:+ ($note)}"
+  return 3
 }
 
 # The agent's record between ticks (docs/DESIGN.md §4), in $FSG_STATE_DIR/tick-sample:

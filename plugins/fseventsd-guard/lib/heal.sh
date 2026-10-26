@@ -737,12 +737,12 @@ fsg_cmd_heal() {
   fsg_req_submit "$trigger" "$cap" "$policy" "$variant" "$force" "" "$nowait"
 }
 
-# Measures and checks whether the root helper would accept a restart, before any
-# drain, so runs are not held for a restart that would be refused. Sets H_MRC (the
-# measure's code), H_INSTALLED, H_REFUSE (why it would refuse, or empty), H_AGE and
-# H_OLD_PID.
+# Measures (a slow top is tried again: fsg_measure_retry) and checks whether the
+# root helper would accept a restart, before any drain, so runs are not held for a
+# restart that would be refused. Sets H_MRC (the measure's code), H_INSTALLED,
+# H_REFUSE (why it would refuse, or empty), H_AGE and H_OLD_PID.
 fsg_heal_precheck() { # force
-  fsg_measure; H_MRC=$?
+  fsg_measure_retry; H_MRC=$?
   HEAL_MB_BEFORE=$M_MB; H_OLD_PID=$M_PID
   # The probe tells a stall apart from a merely large daemon.
   P_RESULT=; P_DETAIL=
@@ -1311,10 +1311,11 @@ fsg_req_run() { # id
   unset HEAL_REQ_CHAIN HEAL_REQ_PID HEAL_REQ_LSTART HEAL_REQ_WAITS
 }
 
-# Tick step 5: the emergency tier (docs/DESIGN.md §4), once per tick.
+# Tick step 5: the emergency tier (docs/DESIGN.md §4), once per tick (a slow top is
+# tried again; a tick blind after its tries counts once).
 fsg_tick_check() {
   local mrc
-  fsg_measure; mrc=$?
+  fsg_measure_retry; mrc=$?
   if [ $mrc -ne 0 ]; then
     # A blind guard must not be silent: after FSG_BLIND_NOTIFY_TICKS failed ticks
     # in a row, notify (once per renotify window).

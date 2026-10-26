@@ -295,6 +295,7 @@ if ! skip_case status; then
   out=$(FSG_TOP_TIMEOUT_S=1 "$G" status --json); rc=$?
   eq $rc 3 "a top that does not answer"; has "$(jget "$out" 'd["error"]')" "top did not answer within 1s" "error"
   [ $(( $(date +%s) - s )) -lt 5 ] && ok || bad "top bounded: took $(( $(date +%s) - s )) s"
+  hasnt "$(jget "$out" 'd["error"]')" "tries" "status tries once"
 
   t "status probe"
   echo stalled > "$FSG_FAKE/probe"; out=$("$G" status --json --probe); rc=$?
@@ -2765,6 +2766,78 @@ if ! skip_case blind; then
   eq "$(grep -c 'cannot measure' "$FSG_FAKE/notifications.log")" 1 "not repeated within the renotify window"
   echo 4242 > "$FSG_FAKE/fsev/pids"; "$G" tick >/dev/null 2>&1; eq $? 0 "measures again"
   absent "$FSG_STATE_DIR/blind-ticks" "the streak resets"
+fi
+
+# ======================================================================== slow-top
+# A loaded Mac: top misses FSG_TOP_TIMEOUT_S. The tick and a heal's precheck try
+# again; everything else tries once.
+if ! skip_case slow-top; then
+  t "a tick measures again when top is slow once"
+  docker_default; install_fake --no-agent
+  echo 2 > "$FSG_STATE_DIR/blind-ticks"; : > "$FSG_FAKE/notifications.log"
+  echo 5 > "$FSG_FAKE/top-delay-seq"
+  FSG_TOP_TIMEOUT_S=2 FSG_MEASURE_RETRY_S=0 "$G" tick >/dev/null 2>&1; eq $? 0 "measured on the second try"
+  has "$(cat "$FSG_LOG")" "MEASURE top did not answer within 2s (try 1 of 3)" "the slow try is logged"
+  hasnt "$(cat "$FSG_LOG")" "try 2 of 3" "one retry was enough"
+  hasnt "$(cat "$FSG_LOG")" "TICK cannot-measure" "not a blind tick"
+  has "$(grep ' TICK level=' "$FSG_LOG" | tail -n 1)" "level=ok pid=4242 mb=4 " "the tick's line"
+  absent "$FSG_STATE_DIR/blind-ticks" "the blind streak ends instead of growing"
+  hasnt "$(cat "$FSG_FAKE/notifications.log")" "cannot measure" "no blind notice"
+
+  t "an emergency heal goes ahead when its precheck's top is slow once"
+  docker_default; install_fake --no-agent; mem 3G
+  # The tick's own check answers at once; the precheck's first top is slow.
+  printf '0\n5\n' > "$FSG_FAKE/top-delay-seq"; : > "$FSG_FAKE/calls.log"
+  FSG_TOP_TIMEOUT_S=2 FSG_MEASURE_RETRY_S=0 "$G" tick > "$C/o" 2>&1; eq $? 0 "healed ($(tail -n 1 "$C/o"))"
+  has "$(cat "$FSG_LOG")" "MEASURE top did not answer within 2s (try 1 of 3)" "the precheck's slow try is logged"
+  has "$(cat "$FSG_FAKE/calls.log")" "sudo -n /" "restart happened"
+  has "$(cat "$FSG_STATE_DIR/last-heal")" "healed emergency" "recorded"
+
+  t "a requested heal goes ahead when its precheck's top is slow once"
+  docker_default; install_fake; mem 3G
+  agent_env FSG_TOP_TIMEOUT_S=2 FSG_MEASURE_RETRY_S=0
+  echo 5 > "$FSG_FAKE/top-delay-seq"
+  heal > "$C/o" 2>&1; eq $? 0 "healed ($(tail -n 1 "$C/o"))"
+  has "$(cat "$FSG_LOG")" "MEASURE top did not answer within 2s (try 1 of 3)" "the slow try is logged"
+  has "$(cat "$FSG_STATE_DIR/last-heal")" "healed manual" "recorded"
+
+  t "a top that never answers: bounded tries, then one blind tick"
+  docker_default; install_fake --no-agent; : > "$FSG_FAKE/notifications.log"
+  echo 8 > "$FSG_FAKE/top-delay"; s=$(date +%s)
+  FSG_TOP_TIMEOUT_S=1 FSG_MEASURE_RETRY_S=1 "$G" tick >/dev/null 2>&1; eq $? 3 "cannot measure"
+  w=$(( $(date +%s) - s ))
+  [ "$w" -ge 4 ] && [ "$w" -lt 20 ] && ok || bad "three bounded tries 1 s apart: took $w s"
+  eq "$(grep -c 'MEASURE top did not answer within 1s' "$FSG_LOG")" 3 "each try is logged"
+  has "$(cat "$FSG_LOG")" "(try 3 of 3)" "up to the last try"
+  eq "$(grep -c 'TICK cannot-measure' "$FSG_LOG")" 1 "one blind tick"
+  has "$(grep 'TICK cannot-measure' "$FSG_LOG")" 'n=1 "top did not answer within 1s (3 tries; ps: resident 4 MB, a lower bound on the footprint)"' \
+    "the reason names the tries and ps's lower bound"
+  eq "$(cat "$FSG_STATE_DIR/blind-ticks")" 1 "the streak counts ticks, not tries"
+  FSG_TOP_TIMEOUT_S=1 FSG_MEASURE_TRIES=1 "$G" tick >/dev/null 2>&1; eq $? 3 "FSG_MEASURE_TRIES=1: cannot measure"
+  eq "$(grep -c 'MEASURE top did not answer within 1s' "$FSG_LOG")" 4 "one more try"
+  has "$(grep 'TICK cannot-measure' "$FSG_LOG" | tail -n 1)" 'n=2 "top did not answer within 1s (ps: resident' "no try count for a single try"
+
+  t "a requested heal whose top never answers ends with 3 after its tries"
+  docker_default; install_fake; mem 3G
+  agent_env FSG_TOP_TIMEOUT_S=1 FSG_MEASURE_RETRY_S=0
+  echo 8 > "$FSG_FAKE/top-delay"; : > "$FSG_FAKE/notifications.log"; : > "$FSG_FAKE/calls.log"
+  heal > "$C/o" 2>&1; eq $? 3 "cannot measure"
+  has "$(cat "$C/o")" "top did not answer within 1s (3 tries" "the caller is told why"
+  eq "$(grep -c 'cannot heal' "$FSG_FAKE/notifications.log")" 1 "one cannot-heal notice"
+  hasnt "$(cat "$FSG_FAKE/calls.log")" "docker desktop stop" "Docker untouched"
+  hasnt "$(cat "$FSG_FAKE/calls.log")" "sudo -n /" "no restart"
+  absent "$FSG_STATE_DIR/drain/pending" "nothing held"
+  rm -f "$FSG_FAKE/top-delay"
+
+  t "only a slow top is tried again"
+  docker_default; install_fake --no-agent
+  : > "$FSG_FAKE/fsev/pids"; s=$(date +%s)
+  FSG_MEASURE_RETRY_S=5 "$G" tick >/dev/null 2>&1; eq $? 3 "no daemon"
+  echo 4242 > "$FSG_FAKE/fsev/pids"; mem garbage
+  FSG_MEASURE_RETRY_S=5 "$G" tick >/dev/null 2>&1; eq $? 3 "unparseable top"
+  [ $(( $(date +%s) - s )) -lt 5 ] && ok || bad "no pause for another try: took $(( $(date +%s) - s )) s"
+  hasnt "$(cat "$FSG_LOG")" "MEASURE" "no retry logged"
+  hasnt "$(cat "$FSG_LOG")" "tries" "the reason is the first try's"
 fi
 
 # ======================================================================== stall-notice

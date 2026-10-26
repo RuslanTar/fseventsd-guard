@@ -24,6 +24,7 @@ for f in "${fields[@]}"; do
     etime) v=$(fake_attr "$pid" etime 01:02:03) ;;
     %cpu) v=$(fake_attr "$pid" cpu 1.5) ;;
     time) v=$(fake_attr "$pid" time 0:01.50) ;;
+    rss) v=$(fake_attr "$pid" rss 5000) ;;
     pid) v=$pid ;;
     lstart) v="Fri Oct 16 00:00:00 2026" ;;
     *) v=0 ;;
