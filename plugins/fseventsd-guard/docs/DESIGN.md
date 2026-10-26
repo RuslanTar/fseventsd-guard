@@ -17,6 +17,7 @@ decision from an accident. The user-facing summary is `../README.md`.
 | Suggest the guard only on affected macOS versions | owner, 2026-10-16 (§9) |
 | Affected = a range: from the first version with a reported runaway (15.6.1) up to the first fixed version of each major line (replaces an explicit list, 2026-10-20) | owner, 2026-10-25 (§9) |
 | Only the launchd agent runs heals; wave, manual and trial callers write a request and wait for its result | owner, 2026-10-20 (§5.3) |
+| The plugin's prompt hook warns when the guard is installed but its agent stopped ticking | owner, 2026-10-26 (§14) |
 
 ## 2. Parts and where they live
 
@@ -988,7 +989,8 @@ change. New fields may be added. A breaking change bumps the schema to `/2`.
   the plist) is older than twice `interval_s` (`FSG_AGENT_INTERVAL_S`), unless that
   tick is still running a heal. Stale means the agent is unloaded, switched off in
   Background Items or hung; `status --json` then also prints a `warning: agent
-  STALE ...` line on stderr, and `doctor` warns. An agent that predates heartbeats
+  STALE ...` line on stderr, `doctor` warns, and the Claude Code plugin's prompt
+  hook warns (§14). An agent that predates heartbeats
   is judged by its `TICK` lines only, and not at all without one (§13). `requests`
   is true when the installed app copy serves heal requests (`FSG_REQUEST_PROTOCOL`
   matches the caller's).
@@ -1167,3 +1169,40 @@ replaces it:
 the state is converted. An agent under another label is not replaced: `install`
 refuses while one runs the app copy (§2), and that agent goes with the uninstall of
 the install that made it.
+
+## 14. Claude Code hooks: the stopped-agent warning (`lib/hint.sh`)
+
+The plugin's hooks only read the guard's state (what each says: `../README.md`,
+"Claude Code hooks"). Once the agent's plist is installed the install nudge stops,
+so an agent that did not start after a restart, was switched off in Login Items &
+Extensions, was booted out or hangs left the guard looking installed while nothing
+watched fseventsd. The prompt hook now warns then (owner, 2026-10-26):
+
+- **The rule of `status` and `doctor`.** The hook calls `fsg_agent_fields` (§8,
+  `agent.stale`): stale when the heartbeat, or with none the newest `TICK` line or
+  the install, is older than 2 × `FSG_AGENT_INTERVAL_S` from the config, unless that
+  tick is still in a heal. The three cannot disagree.
+- **Cheap on every prompt.** After the config load, a heartbeat within the limit is
+  read with shell builtins and ends the check: no `top`, `launchctl` or `ps`. Only
+  an older one, past the stamp and the boot check below, sources `lib/measure.sh`
+  and `lib/heal.sh` for the full rule. The config load writes nothing to the user
+  log: a bad config line is the agent's to log, not every prompt's.
+- **Not right after a boot or a wake.** launchd starts the agent at login
+  (`RunAtLoad`) and runs an interval it missed asleep on wake, but a prompt can
+  come first, against a heartbeat from before the restart or the sleep. So the hook
+  says nothing until the later of `kern.boottime` and `kern.waketime` is more than
+  two intervals ago. On the author's Mac the first tick after a 35-minute sleep came
+  98 s after the wake: timed from the boot alone, a prompt in that minute and a half
+  after opening the lid would warn. The boot time is not the login time, so a
+  prompt in the seconds between a late login and the first tick could still warn.
+- **At most every 6 hours** (`fsg_hint_every agent-stopped`), stamped in the hint
+  dir before it prints, as the nudge is: every session shares the stamp, and a stamp
+  that cannot be written prints nothing. `install` and `uninstall` remove it with
+  the nudge's stamps.
+- **What it says.** The last tick's age against the interval, that the guard is not
+  watching fseventsd, the causes (unloaded, switched off, hung), and the app copy's
+  `doctor` to run in a terminal, which names the cause and the fix. `FSG_HINT=0`
+  and the `off` file silence it, as they do the nudge; off macOS it says nothing.
+- **The hook's state dir.** It judges the state dir of its own environment, as the
+  heal notice and `doctor` do. An agent installed with another `FSG_STATE_DIR`
+  (the suite's knob, not a documented setting) would be judged by its plist's age.

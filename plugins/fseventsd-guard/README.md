@@ -49,7 +49,7 @@ you at each step.
 | root helper `/usr/local/libexec/fseventsd-guard-restart` | root, via one sudoers rule, no arguments | Re-checks for itself that the target is the real fseventsd, that it is over the floor and not rate limited, saves a small evidence record, then sends SIGTERM (SIGKILL if the same daemon still runs 10 s later). launchd respawns the daemon at once. |
 | launchd agent `io.github.ruslantar.fseventsd-guard` | you | The only process that heals. Every 5 minutes, and at once when `heal` or `trial` asks: runs the queued heal requests in order; warns at 500 MB (notification only); at 2 GB, a stalled probe, or 500 MB with fseventsd using half a core or more for 3 checks in a row, an emergency heal at most once per 3 hours. |
 | `install` / `uninstall` / `doctor` | you, one sudo prompt | Sets everything up, removes every trace, checks every piece. |
-| `claude-hook prompt\|bash` (run by the Claude Code plugin's `hooks/fseventsd-guard-hook.sh`) | you, from Claude Code, macOS only | Not installed: suggests installing, with fseventsd's footprint. Installed: tells Claude sessions when a heal stops Docker ("Claude Code hooks" below). |
+| `claude-hook prompt\|bash` (run by the Claude Code plugin's `hooks/fseventsd-guard-hook.sh`) | you, from Claude Code, macOS only | Not installed: suggests installing, with fseventsd's footprint. Installed: warns when the agent stopped ticking, and tells Claude sessions when a heal stops Docker ("Claude Code hooks" below). |
 
 Two tiers act:
 
@@ -459,9 +459,11 @@ the plugin on but do not install it: each teammate still runs the one-time
 | Hook | Speaks when | Says | How often, at what cost |
 |---|---|---|---|
 | `UserPromptSubmit` (`prompt`): the install nudge | The guard is not installed (no agent plist, no root helper: an install stopped at the root question or at sudo does not count) on an affected macOS version | fseventsd's footprint in MB and as a multiple of the 30 MB budget, its uptime and level, why that matters, and what to run in a new terminal window (install asks for sudo): `if [ -d ~/fseventsd-guard ]; then git -C ~/fseventsd-guard pull --ff-only; else git clone https://github.com/RuslanTar/fseventsd-guard.git ~/fseventsd-guard; fi && ~/fseventsd-guard/plugins/fseventsd-guard/fseventsd-guard install` (an existing clone is updated first), then the same path with `doctor`. A short warning for you (`systemMessage`) and the facts for Claude, which says that you have not been told yet | At most hourly at runaway (2 GB and up), every 3 hours at warn (500 MB and up), daily below that; the stamps in `~/Library/Caches/fseventsd-guard-hint` are shared by every session. It measures (`top`, about 2 s) at most once an hour; any other prompt costs a file read (about 25 ms in all, through the wrapper) |
+| `UserPromptSubmit` (`prompt`): the stopped-agent warning | The agent's plist is installed, but its last tick is older than twice `FSG_AGENT_INTERVAL_S` (5 minutes), as `status` and `doctor` judge it (the heartbeat, or with none the newest `TICK` line or the install; a tick still in a heal counts as running): the agent is unloaded, switched off in Login Items & Extensions, or hung. Never while the Mac has been up or awake for less than two intervals: launchd runs the agent at login and on wake, and a prompt can come first | How long ago the last tick was, that the guard is not watching fseventsd, the likely causes, and to run `"$HOME/Library/Application Support/fseventsd-guard/app/fseventsd-guard" doctor` in a terminal (the installed app copy, as the heal notice names it). A short warning for you (`systemMessage`) and the facts for Claude, which says that you have not been told yet | At most every 6 hours; its stamp in `~/Library/Caches/fseventsd-guard-hint` is shared by every session. A recent heartbeat costs the config and one file read (about 25 ms more per prompt than without the check, through the wrapper, on a loaded Mac); it never measures fseventsd or asks `launchctl` |
 | `PreToolUse` and `PostToolUse` on Bash (`bash`): the heal notice | The guard is installed and a heal is draining, in its Docker step, holding runs because Docker did not verify, or ended in the last 10 minutes | To Claude only: since when, the trigger, what the heal's Docker step does to Docker, that `docker`, `docker compose` and test commands may fail or hang until it ends, that leased runs resume by themselves, that restarting Docker by hand interferes, and `status`; once it ended, the result, that a failure in that window is likely the heal, and (when fseventsd restarted) to restart a session that stops seeing file changes | Once per heal, phase (draining, Docker step, held, ended) and session; a subagent that Claude Code names (`agent_id`) gets its own. Stamps in `$TMPDIR/fseventsd-guard-hook`, removed after a day. It reads the guard's state files only, never Docker or fseventsd: about 15-20 ms per Bash call with no heal, through the wrapper |
 
-Once the guard is installed the nudge stops, and the agent heals unattended.
+Once the guard is installed the nudge stops, and the agent heals unattended; the
+prompt hook then speaks only when that agent stops ticking.
 To silence both hooks, set `FSG_HINT=0` in the environment Claude Code starts with
 (an `export` in your shell profile, or `"env": {"FSG_HINT": "0"}` in
 `.claude/settings.local.json`), or create the `off` file:
@@ -470,8 +472,8 @@ To silence both hooks, set `FSG_HINT=0` in the environment Claude Code starts wi
 mkdir -p ~/Library/Caches/fseventsd-guard-hint && touch ~/Library/Caches/fseventsd-guard-hint/off
 ```
 
-`install` and `uninstall` remove the nudge's stamps from that directory, not the
-`off` file.
+`install` and `uninstall` remove the nudge's and the stopped-agent warning's stamps
+from that directory, not the `off` file.
 
 ## Replacing an older watcher
 
@@ -727,8 +729,9 @@ None of them lets a non-root user gain root.
 - **Claude Code hooks not checked in a live session.** The suite runs
   `claude-hook` and the wrapper with the stdin JSON Claude Code documents and checks
   their output, but no live session has run them yet: whether Claude Code shows a
-  `UserPromptSubmit` hook's `systemMessage` (the nudge also tells Claude that you
-  have not been told, so it can pass it on), how the `additionalContext` of
+  `UserPromptSubmit` hook's `systemMessage` (the nudge and the stopped-agent
+  warning also tell Claude that you have not been told, so it can pass them on),
+  how the `additionalContext` of
   `PreToolUse` and `PostToolUse` reaches the model, and whether a subagent's hook
   input carries `agent_id` (without one, a subagent shares its session's notice),
   or that `FSG_HINT` set in a settings file's `env` reaches the hooks.
