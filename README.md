@@ -16,8 +16,8 @@ This repo holds two things:
   install once per Mac from a clone. Full manual:
   [`plugins/fseventsd-guard/README.md`](plugins/fseventsd-guard/README.md).
 - **A Claude Code plugin** (the same directory): two hooks that tell you to install
-  the guard on an affected Mac, and tell Claude when a heal stops Docker. The
-  plugin never runs as root and never installs anything.
+  the guard on an affected Mac or that its agent stopped, and tell Claude when a
+  heal stops Docker. The plugin never runs as root and never installs anything.
 
 ## Who needs it
 
@@ -84,6 +84,7 @@ tries SSH first and falls back to HTTPS by itself, so no GitHub SSH key is neede
 | Hook | Speaks when | Says |
 |---|---|---|
 | `UserPromptSubmit` | macOS on an affected version, guard not installed | fseventsd's footprint and the install commands above; at most once an hour (runaway), every 3 hours (growing) or once a day (fine) |
+| `UserPromptSubmit` | Guard installed, but its agent has not ticked for more than twice its 5-minute interval (unloaded, switched off in Login Items & Extensions, or hung); never in the first 10 minutes after a boot or a wake | That the guard is not watching fseventsd, and to run `"$HOME/Library/Application Support/fseventsd-guard/app/fseventsd-guard" doctor` in a terminal; at most every 6 hours |
 | `PreToolUse` and `PostToolUse` on Bash | Guard installed and a heal is running, holding runs, or ended in the last 10 minutes | To Claude only: that `docker`, `docker compose` and test commands may fail until the heal ends, once per heal phase and session |
 
 The hooks read the guard's state files and their own stamps. They never run as
