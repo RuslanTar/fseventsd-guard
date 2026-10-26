@@ -30,7 +30,7 @@ decision from an accident. The user-facing summary is `../README.md`.
 | Sudoers drop-in | `/etc/sudoers.d/fseventsd-guard` (root:wheel 0440) | Standard include dir. No dot in the name (sudo skips dotted names; the installer's temp file uses that). |
 | Root evidence | `/Library/Logs/fseventsd-guard/` | Root writes its evidence where the user cannot alter it. |
 | User log | `~/Library/Logs/fseventsd-guard.log` | The standard per-user log dir; bounded to 5000 lines. |
-| launchd agent | `~/Library/LaunchAgents/io.github.ruslantar.fseventsd-guard.plist` | Per-user, no root. The only process that heals (§5.3). It runs the app copy's `fseventsd-guard` script directly (`#!/bin/bash`), so Background Items lists it by the guard's name, not as "bash". `doctor` reports launchctl's last exit status for it: a tick exits 0-3 (its level), 4-11 (an emergency heal's code, or 10 when it cannot take its lock), 14 (its emergency heal refused to stop Docker for data safety, §6: `doctor` names the last heal's result and record, with no reinstall advice) or 130 (stopped by a signal, after its trap cleaned up), so any other code is a warning. Another plist in the LaunchAgents dir that runs the app copy under another label (an install left under an older label) would heal next to it: `install` refuses before it changes anything, and `doctor` fails, naming the plist, its label and the fix. |
+| launchd agent | `~/Library/LaunchAgents/io.github.ruslantar.fseventsd-guard.plist` | Per-user, no root. The only process that heals (§5.3). It runs the app copy's `fseventsd-guard` script directly (`#!/bin/bash`), so Background Items lists it by the guard's name, not as "bash". It runs as `ProcessType` `Interactive`, unthrottled, so it can measure on a loaded Mac (§5.3; `doctor` warns on a plist without it). `doctor` reports launchctl's last exit status for it: a tick exits 0-3 (its level), 4-11 (an emergency heal's code, or 10 when it cannot take its lock), 14 (its emergency heal refused to stop Docker for data safety, §6: `doctor` names the last heal's result and record, with no reinstall advice) or 130 (stopped by a signal, after its trap cleaned up), so any other code is a warning. Another plist in the LaunchAgents dir that runs the app copy under another label (an install left under an older label) would heal next to it: `install` refuses before it changes anything, and `doctor` fails, naming the plist, its label and the fix. |
 
 The runner-side lease code (`lib/lease.sh`) is POSIX sh so that sh, bash and zsh
 scripts can source it. The root helper is `/bin/sh` with absolute tool paths.
@@ -391,12 +391,42 @@ load and on a kickstart, never twice at once. In order:
      the request log links to, then writes `after.txt`, the Docker Desktop logs and
      `summary.txt`.
      Inside the tick, heal paths return their code instead of calling `exit`.
-5. The emergency check (§4), once per tick. It does not heal while an earlier intent
+5. The emergency check (§4), once per tick, its `top` sample tried again when it
+   does not answer in time (below). It does not heal while an earlier intent
    stays unverified; it notifies instead (throttled).
 6. Back to step 4 while a request is queued. Then release the lock, write the
    heartbeat, and exit with the level or the emergency heal's code (§2).
 
 The newest 20 finished requests (`.run`, `.log`, `.result`) are kept.
+
+**Measuring on a loaded Mac.** A runaway comes with a busy machine, and no heal runs
+without a measurement, so a `top` that misses `FSG_TOP_TIMEOUT_S` (15 s) must not
+blind the agent at once. Two parts:
+
+- The plist sets `ProcessType` to `Interactive`. Without one, launchd applies "light
+  resource limits" that throttle the job's CPU and I/O (launchd.plist(5)). Measured
+  with temporary agents at load average 107-131 on macOS 27.0.1: unset or
+  `Standard` ran the job as spawn type daemon at priority 20, and its `top` took
+  10-27 s, often past 15 s; `Interactive` ran it at priority 31, and `top` took
+  1.3-1.5 s. `Adaptive` (priority 4 for a job without XPC transactions) and
+  `Background` (priority 4) were slower still: no `top` result in 40 s. The cost: a
+  tick, and any heal it runs, competes at app priority; a tick is short and a drain
+  mostly sleeps. The root helper runs under `sudo` as the tick's child, so it most
+  likely gets the same priority (inferred, not checked: it needs sudo). `install`
+  writes the plist, so an older install gets the key when `install` runs again;
+  until then `doctor` warns.
+- The agent's emergency check (step 5) and a heal's precheck, so every heal (also
+  `heal --dry-run`), try a `top` that did not answer up to `FSG_MEASURE_TRIES` (3)
+  times in all, `FSG_MEASURE_RETRY_S` (5 s) apart: about a minute at most. Each
+  slow try is logged (`MEASURE top did not answer within 15s (try 1 of 3)`). Any
+  other failure (no fseventsd, two of them, an unreadable footprint) is final at
+  once. After the last try the reason gives the number of tries and the daemon's
+  resident size from `ps -o rss`, a lower bound on the footprint (it leaves out
+  compressed and swapped pages), for the log and the notices; no decision uses it
+  (`footprint -p` as the user fails). A blind tick counts once toward
+  `FSG_BLIND_NOTIFY_TICKS`, whatever its tries. `status`, the hooks, and the
+  measurements inside a heal (the healthy wait, which polls anyway, the verify
+  step, and the drain's emergency ceiling) try once.
 
 Tests install with `--prefix` and the stub `launchctl`: `bootstrap` marks the agent
 loaded, `bootout` unloads it (heal and trial then exit 9), and `kickstart` starts the
@@ -570,10 +600,18 @@ Docker before-step only gets its saved hold back, or its drain ended. Either way
 running request gets result 130 (its heal's own code if that heal had already
 returned) and the lock is released. The plist sets
 `ExitTimeOut` to 3 × `FSG_DOCKER_TIMEOUT_S` + 180 s plus the longest single bounded
-call (the larger of `FSG_HELPER_TIMEOUT_S` and `FSG_DOCKER_TIMEOUT_S` + 10 s) so
-launchd does not SIGKILL that wait and restore (its default is 20 s), and `install` refuses to reload the agent while a
-heal is in progress. A SIGKILL runs no trap: the intent and a hold saved aside
-(`drain/pending.saved.<pid>`) stay, and the next tick puts that hold back (unless a
+call (the larger of `FSG_HELPER_TIMEOUT_S` and `FSG_DOCKER_TIMEOUT_S` + 10 s), the
+time that wait and restore can take, but launchd does not grant it: it caps a user
+agent's exit timeout at 60 s. Measured on macOS 27.0.1 (26A434) with temporary
+agents: 30, 59 and 60 read back as such in `launchctl print`, 61, 120 and 1390 as
+60 (1390 also with `ProcessType` Interactive, Adaptive or Background), and no value
+as 5 s (launchd.plist(5) says only "system-defined"). An agent with 1390 that
+ignored SIGTERM was SIGKILLed exactly 60 s after `launchctl bootout`, which itself
+returned at once. So a restore that outlasts that minute is cut off; the intent and
+the next tick then recover Docker (below), as after any SIGKILL. `doctor` reports
+the value launchd uses when it is below the plist's. `install` refuses to reload
+the agent while a heal is in progress. A SIGKILL runs no trap: the intent and a
+hold saved aside (`drain/pending.saved.<pid>`) stay, and the next tick puts that hold back (unless a
 live drain or hold is in place) before it recovers. Until then leased runs hold
 behind the intent itself (§5.2), so they do not start against the Docker the killed
 tick stopped, even if no tick runs again.
@@ -942,7 +980,8 @@ change. New fields may be added. A breaking change bumps the schema to `/2`.
 
 Footprint comes from `top -l 1 -pid P -stats pid,mem,cmprs,ports` (MEM is the
 physical footprint, the figure Apple's budget refers to), bounded by
-`FSG_TOP_TIMEOUT_S` (15 s; a slower sample counts as cannot measure). Each tick's
+`FSG_TOP_TIMEOUT_S` (15 s; a slower sample counts as cannot measure; `status` tries
+once, the agent's check and a heal's precheck try again, §5.3). Each tick's
 `TICK` log line also carries the compressed memory (`cmprs_mb`) and Mach ports
 (`ports`) from that sample and the swap in use (`swap_used_mb`, from `sysctl
 vm.swapusage`); they are logged only. Ports tell many live clients apart from
@@ -1072,6 +1111,14 @@ machine measured 50-200 events/s normally and 2,117-5,715 on flood days
     the tick. Checked in the first live B or C trial (`DOCKER-TRIALS.md` §2); if
     Docker shares the group, the plist needs `AbandonProcessGroup` or the agent must
     start Docker Desktop with `open -a Docker` (owner decision).
+11. The root helper measures with its own `top`, bounded at 15 s and tried once: on
+    a Mac loaded enough to miss that, it refuses with 70 after the drain and the
+    Docker before-step ran (exit 7). Retrying there changes root code, so every
+    install asks for sudo again (owner decision). With `ProcessType` `Interactive`
+    it most likely runs at the agent's priority (§5.3, not checked).
+12. A tick that cannot measure returns before its probe, so a delivery stall goes
+    unseen while the agent is blind. It could still probe and notify a stall
+    (it cannot heal without a measurement).
 
 ## 13. Agents from before heal requests
 

@@ -230,9 +230,12 @@ cd ~/fseventsd-guard/plugins/fseventsd-guard
 To update, `git pull` in the clone and run `install` again. When the installed
 helper, drop-in and root-steps copy already match what it would put there, it
 skips steps 3 and 4: it replaces only the app copy and the agent, with no question
-and no password. `doctor` and `status` (run from the clone) say which kind of
-update is due: "re-run install; it needs no sudo" for an old app copy, or "root
-code changed ... it asks for sudo".
+and no password. The agent's plist is written only then too, so a plist change
+reaches an install only through `install`: one made before 2026-10-26 lacks
+`ProcessType Interactive`, which keeps launchd from throttling the agent on a busy
+Mac, and `doctor` warns until `install` runs again. `doctor` and `status` (run
+from the clone) say which kind of update is due: "re-run install; it needs no
+sudo" for an old app copy, or "root code changed ... it asks for sudo".
 
 Security model: the repo is writable by you and by agents. Two pieces of it run as
 root: the root-steps text (`lib/root-steps.sh`, only during the one `sudo` of
@@ -397,7 +400,7 @@ If the install created `/usr/local/libexec` and it is now empty,
 | `fseventsd-guard: agent cannot run` | The agent could not create its lock (disk full): it neither heals nor serves heal requests, and a waiting `heal` ends with exit 10 | Free disk space. |
 | `fseventsd-guard: held runs released` | Docker is healthy again after an incomplete heal | Nothing. |
 | `fseventsd runaway again ... not auto-healing` | Second runaway within 3 hours of the last restart or restart attempt | Heal by hand (`fseventsd-guard heal`) and look for the file-churn source. |
-| `fseventsd-guard cannot measure fseventsd` | Three checks in a row could not read the daemon; the guard can neither warn nor heal | `fseventsd-guard doctor`, `fseventsd-guard status`. |
+| `fseventsd-guard cannot measure fseventsd` | Three checks in a row could not read the daemon; the guard can neither warn nor heal. A check tries a `top` that does not answer within 15 s three times, 5 s apart (a busy Mac), and the reason then gives `ps`'s resident size, a lower bound on the footprint | `fseventsd-guard doctor`, `fseventsd-guard status`. |
 | `fseventsd: delivery stalled` | The probe got no event, but the footprint is below the helper's floor | Manual fix shown in the notification. Report it: it is an open question for the thresholds. |
 
 Logs: `~/Library/Logs/fseventsd-guard.log` (user side, one line per check),
@@ -541,10 +544,25 @@ None of them lets a non-root user gain root.
   10 minutes instead; a manual or wave heal then gives up (exit 4) unless it runs
   with `--on-cap proceed`. Long-lived `--rm` and one-off containers: see the
   2026-10-23 items below.
+- **launchd caps the agent's exit time at 60 s.** The plist asks for enough time to
+  restore Docker after a signal (`ExitTimeOut`, 1390 s with the defaults), but
+  launchd gives a user agent at most 60 s from SIGTERM to SIGKILL (measured on macOS
+  27.0.1; `doctor` prints the value in use). A heal stopped at logout or by
+  `launchctl bootout` past its Docker before-step can then be killed in its
+  restore, and recovery comes from the Docker intent and the next tick (the item
+  below).
+- **A loaded Mac can still blind the guard.** The agent's check and a heal's
+  precheck try a `top` that misses `FSG_TOP_TIMEOUT_S` (15 s) three times, 5 s
+  apart, and the agent runs unthrottled (`ProcessType Interactive`). A Mac so
+  loaded that every try misses stays blind: no warning, no heal, and no delivery
+  probe, so a stall goes unseen too; three such checks in a row notify. The root
+  helper takes its own `top` sample, bounded at 15 s and tried once: if it misses,
+  the helper refuses (70) after the drain and the Docker step, and the heal ends
+  with exit 7, Docker restored. Retrying there is root code (a sudo install).
 - **An agent killed outright mid-heal.** A caller cannot stop a heal, but the
-  agent's tick can still be killed (`kill -9`, or launchd's SIGKILL after
-  `ExitTimeOut`). That runs no cleanup: Docker stays as the heal left it and runners
-  ignore the dead tick's drain. Leased runs still wait, behind the heal's Docker
+  agent's tick can still be killed (`kill -9`, or launchd's SIGKILL at the end of
+  its exit time, above). That runs no cleanup: Docker stays as the heal left it
+  and runners ignore the dead tick's drain. Leased runs still wait, behind the heal's Docker
   intent, which they read themselves: after an A or B before-step, or any after-step
   action, for up to `FSG_FAILED_HOLD_S` (60 min) or until `fseventsd-guard release`,
   even if no tick ever runs again. The agent's next tick (at most 5 minutes) restores
@@ -572,9 +590,9 @@ None of them lets a non-root user gain root.
   a failed listing is not an empty one. A wedged Docker (no answer to
   `docker info`) is acted on without the check, so a `--rm` container with an
   anonymous volume on it loses that volume; the notices and the heal record name
-  such a step. The agent's `ExitTimeOut` (set at install) does not count the
+  such a step. The `ExitTimeOut` install computes does not count the
   `docker info` and container listing (up to 100 s) variant C runs before its
-  restart.
+  restart (and launchd grants at most 60 s anyway, above).
 - **Smaller inaccuracies.** `heal --dry-run` exits 0 when it cannot measure (a real
   heal exits 3). After helper exit 73 (signal sent, no respawn seen) the suggested
   manual fix `sudo kill -TERM $(pgrep -x fseventsd)` finds no process.
@@ -608,8 +626,10 @@ None of them lets a non-root user gain root.
     runs.
   - A request still queued when the agent is unloaded or switched off makes its
     caller wait 10 minutes and exit 10, not 9.
-  - `ExitTimeOut` leaves out the EXIT trap's verify step, so a slow restore during a
-    `bootout` can be SIGKILLed mid-verify with no result and no notice.
+  - The `ExitTimeOut` install computes leaves out the EXIT trap's verify step, and
+    launchd grants at most 60 s (above), so a restore during a `bootout` can be
+    SIGKILLed mid-restore or mid-verify with no result and no notice; the next tick
+    recovers it.
   - `install` and `uninstall` check for a running heal before the prompts but not
     again before `launchctl bootout`; a heal that starts meanwhile is cut (uninstall
     then waits for its tick, which restores Docker before it exits, and stops with
@@ -685,6 +705,10 @@ None of them lets a non-root user gain root.
   the waiting caller's exit 9), shutdown or `ExitTimeOut` recovery of a heal cut
   part way, and a real `uninstall` (its sudo of the root-owned root-steps copy,
   `bootout` of a running tick, the `launchctl print-disabled` line it looks for).
+  Checked on 2026-10-26 with temporary agents under other labels, not with the
+  guard's own: launchd's 60 s cap on the exit time (items above) and the priority
+  each `ProcessType` gives (docs/DESIGN.md §5.3). The guard's agent has not run
+  with `ProcessType Interactive` yet.
   Checked live on 2026-10-23 (Docker CLI 29.9.2): the two `docker inspect`
   templates, the container record and the drain's engine-work listing. A first
   record template failed on every container without a `--mount` or with a bind
@@ -744,7 +768,8 @@ None of them lets a non-root user gain root.
   after a signal to the agent (it waits for the Docker Desktop stop or root helper
   call the signal cut into), an agent killed outright or during that restore (the
   next tick recovers its Docker intent), a Docker Desktop that runs but does not answer,
-  helper exit 73 with a late respawn, helper exit 72 (SIGKILL needed), leases and drains across TZ/locale, a helper that
+  a `top` that is slow once or never answers (the tick, an emergency and a requested
+  heal), helper exit 73 with a late respawn, helper exit 72 (SIGKILL needed), leases and drains across TZ/locale, a helper that
   keeps failing under the agent, drain-marker write failure and a slow restore,
   reinstall then uninstall, `--rm` and one-off containers, install during a heal, planted temp
   names and pre-existing unsafe dirs (test mode), the simulated-root refusals, tools
