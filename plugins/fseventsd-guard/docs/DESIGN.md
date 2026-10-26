@@ -427,6 +427,22 @@ blind the agent at once. Two parts:
   `FSG_BLIND_NOTIFY_TICKS`, whatever its tries. `status`, the hooks, and the
   measurements inside a heal (the healthy wait, which polls anyway, the verify
   step, and the drain's emergency ceiling) try once.
+- A heal whose precheck needed more than one try takes one more `top`, a single
+  try, right before its Docker step: after the drain and the `--rm` volume checks,
+  before the Docker intent, and only when that step acts on Docker (B, C, or A with
+  containers to stop; not `none`, nor a Docker that is stopped or not local). The
+  root helper takes one `top` sample of its own, bounded at 15 s and not tried
+  again, and refuses (70) when it misses, after the Docker step ran; this check
+  keeps that from bouncing Docker for nothing on a Mac that has just missed. When
+  this `top` misses too, the heal ends with exit 3 and Docker untouched: logged
+  (`HEAL busy: top missed again before the Docker step; Docker left alone`),
+  recorded as `refused-cannot-measure`, a `cannot heal` notice (cannot measure)
+  naming that reason, and the drain ends as after the refusals before it (exit 14).
+  Unlike those, an emergency heal ending here does not count as an attempt (the
+  emergency interval), as a precheck that cannot measure does not. When it answers,
+  or fails another way (the helper checks for itself), the heal goes on unchanged;
+  its measurement is logged only. A precheck that answered at once measures no
+  more. The helper can still miss after this check answered.
 
 Tests install with `--prefix` and the stub `launchctl`: `bootstrap` marks the agent
 loaded, `bootout` unloads it (heal and trial then exit 9), and `kickstart` starts the
@@ -451,7 +467,9 @@ drain/pending phase=draining (a hold in place is saved aside, §5.5)
    │                        └▶ policy proceed: notify which runs are cut
    │          drained with mid-drain starts ──▶ notify which runs are cut
    ▼
-phase=docker-before (docker-intent written; cannot ──▶ 10, nothing stopped)
+phase=docker-before (--rm volume checks ──▶ 14; precheck needed a second top:
+   │          one more, missed ──▶ 3; nothing stopped)
+   │ docker-intent written; cannot ──▶ 10, nothing stopped
    ─▶ phase=restarting (sudo -n helper) ─▶ phase=waiting-healthy
    ─▶ phase=docker-after (always, even if the restart failed) ─▶ phase=verifying
    ─▶ Docker verified: release the drain, notify, record
@@ -905,7 +923,7 @@ one was a trial's.
 | Command | Codes |
 |---|---|
 | `status` | 0 ok, 1 warn, 2 runaway, 3 cannot measure |
-| `heal` | 0 healed, 3 cannot measure, 4 drain cap reached (abort), 6 helper would refuse (healthy / rate limited / stalled below the floor), 7 restart failed (Docker restored), 8 restarted but Docker restore or verify failed, or refused while an earlier heal's Docker is still not verified (nothing was stopped), 9 not installed (helper, drop-in or agent missing, the agent not loaded or older than the request protocol, or `sudo -n -l` refuses the helper; checked before the drain), 10 the request, the drain marker or the Docker intent could not be written, or the request stayed unclaimed for 2 agent intervals while no tick ran or for `FSG_REQUEST_MAX_AGE_S`: disk full or state dir not writable (nothing was stopped), 11 wave back-off: a wave heal gave up at the drain cap less than `FSG_WAVE_RETRY_MIN` (60) minutes ago, so no new drain, 12 queued or still running (`--no-wait`, `--result ID --no-wait`), 13 dropped before it started (too old), 14 refused after the drain: the Docker step would stop a running `--rm` container with an anonymous volume, which Docker deletes with it, or Docker answers but did not list its containers, so none could be checked (nothing was stopped or restarted, §6), 130 the agent was stopped during the heal (§5.5), 64 usage or an invalid request. A joined request (§5.3) returns the code of the heal it joined: 0, 7 or 8 |
+| `heal` | 0 healed, 3 cannot measure (in the precheck; or after the drain, when a precheck that needed a second `top` is followed by one that misses right before the Docker step: nothing was stopped or restarted, §5.3), 4 drain cap reached (abort), 6 helper would refuse (healthy / rate limited / stalled below the floor), 7 restart failed (Docker restored), 8 restarted but Docker restore or verify failed, or refused while an earlier heal's Docker is still not verified (nothing was stopped), 9 not installed (helper, drop-in or agent missing, the agent not loaded or older than the request protocol, or `sudo -n -l` refuses the helper; checked before the drain), 10 the request, the drain marker or the Docker intent could not be written, or the request stayed unclaimed for 2 agent intervals while no tick ran or for `FSG_REQUEST_MAX_AGE_S`: disk full or state dir not writable (nothing was stopped), 11 wave back-off: a wave heal gave up at the drain cap less than `FSG_WAVE_RETRY_MIN` (60) minutes ago, so no new drain, 12 queued or still running (`--no-wait`, `--result ID --no-wait`), 13 dropped before it started (too old), 14 refused after the drain: the Docker step would stop a running `--rm` container with an anonymous volume, which Docker deletes with it, or Docker answers but did not list its containers, so none could be checked (nothing was stopped or restarted, §6), 130 the agent was stopped during the heal (§5.5), 64 usage or an invalid request. A joined request (§5.3) returns the code of the heal it joined: 0, 7 or 8 |
 | `trial` | the heal's code; 13 dropped before it started (its requester was gone); 64 usage (also `--no-wait`) |
 | `run` | the command's own code; 75 when it gave up waiting for a drain |
 | `release` | 0 released or nothing held; 1 a running heal holds the drain (it releases it itself) |
@@ -956,7 +974,7 @@ change. New fields may be added. A breaking change bumps the schema to `/2`.
 ```
 
 - `pid`, `footprint_mb`, `cpu_pct`, `uptime_s` are `null` when level is `unknown`.
-- `last_heal`, when present, is `{"epoch", "result" (healed|restart-failed|restored-partly|aborted-at-cap|refused-anonymous-volumes|refused-unlisted|drain-not-marked|intent-not-written), "trigger", "docker_variant", "wall_s"}`.
+- `last_heal`, when present, is `{"epoch", "result" (healed|restart-failed|restored-partly|aborted-at-cap|refused-anonymous-volumes|refused-unlisted|refused-cannot-measure|drain-not-marked|intent-not-written), "trigger", "docker_variant", "wall_s"}`.
 - `docker_intent` is `null`, or `{"owner_pid", "owner_alive", "trigger", "docker_variant", "since_epoch", "after_step_done"}` while a heal's Docker step has not verified (§5.5). `owner_alive` is true while the tick that wrote it is still in that heal; false means that heal is gone, Docker may be down and the next tick recovers it. `after_step_done` is true once the after-step ran and every container in the restore set was started.
 - `requests` is the agent's queue (§5.3): `queued`, the number of requests not yet claimed, and `running`, `null` or `{"id", "trigger", "requester_pid", "requester_alive", "phase"}`.
 - `agent` is the background agent's heartbeat (`heartbeat` in the state dir), which
@@ -1113,9 +1131,13 @@ machine measured 50-200 events/s normally and 2,117-5,715 on flood days
     start Docker Desktop with `open -a Docker` (owner decision).
 11. The root helper measures with its own `top`, bounded at 15 s and tried once: on
     a Mac loaded enough to miss that, it refuses with 70 after the drain and the
-    Docker before-step ran (exit 7). Retrying there changes root code, so every
-    install asks for sudo again (owner decision). With `ProcessType` `Interactive`
-    it most likely runs at the agent's priority (§5.3, not checked).
+    Docker before-step ran (exit 7). A heal whose precheck needed a second `top`
+    takes one more right before the Docker step and ends with 3, Docker untouched,
+    when it misses (§5.3); a helper `top` that misses after that one answered, or
+    after a precheck that answered at once, still ends this way. Retrying in the
+    helper changes root code, so every install asks for sudo again (owner
+    decision). With `ProcessType` `Interactive` it most likely runs at the agent's
+    priority (§5.3, not checked).
 12. A tick that cannot measure returns before its probe, so a delivery stall goes
     unseen while the agent is blind. It could still probe and notify a stall
     (it cannot heal without a measurement).

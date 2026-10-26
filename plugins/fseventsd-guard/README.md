@@ -558,7 +558,10 @@ None of them lets a non-root user gain root.
   probe, so a stall goes unseen too; three such checks in a row notify. The root
   helper takes its own `top` sample, bounded at 15 s and tried once: if it misses,
   the helper refuses (70) after the drain and the Docker step, and the heal ends
-  with exit 7, Docker restored. Retrying there is root code (a sudo install).
+  with exit 7, Docker restored. A heal whose precheck needed a second try takes one
+  more `top` right before the Docker step and, if that misses too, ends with exit 3
+  before it touches Docker; the helper can still miss after that one answered.
+  Retrying in the helper is root code (a sudo install).
 - **An agent killed outright mid-heal.** A caller cannot stop a heal, but the
   agent's tick can still be killed (`kill -9`, or launchd's SIGKILL at the end of
   its exit time, above). That runs no cleanup: Docker stays as the heal left it
