@@ -147,7 +147,7 @@ t() { # start a test: t NAME
     FSG_DOCKER_TIMEOUT_S=10 FSG_DOCKER_QUERY_TIMEOUT_S=2 FSG_PROBE_TIMEOUT_S=2 FSG_RUN_POLL_S=1 \
     FSG_DETECT_COMMANDS=fsgtestrspec FSG_DETECT_DOCKER_CLI=0 FSG_DETECT_DOCKER_EXECS=1 FSG_DETECT_DOCKER_CONTAINERS=1 \
     FSG_DESKTOP_SOCKET="$FSG_DESKTOP_SOCKET" FSG_DESKTOP_BACKEND_SOCKET="$FSG_DESKTOP_BACKEND_SOCKET" FSG_DESKTOP_SETTINGS="$FSG_DESKTOP_SETTINGS"
-  unset FSG_AFFECTED FSG_AFFECTED_MIN FSG_AFFECTED_FIXED FSG_LEASE_FILE FSG_PROBE_BIN FSG_PROBE_DIR 2>/dev/null
+  unset FSG_AFFECTED FSG_AFFECTED_MIN FSG_AFFECTED_FIXED FSG_AFFECTED_REVIEWED FSG_LEASE_FILE FSG_PROBE_BIN FSG_PROBE_DIR 2>/dev/null
   echo 4242 > "$FSG_FAKE/fsev/pids"
   echo 5000K > "$FSG_FAKE/fsev/4242.mem"
   : > "$FSG_FAKE/calls.log"
@@ -277,13 +277,18 @@ if ! skip_case status; then
   t "status warn"
   mem 612M; out=$("$G" status --json); rc=$?
   eq $rc 1 "exit"; eq "$(jget "$out" 'd["level"]')" warn "level"
-  has "$(jget "$out" 'd["reasons"][0]')" "warn threshold 500" "reason"
+  has "$(jget "$out" 'd["reasons"][0]')" "warn threshold 256" "reason"
+  eq "$(jget "$out" 'd["thresholds"]["warn_mb"]')" 256 "warn default"
+  mem 256M; "$G" status >/dev/null; eq $? 1 "warn threshold is inclusive"
+  mem 255M; "$G" status >/dev/null; eq $? 0 "below warn"
 
   t "status runaway"
   mem 3G; "$G" status >/dev/null; eq $? 2 "3G exit"
-  mem 1.5G; "$G" status >/dev/null; eq $? 1 "1.5G = 1536 MB is warn"
+  mem 0.9G; "$G" status >/dev/null; eq $? 1 "0.9G = 921 MB is warn"
   mem 17G; out=$("$G" status --json); eq "$(jget "$out" 'd["footprint_mb"]')" 17408 "17G in MB"
-  mem 2048M; "$G" status >/dev/null; eq $? 2 "act threshold is inclusive"
+  eq "$(jget "$out" 'd["thresholds"]["act_mb"]')" 1024 "act default"
+  mem 1024M; "$G" status >/dev/null; eq $? 2 "act threshold is inclusive"
+  mem 1023M; "$G" status >/dev/null; eq $? 1 "below act"
 
   t "status cannot measure"
   : > "$FSG_FAKE/fsev/pids"; out=$("$G" status --json); rc=$?
@@ -314,12 +319,12 @@ if ! skip_case status; then
   has "$out" "delivery probe: ok (5 ms)" "latency from the old format"; hasnt "$out" "stream start" "no start line"
 
   t "status thresholds precedence"
-  mem 300M
-  "$G" status >/dev/null; eq $? 0 "300M default ok"
-  FSG_WARN_MB=200 "$G" status >/dev/null; eq $? 1 "env warn 200"
-  mkdir -p "$FSG_STATE_DIR"; echo "FSG_WARN_MB=250" > "$FSG_STATE_DIR/config"
-  "$G" status >/dev/null; eq $? 1 "user config warn 250"
-  FSG_WARN_MB=400 "$G" status >/dev/null; eq $? 0 "env beats user config"
+  mem 200M
+  "$G" status >/dev/null; eq $? 0 "200M default ok"
+  FSG_WARN_MB=150 "$G" status >/dev/null; eq $? 1 "env warn 150"
+  mkdir -p "$FSG_STATE_DIR"; echo "FSG_WARN_MB=180" > "$FSG_STATE_DIR/config"
+  "$G" status >/dev/null; eq $? 1 "user config warn 180"
+  FSG_WARN_MB=220 "$G" status >/dev/null; eq $? 0 "env beats user config"
 
   t "affected versions: a range"
   for v in 15.6.1 15.6.2 15.7.9 15.10 26.0 26.4.1 27.0 27.0.0 27.0.1 27.2 28.0; do
@@ -352,6 +357,34 @@ if ! skip_case status; then
   echo 28.0 > "$FSG_FAKE/sw_vers"
   out=$("$G" status --json); eq "$(jget "$out" 'd["os"]["version"]')" 28.0 "version in JSON"
   eq "$(jget "$out" 'd["os"]["affected"]')" True "a newer major line without a fix is affected"
+
+  t "affected versions: a release newer than the one the range was checked against gets an info line"
+  newer="info: macOS 27.1 is newer than 27.0.1, the newest release the affected range was checked against: it counts as affected until a fix is recorded; report it if Apple names an fseventsd fix"
+  echo 27.1 > "$FSG_FAKE/sw_vers"
+  out=$("$G" doctor --affected); eq $? 0 "doctor --affected: still affected"
+  has "$out" "$newer" "doctor --affected"
+  eq "$(printf '%s\n' "$out" | grep -c 'newer than')" 1 "one line"
+  out=$("$G" status); eq $? 0 "status: exit unchanged"; has "$out" "$newer" "status"
+  out=$("$G" status --json); json_ok "$out"; hasnt "$out" "newer than" "status --json stays JSON"
+  docker_default; install_fake --no-agent
+  "$G" doctor --prefix "$FSG_PREFIX" > "$C/doc.new" 2>&1; rc_new=$?
+  has "$(cat "$C/doc.new")" "info  ${newer#info: }" "doctor: an info line"
+  hasnt "$(cat "$C/doc.new")" "WARN  macOS" "not a warning"
+  echo 27.0.1 > "$FSG_FAKE/sw_vers"
+  "$G" doctor --prefix "$FSG_PREFIX" > "$C/doc.old" 2>&1; eq $rc_new $? "doctor: exit unchanged"
+  hasnt "$(cat "$C/doc.old")" "newer than" "doctor: none on the reviewed release"
+  hasnt "$("$G" doctor --affected)" "newer than" "doctor --affected: none on the reviewed release"
+  hasnt "$("$G" status)" "newer than" "status: none on the reviewed release"
+  echo 26.7.1 > "$FSG_FAKE/sw_vers"; hasnt "$("$G" status)" "newer than" "none on an older release"
+  echo 27.1 > "$FSG_FAKE/sw_vers"
+  FSG_AFFECTED_REVIEWED=27.1 "$G" doctor --affected > "$C/o"; hasnt "$(cat "$C/o")" "newer than" "none once 27.1 is reviewed"
+  FSG_AFFECTED_FIXED=27.1 "$G" doctor --affected > "$C/o"; eq $? 1 "fixed"; hasnt "$(cat "$C/o")" "newer than" "none on a fixed release"
+  FSG_AFFECTED=yes "$G" doctor --affected > "$C/o"; hasnt "$(cat "$C/o")" "newer than" "none when forced"
+  FSG_AFFECTED_REVIEWED= "$G" doctor --affected > "$C/o"; hasnt "$(cat "$C/o")" "newer than" "none without a reviewed release"
+  # The knob names the newest release in DESIGN §9's table: both change in one PR.
+  newest=$(awk '/^## 9\./ { f = 1; next } /^## / { f = 0 } f && /^\| [0-9]+\.[0-9]/ { print $2 }' "$GUARD_HOME/docs/DESIGN.md" |
+    sort -t. -k1,1n -k2,2n -k3,3n | tail -n 1)
+  eq "$(sed -n 's/^FSG_AFFECTED_REVIEWED=//p' "$GUARD_HOME/config.defaults")" "${newest:-none}" "FSG_AFFECTED_REVIEWED is the newest release in DESIGN §9"
 fi
 
 # ======================================================================== config-check
@@ -360,9 +393,9 @@ if ! skip_case config-check; then
   mkdir -p "$FSG_STATE_DIR"; echo "FSG_ACT_MB=2G" > "$FSG_STATE_DIR/config"
   mem 17G; out=$("$G" status --json 2> "$C/err"); rc=$?
   eq $rc 2 "17 GB is runaway with the default act threshold"
-  eq "$(jget "$out" 'd["thresholds"]["act_mb"]')" 2048 "default used"
+  eq "$(jget "$out" 'd["thresholds"]["act_mb"]')" 1024 "default used"
   has "$(cat "$C/err")" "FSG_ACT_MB='2G'" "stderr names the key and value"
-  has "$(cat "$FSG_LOG")" "CONFIG FSG_ACT_MB='2G' from $FSG_STATE_DIR/config is not a whole number; using the default 2048" "logged"
+  has "$(cat "$FSG_LOG")" "CONFIG FSG_ACT_MB='2G' from $FSG_STATE_DIR/config is not a whole number; using the default 1024" "logged"
   docker_default; install_fake --no-agent
   "$G" doctor --prefix "$FSG_PREFIX" > "$C/doc.out" 2>/dev/null; eq $? 2 "doctor fails"
   has "$(cat "$C/doc.out")" "FAIL  config: FSG_ACT_MB='2G' ($FSG_STATE_DIR/config) is not a whole number" "doctor names key and value"
@@ -370,8 +403,8 @@ if ! skip_case config-check; then
   t "numeric config: environment, leading zeros, empty"
   FSG_DRAIN_POLL_S=abc "$G" doctor --prefix "$FSG_PREFIX" > "$C/doc.out" 2>/dev/null
   has "$(cat "$C/doc.out")" "FSG_DRAIN_POLL_S='abc' (environment)" "environment named as the source"
-  mem 300M; FSG_WARN_MB=08 "$G" status >/dev/null 2>&1; eq $? 0 "leading zero rejected (default 500, not 8)"
-  FSG_WARN_MB= "$G" status >/dev/null 2>"$C/err"; eq $? 0 "empty value: default 500"
+  mem 200M; FSG_WARN_MB=08 "$G" status >/dev/null 2>&1; eq $? 0 "leading zero rejected (default 256, not 8)"
+  FSG_WARN_MB= "$G" status >/dev/null 2>"$C/err"; eq $? 0 "empty value: default 256"
   has "$(cat "$C/err")" "FSG_WARN_MB=''" "empty value reported"
   FSG_WARN_MB=200 "$G" status >/dev/null 2>"$C/err"; eq $? 1 "a valid value is kept"
   eq "$(cat "$C/err")" "" "nothing reported for valid values"
@@ -380,7 +413,7 @@ if ! skip_case config-check; then
   t "the user config is parsed, never run as shell"
   mkdir -p "$FSG_STATE_DIR"
   cat > "$FSG_STATE_DIR/config" <<EOF
-FSG_WARN_MB=250   # a comment after a value
+FSG_WARN_MB=150   # a comment after a value
 FSG_DOCKER_VARIANT="A"
 FSG_CAP_POLICY_MANUAL=\$(touch $C/pwned1)
 fsg_source_gate() { FSG_ROOT_TEXT='echo planted-root-text'; FSG_HELPER_TEXT=x; FSG_GATE_NOTE='reviewed: commit fake'; }
@@ -388,7 +421,7 @@ touch $C/pwned2
 FSG_NOT_A_SETTING=1
 FSG_STOP_TIMEOUT_S="30s"
 EOF
-  mem 300M; "$G" status >/dev/null 2>"$C/err"; eq $? 1 "a valid line applies (warn at 250)"
+  mem 200M; "$G" status >/dev/null 2>"$C/err"; eq $? 1 "a valid line applies (warn at 150)"
   absent "$C/pwned1" "a command substitution in a value did not run"
   absent "$C/pwned2" "a command line did not run"
   has "$(cat "$C/err")" "ignored line 3 of" "the unsafe value is ignored"
@@ -407,6 +440,13 @@ EOF
   echo '# planted' >> "$GUARD_HOME/lib/root-steps.sh"
   install_fake --no-agent; eq $? 1 "an edited root-steps.sh is still refused with the planted gate"
   tgit checkout -q -- plugins/fseventsd-guard/lib/root-steps.sh
+
+  t "doctor warns when the measure tries outlast the agent interval"
+  docker_default; install_fake --no-agent
+  "$G" doctor --prefix "$FSG_PREFIX" > "$C/doc.out" 2>/dev/null
+  hasnt "$(cat "$C/doc.out")" "FSG_MEASURE_TRIES" "silent with the defaults"
+  FSG_MEASURE_TRIES=20 "$G" doctor --prefix "$FSG_PREFIX" > "$C/doc.out" 2>/dev/null
+  has "$(cat "$C/doc.out")" "WARN  config: FSG_MEASURE_TRIES=20 tries of FSG_TOP_TIMEOUT_S (15 s) and FSG_MEASURE_RETRY_S (5 s) take up to 400 s, at least the agent interval (300 s): a check stops after 7 tries, at half the interval" "names the knobs and the cut"
 fi
 
 # ======================================================================== helper
@@ -469,10 +509,36 @@ if ! skip_case helper; then
   rec=$(cat "$EV"/restart-*.txt)
   has "$rec" "files=(find timed out)" "find bounded"; has "$rec" "size_kb=(du timed out)" "du bounded"
   rm -f "$FSG_FAKE/find-delay" "$FSG_FAKE/du-delay" "$EV/last-restart"; echo 4242 > "$FSG_FAKE/fsev/pids"; mem 3G
-  echo 5 > "$FSG_FAKE/top-delay"; s=$(date +%s)
+  echo 5 > "$FSG_FAKE/top-delay"; : > "$FSG_FAKE/top-calls"; s=$(date +%s)
   /bin/sh "$H" 2> "$C/err"; eq $? 70 "a hung top: cannot measure"
-  [ $(( $(date +%s) - s )) -lt 4 ] && ok || bad "top bounded: took $(( $(date +%s) - s )) s"
+  # Three tries of at most 1 s each here, 0.1 s apart (helper-tools/sleep).
+  [ $(( $(date +%s) - s )) -lt 8 ] && ok || bad "top bounded: took $(( $(date +%s) - s )) s"
+  eq "$(grep -c -- '-stats mem$' "$FSG_FAKE/top-calls")" 3 "three tries of top"
+  has "$(cat "$C/err")" "cannot read the footprint of pid 4242 (3 tries)" "says how often it tried"
+  eq "$(grep -c 'NOTE top gave no footprint for pid 4242' "$EV/helper.log")" 3 "one NOTE per miss"
   rm -f "$FSG_FAKE/top-delay"
+
+  t "helper retries its top"
+  render_helper "$C/h0" 0; H="$C/helper"
+  sed 's/^TOP_LIMIT_S=.*/TOP_LIMIT_S=1/' "$C/h0" > "$H"
+  EV="$FSG_PREFIX/Library/Logs/fseventsd-guard"
+  mem 3G; printf '5\n0\n' > "$FSG_FAKE/top-delay-seq"; : > "$FSG_FAKE/top-calls"
+  out=$(/bin/sh "$H" 2> "$C/err"); eq $? 0 "one miss, then an answer: restarted"
+  has "$out" "restarted old=4242 new=4243" "output"
+  eq "$(grep -c -- '-stats mem$' "$FSG_FAKE/top-calls")" 2 "a second try"
+  has "$(cat "$EV/helper.log")" "NOTE top gave no footprint for pid 4242 (try 1 of 3)" "the miss is logged"
+  has "$(cat "$EV/helper.log")" "RESTARTED old=4242" "restart logged"
+  # fseventsd goes away during the first try (its pid no longer answers top) and
+  # launchd starts another one: the helper does not go on with the new pid.
+  rm -f "$EV/last-restart" "$FSG_FAKE/top-delay-seq"; echo 4242 > "$FSG_FAKE/fsev/pids"; mem 3G
+  mkdir -p "$C/tk"; cp -R "$TOOLS" "$C/tk/helper-tools"; ln -s "$STUBS" "$C/tk/stubs"
+  printf '#!/bin/bash\n[ -f "$FSG_FAKE/pid-moved" ] || { touch "$FSG_FAKE/pid-moved"; echo 4250 > "$FSG_FAKE/fsev/pids"; }\nexec "$(dirname "$0")/../stubs/top" "$@"\n' > "$C/tk/helper-tools/top"
+  sed -e "s|^TOOLS=.*|TOOLS=$C/tk/helper-tools|" "$H" > "$C/helper-moved"
+  : > "$FSG_FAKE/calls.log"
+  /bin/sh "$C/helper-moved" 2> "$C/err"; eq $? 69 "the pid changed between tries"
+  has "$(cat "$C/err")" "fseventsd changed from pid 4242 to '4250' while its footprint was read" "says so"
+  hasnt "$(cat "$FSG_FAKE/calls.log")" "kill -TERM" "nothing killed"
+  absent "$EV/last-restart" "no rate-limit stamp"
 
   t "helper trial window"
   H="$C/helper"; render_helper "$H" $(( $(date +%s) + 3600 ))
@@ -590,7 +656,7 @@ if ! skip_case install; then
   plutil -insert ProgramArguments.0 -string /bin/bash "$PL"
   "$G" doctor --prefix "$FSG_PREFIX" > "$C/doc.out" 2>&1; eq $? 1 "doctor warns on a plist that runs /bin/bash"
   has "$(cat "$C/doc.out")" "agent plist runs '/bin/bash'" "doctor names the program"
-  has "$(cat "$C/doc.out")" "Background Items shows it as 'bash'" "doctor says how it shows"
+  has "$(cat "$C/doc.out")" "Login Items & Extensions shows it as 'bash'" "doctor says how it shows, by the pane's name"
   stub_dir "$C/wrap"
   printf '#!/bin/bash\ncase "$*" in *app.new/fseventsd-guard) exec /bin/chmod 0644 "${@: -1}" ;; esac\nexec /bin/chmod "$@"\n' > "$C/wrap/chmod"
   /bin/chmod 755 "$C/wrap/chmod"
@@ -1375,6 +1441,9 @@ if ! skip_case install-heal; then
   has "$(cat "$C/doc.out")" "WARN  agent plist sets no ProcessType Interactive" "doctor names it"
   has "$(grep 'ProcessType' "$C/doc.out")" "re-run install" "and the fix"
   install_fake; eq "$(plutil -extract ProcessType raw -o - "$P" 2>/dev/null)" Interactive "install puts it back"
+  hasnt "$(cat "$C/doc.out")" "StartInterval" "the plist's interval is the config's"
+  FSG_AGENT_INTERVAL_S=600 "$G" doctor --prefix "$FSG_PREFIX" > "$C/doc.out" 2>&1; eq $? 1 "doctor warns when the config's interval is not the plist's"
+  has "$(cat "$C/doc.out")" "WARN  agent plist ticks every 300 s (StartInterval), but FSG_AGENT_INTERVAL_S is 600 s: re-run install to apply it" "names both and the fix"
 
   t "doctor names launchd's cap on the agent's exit time"
   docker_default; install_fake
@@ -1383,6 +1452,7 @@ if ! skip_case install-heal; then
   printf '\texit timeout = 60\n\tlast exit code = 0\n' > "$FSG_FAKE/launchctl-print"
   out=$("$G" doctor --prefix "$FSG_PREFIX" 2>&1); rc=$?
   has "$out" "info  launchctl: launchd gives the agent 60 s from SIGTERM to SIGKILL, not the plist's ExitTimeOut of $want s" "the cap"
+  has "$out" "the next tick, once the agent is loaded again (at login, or with launchctl bootstrap), restores Docker; leased runs hold behind the Docker intent meanwhile, for at most FSG_FAILED_HOLD_S" "a booted-out agent ticks again only once loaded"
   eq $rc 0 "info only"
   printf '\texit timeout = %s\n\tlast exit code = 0\n' "$want" > "$FSG_FAKE/launchctl-print"
   hasnt "$("$G" doctor --prefix "$FSG_PREFIX" 2>&1)" "from SIGTERM to SIGKILL" "nothing when launchd honours it"
@@ -1863,7 +1933,8 @@ if ! skip_case heal; then
   killbg "$LAST_BG"
 
   t "heal emergency ceiling"
-  docker_default; install_fake; mem 9G
+  # 5 GB: past the 4 GB default ceiling.
+  docker_default; install_fake; mem 5G
   bg "$G" run --label long -- sleep 60; sleep 1
   s=$(date +%s); "$G" tick > "$C/o" 2>&1; eq $? 0 "healed"
   [ $(( $(date +%s) - s )) -lt 15 ] && ok || bad "did not wait for the 20 s cap"
@@ -2118,7 +2189,8 @@ EOS
   hasnt "$(cat "$FSG_LOG")" "DRAIN waiting" "nothing to wait for"
 
   t "a leased requester killed mid-wait: its workflow's lease then holds the drain"
-  docker_default; install_fake; mem 600M
+  # At runaway, where a wave heal drains; the agent's own emergency heal kept out.
+  docker_default; install_fake; mem 3G; date +%s > "$FSG_STATE_DIR/last-restart"
   bg "$G" run --label other -- sleep 60; op=$LAST_BG; sleep 1
   # The workflow goes on after its heal call, as a wave started on a timeout would.
   bg "$G" run --label workflow -- /bin/bash -c '"$1" heal --trigger wave --drain-cap 8 --docker-variant B > "$2/w.out" 2>&1; exec sleep 60' _ "$G" "$C"; wp=$LAST_BG
@@ -2139,7 +2211,7 @@ EOS
   killbg "$wp"
 
   t "a leased requester that does not wait exempts nothing"
-  docker_default; install_fake; mem 600M
+  docker_default; install_fake; mem 3G; date +%s > "$FSG_STATE_DIR/last-restart"
   bg "$G" run --label workflow -- /bin/bash -c 'id=$("$1" heal --trigger wave --no-wait --drain-cap 5 --docker-variant B 2> "$2/w.err"); echo "$id" > "$2/id"; exec sleep 60' _ "$G" "$C"; wp=$LAST_BG
   waitfor 20 test -s "$C/id" || bad "queued"
   id=$(cat "$C/id")
@@ -2870,6 +2942,16 @@ if ! skip_case slow-top; then
   eq "$(grep -c 'cannot heal' "$FSG_FAKE/notifications.log")" 1 "one cannot-heal notice"
   eq "$(cat "$FSG_FAKE/docker/desktop")" running "Docker still running"
 
+  t "an emergency heal whose precheck cannot measure notifies once per renotify window"
+  docker_default; install_fake --no-agent; mem 3G
+  : > "$FSG_FAKE/notifications.log"
+  # Each tick alike: its own check answers at once, all three precheck tries miss.
+  printf '0\n5\n5\n5\n0\n5\n5\n5\n' > "$FSG_FAKE/top-delay-seq"
+  FSG_TOP_TIMEOUT_S=2 FSG_MEASURE_RETRY_S=0 "$G" tick > "$C/o" 2>&1; eq $? 3 "tick 1: cannot measure in the precheck ($(tail -n 1 "$C/o"))"
+  FSG_TOP_TIMEOUT_S=2 FSG_MEASURE_RETRY_S=0 "$G" tick > "$C/o" 2>&1; eq $? 3 "tick 2: the same"
+  eq "$(grep -c 'cannot heal' "$FSG_FAKE/notifications.log")" 1 "one cannot-heal notice for two ticks"
+  hasnt "$(cat "$FSG_FAKE/calls.log")" "sudo -n /" "no restart"
+
   t "a heal whose precheck answered at once measures no more before the Docker step"
   docker_default; install_fake; mem 3G
   agent_env FSG_TOP_TIMEOUT_S=2 FSG_MEASURE_RETRY_S=0
@@ -2925,13 +3007,31 @@ if ! skip_case slow-top; then
 
   t "only a slow top is tried again"
   docker_default; install_fake --no-agent
+  # A retry would pause 30 s; two whole ticks take far less on a loaded Mac too.
   : > "$FSG_FAKE/fsev/pids"; s=$(date +%s)
-  FSG_MEASURE_RETRY_S=5 "$G" tick >/dev/null 2>&1; eq $? 3 "no daemon"
+  FSG_MEASURE_RETRY_S=30 "$G" tick >/dev/null 2>&1; eq $? 3 "no daemon"
   echo 4242 > "$FSG_FAKE/fsev/pids"; mem garbage
-  FSG_MEASURE_RETRY_S=5 "$G" tick >/dev/null 2>&1; eq $? 3 "unparseable top"
-  [ $(( $(date +%s) - s )) -lt 5 ] && ok || bad "no pause for another try: took $(( $(date +%s) - s )) s"
+  FSG_MEASURE_RETRY_S=30 "$G" tick >/dev/null 2>&1; eq $? 3 "unparseable top"
+  [ $(( $(date +%s) - s )) -lt 30 ] && ok || bad "no pause for another try: took $(( $(date +%s) - s )) s"
   hasnt "$(cat "$FSG_LOG")" "MEASURE" "no retry logged"
   hasnt "$(cat "$FSG_LOG")" "tries" "the reason is the first try's"
+
+  t "the tries stop at half the agent interval"
+  docker_default; install_fake --no-agent
+  echo 8 > "$FSG_FAKE/top-delay"; s=$(date +%s)
+  FSG_TOP_TIMEOUT_S=1 FSG_MEASURE_RETRY_S=0 FSG_MEASURE_TRIES=1000 FSG_AGENT_INTERVAL_S=8 "$G" tick >/dev/null 2>&1; eq $? 3 "cannot measure"
+  w=$(( $(date +%s) - s ))
+  [ "$w" -lt 15 ] && ok || bad "bounded by half the interval: took $w s"
+  eq "$(grep -c 'MEASURE top did not answer within 1s' "$FSG_LOG")" 4 "four tries of 1 s fit in 4 s"
+  has "$(cat "$FSG_LOG")" "(try 4 of 4)" "the tries counted against the bound"
+  rm -f "$FSG_FAKE/top-delay"
+
+  t "a slow try followed by another failure keeps the try count"
+  docker_default; install_fake --no-agent
+  mem garbage; printf '5\n0\n' > "$FSG_FAKE/top-delay-seq"
+  FSG_TOP_TIMEOUT_S=1 FSG_MEASURE_RETRY_S=0 "$G" tick >/dev/null 2>&1; eq $? 3 "cannot measure"
+  has "$(grep 'TICK cannot-measure' "$FSG_LOG")" "cannot read the footprint of pid 4242" "the last try's reason"
+  has "$(grep 'TICK cannot-measure' "$FSG_LOG")" "(after 1 slow try)" "and the slow try before it"
 fi
 
 # ======================================================================== stall-notice
@@ -2948,8 +3048,10 @@ fi
 
 # ======================================================================== wave-backoff
 if ! skip_case wave-backoff; then
+  # At runaway a wave heal drains with its cap. A recent restart stamp keeps the
+  # agent's own emergency heal out of these cases: inside its interval it notifies only.
   t "a wave heal that gave up at the cap does not start another drain at the next wave"
-  docker_default; install_fake; mem 600M
+  docker_default; install_fake; mem 3G; date +%s > "$FSG_STATE_DIR/last-restart"
   bg "$G" run --label long -- sleep 60; sleep 1
   heal --trigger wave --drain-cap 2 >/dev/null 2>&1; eq $? 4 "first wave heal gives up at the cap"
   s=$(date +%s); heal --trigger wave --drain-cap 2 > "$C/o" 2>&1; eq $? 11 "the next wave heal backs off"
@@ -2960,7 +3062,7 @@ if ! skip_case wave-backoff; then
   killbg "$LAST_BG"
 
   t "a wave caller stopped while waiting leaves the heal draining and starts no back-off"
-  docker_default; install_fake; mem 600M
+  docker_default; install_fake; mem 3G; date +%s > "$FSG_STATE_DIR/last-restart"
   bg "$G" run --label long -- sleep 60; lr=$LAST_BG; sleep 1
   for sig in TERM KILL; do
     "$G" heal --trigger wave --drain-cap 30 > "$C/w.out" 2>&1 & hp=$!; BG_PIDS="$BG_PIDS $hp"
@@ -2977,6 +3079,35 @@ if ! skip_case wave-backoff; then
   id=$(basename "$(ls -t "$FSG_STATE_DIR"/requests/*.run | head -n 1)" .run)
   killbg "$lr"
   "$G" heal --result "$id" >/dev/null 2>&1; eq $? 0 "the KILLed caller's heal healed"
+
+  t "below runaway a wave heal with work running ends at once: no drain, no notice, no back-off"
+  docker_default; install_fake; mem 600M
+  bg "$G" run --label long -- sleep 60; sleep 1
+  : > "$FSG_FAKE/calls.log"; : > "$FSG_FAKE/notifications.log"
+  out=$("$G" heal --dry-run --trigger wave); eq $? 4 "dry-run: would stop"
+  has "$out" "would stop before step 2: at warn a wave heal runs only when nothing is running (1 item(s) now) (exit 4)" "dry-run says why"
+  s=$(date +%s); heal --trigger wave > "$C/o" 2>&1; eq $? 4 "work running at warn: 4"
+  [ $(( $(date +%s) - s )) -lt 10 ] && ok || bad "at once, not after the 20 s cap"
+  has "$(cat "$C/o")" "at warn a wave heal runs only when nothing is running; running now: long (pid" "the caller is told why and what runs"
+  has "$(cat "$FSG_LOG")" "HEAL skipped trigger=wave level=warn" "logged"
+  hasnt "$(cat "$FSG_LOG")" "DRAIN begin" "no drain"
+  absent "$FSG_STATE_DIR/drain/pending" "no drain marker"
+  hasnt "$(cat "$FSG_FAKE/notifications.log")" "healing" "no healing notice"
+  hasnt "$(cat "$FSG_FAKE/notifications.log")" "heal given up" "no given-up notice"
+  absent "$FSG_STATE_DIR/wave-gave-up" "no back-off"
+  heal --trigger wave --on-cap proceed > "$C/o" 2>&1; eq $? 4 "--on-cap proceed does not cut it either"
+  hasnt "$(cat "$FSG_FAKE/calls.log")" "sudo -n /" "nothing restarted"
+  # A runaway wave heal right after is not backed off: it drains with its cap.
+  mem 3G; date +%s > "$FSG_STATE_DIR/last-restart"
+  heal --trigger wave --drain-cap 2 > "$C/o" 2>&1; eq $? 4 "a runaway wave heal drains to its cap"
+  has "$(cat "$FSG_LOG")" "DRAIN begin trigger=wave cap_s=2" "with the caller's cap"
+  killbg "$LAST_BG"
+
+  t "below runaway a wave heal with nothing running heals"
+  docker_default; install_fake; mem 600M; : > "$FSG_FAKE/calls.log"
+  heal --trigger wave > "$C/o" 2>&1; eq $? 0 "healed at warn ($(tail -n 1 "$C/o"))"
+  has "$(cat "$FSG_LOG")" "DRAIN begin trigger=wave cap_s=0" "with a drain cap of 0"
+  has "$(cat "$FSG_FAKE/calls.log")" "sudo -n /" "restarted"
 fi
 
 # ======================================================================== heal-hold
@@ -3300,30 +3431,51 @@ if ! skip_case bind-probe; then
   install_fake; eq $? 0 "installs anyway"
   eq "$(cached)" "#default" "an unreadable list leaves the cache as it was"
   has "$(cat "$C/install.out")" "cannot read Docker Desktop's File Sharing list" "install warns"
+  has "$(cat "$C/install.out")" "let this terminal app access other apps' data (macOS asks, or System Settings > Privacy & Security), then run doctor; or set FSG_PROBE_DIR" "what to do from this terminal"
+  hasnt "$(cat "$C/install.out")" "run install from a terminal" "not the command already running in one"
   readable
 
-  t "doctor warns when the agent's cached File Sharing list is missing or stale"
+  t "doctor refreshes the agent's cached File Sharing list when it is missing or stale"
   docker_default; sharing "$C/home"; install_fake
   "$G" doctor --prefix "$FSG_PREFIX" > "$C/doc.out" 2>/dev/null
   hasnt "$(cat "$C/doc.out")" "File Sharing list" "silent while the cache matches"
   sharing "$C/home" /Volumes/elsewhere
+  "$G" doctor --affected > "$C/doc.out" 2>/dev/null
+  eq "$(cached)" "$(printf '#list\n%s' "$C/home")" "doctor --affected writes nothing"
   "$G" doctor --prefix "$FSG_PREFIX" > "$C/doc.out" 2>/dev/null
-  has "$(cat "$C/doc.out")" "the File Sharing list cached at install differs from Docker Desktop's current list" "warned: stale"
+  eq "$(cached)" "$(printf '#list\n%s\n/Volumes/elsewhere' "$C/home")" "stale: the cache rewritten from the live list"
+  has "$(cat "$C/doc.out")" "ok    refreshed the agent's copy of Docker Desktop's File Sharing list (2 folders)" "one ok line"
+  hasnt "$(cat "$C/doc.out")" "differs from Docker Desktop's current list" "no stale warning"
+  absent "$FSG_STATE_DIR/desktop-shared-dirs.new" "no temp file left"
+  "$G" doctor --prefix "$FSG_PREFIX" > "$C/doc.out" 2>/dev/null
+  hasnt "$(cat "$C/doc.out")" "File Sharing list" "silent once refreshed"
+  # The agent checks FSG_PROBE_DIR against the list too (fsg_probe_dir).
+  sharing "$C/home"
   FSG_PROBE_DIR=$C/home/p "$G" doctor --prefix "$FSG_PREFIX" > "$C/doc.out" 2>/dev/null
-  hasnt "$(cat "$C/doc.out")" "cached at install" "not with FSG_PROBE_DIR set"
+  eq "$(cached)" "$(printf '#list\n%s' "$C/home")" "refreshed with FSG_PROBE_DIR set as well"
   rm -f "$FSG_STATE_DIR/desktop-shared-dirs"
   "$G" doctor --prefix "$FSG_PREFIX" > "$C/doc.out" 2>/dev/null
-  has "$(cat "$C/doc.out")" "no copy of Docker Desktop's File Sharing list is cached for the agent" "warned: missing"
-  unreadable
+  eq "$(cached)" "$(printf '#list\n%s' "$C/home")" "missing: written"
+  has "$(cat "$C/doc.out")" "refreshed the agent's copy of Docker Desktop's File Sharing list (1 folder)" "says so"
+  unreadable; cache '#list' "$C/home" /Volumes/old
   "$G" doctor --prefix "$FSG_PREFIX" > "$C/doc.out" 2>/dev/null
-  has "$(cat "$C/doc.out")" "Docker Desktop's File Sharing list cannot be read and no copy was cached at install" "warned: unreadable, nothing cached"
-  cache '#list' "$C/home"
-  "$G" doctor --prefix "$FSG_PREFIX" > "$C/doc.out" 2>/dev/null
+  eq "$(cached)" "$(printf '#list\n%s\n/Volumes/old' "$C/home")" "unreadable: the cache left as it was"
   hasnt "$(cat "$C/doc.out")" "File Sharing list" "unreadable with a cache: silent"
+  rm -f "$FSG_STATE_DIR/desktop-shared-dirs"
+  "$G" doctor --prefix "$FSG_PREFIX" > "$C/doc.out" 2>/dev/null
+  has "$(cat "$C/doc.out")" "Docker Desktop's File Sharing list cannot be read and no copy is cached for the agent" "warned: unreadable, nothing cached"
+  has "$(cat "$C/doc.out")" "let this terminal app access other apps' data (macOS asks, or System Settings > Privacy & Security), then run doctor again; or set FSG_PROBE_DIR" "what to do from this terminal"
+  hasnt "$(cat "$C/doc.out")" "run install from a terminal" "not install, nor a terminal it already runs in"
+  absent "$FSG_STATE_DIR/desktop-shared-dirs" "nothing written"
   readable
-  rm -f "$FSG_DESKTOP_SETTINGS" "$FSG_STATE_DIR/desktop-shared-dirs"
+  rm -f "$FSG_DESKTOP_SETTINGS"
   "$G" doctor --prefix "$FSG_PREFIX" > "$C/doc.out" 2>/dev/null
   hasnt "$(cat "$C/doc.out")" "File Sharing list" "no Docker Desktop settings and no cache: silent"
+  absent "$FSG_STATE_DIR/desktop-shared-dirs" "default sharing with no cache: nothing written"
+  cache '#list' "$C/home"
+  "$G" doctor --prefix "$FSG_PREFIX" > "$C/doc.out" 2>/dev/null
+  eq "$(cached)" "#default" "default sharing now: the cache says so"
+  has "$(cat "$C/doc.out")" "refreshed the agent's copy of Docker Desktop's File Sharing list (default sharing)" "says so"
 
   t "a heal whose agent cannot read the File Sharing list probes in the cached folder"
   docker_default; mkdir -p "$C/home/.local/share"
@@ -3334,13 +3486,47 @@ if ! skip_case bind-probe; then
   echo "$C/home/.local/share" > "$FSG_FAKE/docker/mounts-denied"
   HOME=$C/home heal --docker-variant B > "$C/o" 2>&1; eq $? 0 "healed ($(tail -n 1 "$C/o"))"
   grep -q '^bind_mount=ok' "$(cat "$FSG_STATE_DIR/last-heal-dir")/result.txt" && ok || bad "bind mount verified in the cached folder"
-  has "$(cat "$FSG_LOG")" "DOCKER File Sharing list unreadable by the agent (macOS app-data protection); using the list cached at install" "logged"
+  has "$(cat "$FSG_LOG")" "DOCKER File Sharing list unreadable by the agent (macOS app-data protection); using the list cached by install or doctor" "logged"
   rm -f "$FSG_STATE_DIR/desktop-shared-dirs"
   echo 4242 > "$FSG_FAKE/fsev/pids"; mem 3G; rm -f "$FSG_PREFIX/Library/Logs/fseventsd-guard/last-restart"
   HOME=$C/home heal --docker-variant B > "$C/o" 2>&1; eq $? 0 "healed, the check skipped ($(tail -n 1 "$C/o"))"
   has "$(grep '^bind_mount=' "$(cat "$FSG_STATE_DIR/last-heal-dir")/result.txt")" "bind_mount=skipped the probe dir $FSG_STATE_DIR/mountprobe is not shared with Docker Desktop (mounts denied)" "recorded as skipped"
-  has "$(grep '^bind_mount=' "$(cat "$FSG_STATE_DIR/last-heal-dir")/result.txt")" "the agent could not read Docker Desktop's settings and no cached list exists: run install from a terminal, or set FSG_PROBE_DIR" "the record says why"
-  has "$(cat "$FSG_LOG")" "DOCKER File Sharing list unreadable by the agent (macOS app-data protection) and none cached at install" "logged"
+  has "$(grep '^bind_mount=' "$(cat "$FSG_STATE_DIR/last-heal-dir")/result.txt")" "the agent could not read Docker Desktop's settings and no cached list exists: run doctor in a terminal, or set FSG_PROBE_DIR" "the record says why"
+  has "$(cat "$FSG_LOG")" "DOCKER File Sharing list unreadable by the agent (macOS app-data protection) and none cached by install or doctor" "logged"
+  readable
+
+  t "a probe dir with ':' in its path is skipped, and runs are not held"
+  mkdir -p "$C/home/a:b" "$C/home/.local/share"
+  sharing "$C/home/a:b" "$C/home/.local/share"
+  eq "$(probe_dir)" "1 $C/home/.local/share/.fseventsd-guard-mountprobe" "a shared folder with ':' is passed over"
+  docker_default; HOME=$C/home install_fake; mem 3G
+  agent_env FSG_PROBE_DIR="$C/home/a:b/p"
+  HOME=$C/home heal --docker-variant B > "$C/o" 2>&1; eq $? 0 "healed, Docker verified ($(tail -n 1 "$C/o"))"
+  r=$(grep '^bind_mount=' "$(cat "$FSG_STATE_DIR/last-heal-dir")/result.txt")
+  has "$r" "bind_mount=skipped the probe dir $C/home/a:b/p has a ':' in its path, which docker run -v cannot mount" "recorded as skipped"
+  has "$r" "set FSG_PROBE_DIR to a dir without one" "says what to do"
+  absent "$FSG_STATE_DIR/drain/pending" "runs are not held"
+  hasnt "$(cat "$FSG_FAKE/calls.log")" "/fsg-probe" "no docker run with that path"
+
+  t "with FSG_PROBE_DIR set, no copy of an unreadable list is not logged as missing"
+  docker_default; mkdir -p "$C/home/Projects/p"
+  sharing "$C/home/Projects"; HOME=$C/home install_fake; mem 3G
+  unreadable; rm -f "$FSG_STATE_DIR/desktop-shared-dirs"
+  agent_env FSG_PROBE_DIR="$C/home/Projects/p"
+  HOME=$C/home heal --docker-variant B > "$C/o" 2>&1; eq $? 0 "healed ($(tail -n 1 "$C/o"))"
+  grep -q '^bind_mount=ok' "$(cat "$FSG_STATE_DIR/last-heal-dir")/result.txt" && ok || bad "verified in FSG_PROBE_DIR"
+  hasnt "$(cat "$FSG_LOG")" "none cached" "the list does not pick the dir, so its absence is not logged"
+  readable
+
+  t "mounts denied in a dir picked from the cached list says the copy may be stale"
+  docker_default; mkdir -p "$C/home/.local/share" "$C/home/Projects"
+  sharing "$C/home/.local/share"; HOME=$C/home install_fake; mem 3G
+  unreadable; cache '#list' "$C/home/Projects"
+  echo "$C/home/.local/share" > "$FSG_FAKE/docker/mounts-denied"
+  HOME=$C/home heal --docker-variant B > "$C/o" 2>&1; eq $? 0 "healed, the check skipped ($(tail -n 1 "$C/o"))"
+  r=$(grep '^bind_mount=' "$(cat "$FSG_STATE_DIR/last-heal-dir")/result.txt")
+  has "$r" "bind_mount=skipped the probe dir $C/home/Projects/.fseventsd-guard-mountprobe is not shared with Docker Desktop (mounts denied)" "skipped"
+  has "$r" "the agent picked it from the File Sharing list cached for it, which may be stale: run doctor in a terminal to refresh it, or set FSG_PROBE_DIR" "names the stale copy and doctor"
   readable
 fi
 
@@ -4118,10 +4304,10 @@ if ! skip_case tick; then
   t "tick tiers"
   docker_default; install_fake --no-agent
   "$G" tick; eq $? 0 "ok"
-  mem 600M; "$G" tick; eq $? 1 "warn"
-  n=$(grep -c 'fseventsd at 600 MB' "$FSG_FAKE/notifications.log"); eq "$n" 1 "warn notified"
+  mem 300M; "$G" tick; eq $? 1 "warn"
+  n=$(grep -c 'fseventsd at 300 MB' "$FSG_FAKE/notifications.log"); eq "$n" 1 "warn notified"
   "$G" tick; n=$(grep -c 'fseventsd at' "$FSG_FAKE/notifications.log"); eq "$n" 1 "no repeat within the renotify window"
-  mem 1300M; "$G" tick; n=$(grep -c 'fseventsd at' "$FSG_FAKE/notifications.log"); eq "$n" 2 "renotify when doubled"
+  mem 600M; "$G" tick; n=$(grep -c 'fseventsd at' "$FSG_FAKE/notifications.log"); eq "$n" 2 "renotify when doubled"
   has "$(tail -n 1 "$FSG_FAKE/notifications.log")" "Next: run fseventsd-guard heal" "next step"
   mem 3G; : > "$FSG_FAKE/calls.log"; "$G" tick > /dev/null 2>&1; eq $? 0 "runaway: emergency heal"
   has "$(cat "$FSG_FAKE/calls.log")" "sudo -n /" "restart happened"
@@ -4175,7 +4361,7 @@ if ! skip_case tick; then
   cpu_step 10; "$G" tick; eq $? 1 "a quiet tick"
   has "$(grep ' TICK level=' "$FSG_LOG" | tail -n 1)" "cpu_streak=0" "streak reset"
   cpu_step 60; "$G" tick; cpu_step 60; "$G" tick; eq $? 1 "2 more ticks: warn"
-  mem 300M; cpu_step 90; "$G" tick; eq $? 0 "below warn: ok"
+  mem 200M; cpu_step 90; "$G" tick; eq $? 0 "below warn: ok"
   has "$(grep ' TICK level=' "$FSG_LOG" | tail -n 1)" "cpu_streak=0" "below warn does not count"
   mem 600M; cpu_step 60; "$G" tick; cpu_step 60; "$G" tick
   echo 4300 > "$FSG_FAKE/fsev/pids"; echo 600M > "$FSG_FAKE/fsev/4300.mem"; echo 9:00.00 > "$FSG_FAKE/fsev/4300.time"
@@ -4186,7 +4372,7 @@ if ! skip_case tick; then
   has "$(jget "$out" 'd["reasons"][0]')" "cpu 97% of a core for 3 ticks in a row" "reason"
   FSG_CPU_ESCALATE_PCT=0 "$G" status >/dev/null; eq $? 1 "0 turns it off"
   FSG_CPU_ESCALATE_TICKS=4 "$G" status >/dev/null; eq $? 1 "4 ticks needed"
-  mem 300M; "$G" status >/dev/null; eq $? 0 "below warn: ok"
+  mem 200M; "$G" status >/dev/null; eq $? 0 "below warn: ok"
   mem 600M; printf 'epoch=%s\npid=4300\ncpu_ms=1\ncpu_pct=97\nstreak=3\n' $(( $(date +%s) - 700 )) > "$FSG_STATE_DIR/tick-sample"
   "$G" status >/dev/null; eq $? 1 "a record older than two intervals does not count"
   printf 'epoch=%s\npid=4242\ncpu_ms=1\ncpu_pct=97\nstreak=3\n' "$(date +%s)" > "$FSG_STATE_DIR/tick-sample"
@@ -4232,10 +4418,35 @@ if ! skip_case tick; then
   printf 'stalled\nok\n' > "$FSG_FAKE/probe-seq"; "$G" tick; eq $? 0 "one slow probe is not a stall"
   has "$(cat "$FSG_LOG")" "probe stalled once, then ok" "logged"
   has "$(grep ' TICK level=' "$FSG_LOG" | tail -n 1)" "probe=ok/7ms start_ms=0" "the stream start time in the tick line"
-  mem 300M; printf 'stalled\nstalled\nstalled\n' > "$FSG_FAKE/probe-seq"; : > "$FSG_FAKE/calls.log"
+  mem 200M; printf 'stalled\nstalled\nstalled\n' > "$FSG_FAKE/probe-seq"; : > "$FSG_FAKE/calls.log"
   "$G" tick >/dev/null 2>&1; rc=$?
   eq $rc 0 "confirmed stall above the floor heals"
   has "$(cat "$FSG_FAKE/calls.log")" "sudo -n /" "restart"
+
+  t "tick logs a restart of fseventsd it did not make, once; status shows the last one"
+  docker_default; install_fake --no-agent
+  "$G" tick; eq $? 0 "first tick"
+  hasnt "$("$G" status)" "not made by the guard" "nothing to show yet"
+  echo 4300 > "$FSG_FAKE/fsev/pids"; echo 00:25 > "$FSG_FAKE/fsev/4300.etime"; : > "$FSG_FAKE/notifications.log"
+  "$G" tick; eq $? 0 "a new pid the guard did not start"
+  line=$(grep ' EXTERNAL_RESTART ' "$FSG_LOG")
+  has "$line" "EXTERNAL_RESTART old_pid=4242 new_pid=4300 up_s=25 started_at=20" "logged: both pids, uptime, start"
+  before "$FSG_LOG" " EXTERNAL_RESTART " "TICK level=ok pid=4300"
+  eq "$(cat "$FSG_FAKE/notifications.log")" "" "no notification"
+  absent "$FSG_STATE_DIR/last-restart" "no restart stamp"; absent "$FSG_STATE_DIR/last-attempt" "no attempt stamp"
+  "$G" tick; eq "$(grep -c ' EXTERNAL_RESTART ' "$FSG_LOG")" 1 "logged once"
+  out=$("$G" status); has "$out" "last restart not made by the guard: pid 4242 -> 4300, started 20" "status shows it"
+  out=$("$G" status --json); json_ok "$out"
+  # The guard's own restart is not one.
+  mem 3G; "$G" tick >/dev/null 2>&1; eq $? 0 "an emergency heal restarts it"
+  "$G" tick; eq "$(grep -c ' EXTERNAL_RESTART ' "$FSG_LOG")" 1 "the guard's restart is not logged as one"
+  # Nor is a reboot.
+  echo "{ sec = 1760009999, usec = 0 } Thu Oct  9 11:39:59 2025" > "$FSG_FAKE/boottime"
+  echo 4400 > "$FSG_FAKE/fsev/pids"; "$G" tick
+  eq "$(grep -c ' EXTERNAL_RESTART ' "$FSG_LOG")" 1 "a new boot is not logged as one"
+  echo 4500 > "$FSG_FAKE/fsev/pids"; echo 01:00 > "$FSG_FAKE/fsev/4500.etime"; "$G" tick
+  eq "$(grep -c ' EXTERNAL_RESTART ' "$FSG_LOG")" 2 "the next one on that boot is"
+  has "$("$G" status)" "last restart not made by the guard: pid 4400 -> 4500" "status shows the last one"
 fi
 
 # ======================================================================== tick-loop
@@ -4266,6 +4477,41 @@ if ! skip_case tick-loop; then
   echo $(( $(date +%s) - 2000 )) > "$FSG_PREFIX/Library/Logs/fseventsd-guard/last-restart"
   : > "$FSG_FAKE/calls.log"
   "$G" tick >/dev/null 2>&1; eq $? 2 "notify only"
+  hasnt "$(cat "$FSG_FAKE/calls.log")" "sudo -n /" "no restart"
+
+  # Inside a trial window (floor 0, interval 120 s). A stamp 2000 s back stands for
+  # the helper's interval having passed while the agent's 3 h have not.
+  t "emergency tier: a trial restart below the helper floor does not hold back an emergency heal"
+  docker_default; install_fake --trial-hours 1; EV=$FSG_PREFIX/Library/Logs/fseventsd-guard
+  trial --variant A --label low > "$C/o" 2>&1; eq $? 0 "the trial restarts fseventsd at 4 MB"
+  absent "$FSG_STATE_DIR/last-restart" "not stamped as a restart that counts"
+  exists "$FSG_STATE_DIR/last-restart-uncounted" "recorded on its own"
+  has "$(cat "$FSG_LOG")" "HEAL restart at 4 MB, below the helper floor 150 MB: it does not count against the emergency interval" "logged"
+  now=$(date +%s); echo $((now - 2000)) > "$EV/last-restart"
+  printf '%s 4 trial\n' $((now - 3000)) > "$FSG_STATE_DIR/last-restart-uncounted"
+  mem 3G; : > "$FSG_FAKE/calls.log"
+  "$G" tick >/dev/null 2>&1; eq $? 2 "a root stamp newer than the trial's is another restart: it counts"
+  printf '%s 4 trial\n' $((now - 1990)) > "$FSG_STATE_DIR/last-restart-uncounted"
+  "$G" tick >/dev/null 2>&1; eq $? 0 "the trial's own root stamp does not count: the emergency heal runs"
+  has "$(cat "$FSG_FAKE/calls.log")" "sudo -n /" "restarted"
+  has "$(cat "$FSG_STATE_DIR/last-heal")" "healed emergency" "an emergency heal"
+  exists "$FSG_STATE_DIR/last-restart" "which counts"
+
+  t "emergency tier: a wave restart counts only at or above the helper floor"
+  docker_default; install_fake --trial-hours 1; EV=$FSG_PREFIX/Library/Logs/fseventsd-guard
+  heal --trigger wave > "$C/o" 2>&1; eq $? 0 "a wave heal restarts fseventsd at 4 MB"
+  absent "$FSG_STATE_DIR/last-restart" "not counted"
+  echo $(( $(date +%s) - 2000 )) > "$EV/last-restart"
+  mem 3G; : > "$FSG_FAKE/calls.log"
+  "$G" tick >/dev/null 2>&1; eq $? 0 "the emergency heal runs"
+  has "$(cat "$FSG_STATE_DIR/last-heal")" "healed emergency" "an emergency heal"
+  rm -f "$FSG_STATE_DIR/last-restart" "$FSG_STATE_DIR/last-attempt"
+  echo $(( $(date +%s) - 2000 )) > "$EV/last-restart"
+  mem 200M; heal --trigger wave > "$C/o" 2>&1; eq $? 0 "a wave heal restarts fseventsd at 200 MB"
+  exists "$FSG_STATE_DIR/last-restart" "counted"
+  echo $(( $(date +%s) - 2000 )) > "$EV/last-restart"
+  mem 3G; : > "$FSG_FAKE/calls.log"
+  "$G" tick >/dev/null 2>&1; eq $? 2 "the emergency heal is held back: notify only"
   hasnt "$(cat "$FSG_FAKE/calls.log")" "sudo -n /" "no restart"
 fi
 
@@ -4308,6 +4554,7 @@ if ! skip_case heartbeat; then
   has "$("$G" status)" "agent: STALE" "text status"
   "$G" doctor --prefix "$FSG_PREFIX" > "$C/doc.out" 2>&1; eq $? 1 "doctor warns"
   has "$(cat "$C/doc.out")" "WARN  agent heartbeat: STALE" "doctor line"
+  has "$(cat "$C/doc.out")" "switched off in Login Items & Extensions, or hung" "doctor names the pane as System Settings does"
   FSG_AGENT_INTERVAL_S=400 "$G" status --json >/dev/null 2>"$C/err"; eq "$(cat "$C/err")" "" "within twice a longer interval"
   hb 500 ok 0 1 x
   out=$("$G" status --json); eq "$(jget "$out" 'd["agent"]["stale"]')" False "500 s is within 600"
@@ -4402,6 +4649,17 @@ if ! skip_case heartbeat; then
   eq "$(jget "$out" 'd["agent"]["installed"]')" False "not installed"
   eq "$(jget "$out" 'd["agent"]["stale"]')" False "not stale"
   eq "$(cat "$C/err")" "" "no warning"
+
+  t "a long heal leaves a fresh heartbeat for the rest of its tick"
+  # The live drain covers a tick in a heal (fsg_heal_running) only until the drain
+  # ends; the tick's own check comes after it.
+  docker_default; install_fake; mem 3G
+  touch "$FSG_FAKE/probe-heartbeat"
+  bg "$G" run --label long -- sleep 10; sleep 1
+  heal --docker-variant B > "$C/o" 2>&1; eq $? 0 "healed ($(tail -n 1 "$C/o"))"
+  has "$(cat "$FSG_LOG")" "DRAIN end" "the drain ended"
+  a=$(sed -n 's/^probe heartbeat_age=//p' "$FSG_FAKE/calls.log" | tail -n 1)
+  [ -n "$a" ] && [ "$a" -le 5 ] && ok || bad "the tick's check after a heal of 10 s or more sees a heartbeat ${a:-?} s old"
 fi
 
 # ======================================================================== trial
@@ -4820,7 +5078,7 @@ if ! skip_case claude-hook-prompt; then
   has "$m" "On macOS 27.0.1 it can grow without limit and silently stop delivering file events" "why it matters"
   has "$m" "new terminal window (it asks for sudo): if [ -d ~/fseventsd-guard ]; then git -C ~/fseventsd-guard pull --ff-only; else git clone https://github.com/RuslanTar/fseventsd-guard.git ~/fseventsd-guard; fi && ~/fseventsd-guard/plugins/fseventsd-guard/fseventsd-guard install." "the install command, from an up-to-date clone of the public repo"
   has "$m" "Silence: FSG_HINT=0, or mkdir -p $FSG_HINT_DIR && touch $FSG_HINT_DIR/off" "how to silence it"
-  has "$x" "a footprint of 3072 MB (102x Apple's 30 MB budget), uptime 1h02m, level runaway (the guard warns at 500 MB and heals at 2048 MB)" "the facts"
+  has "$x" "a footprint of 3072 MB (102x Apple's 30 MB budget), uptime 1h02m, level runaway (the guard warns at 256 MB and heals at 1024 MB)" "the facts"
   has "$x" "On macOS 27.0.1 fseventsd has a known bug" "the version"
   has "$x" "IDE, dev servers, Docker bind mounts and Claude Code stop seeing file changes" "the symptoms"
   has "$x" "runs in a new terminal window, not through Claude: if [ -d ~/fseventsd-guard ]; then git -C ~/fseventsd-guard pull --ff-only; else git clone https://github.com/RuslanTar/fseventsd-guard.git ~/fseventsd-guard; fi && ~/fseventsd-guard/plugins/fseventsd-guard/fseventsd-guard install, then the same path with doctor." "install, then doctor"
@@ -4837,7 +5095,7 @@ if ! skip_case claude-hook-prompt; then
   export CLAUDE_PROJECT_DIR="$REPO"
   mem 612M; out=$(hook prompt); json_ok "$out"
   has "$(hook_msg "$out")" "fseventsd is growing: 612 MB, 20x Apple's 30 MB budget (up 1h02m)" "warn line"
-  has "$(hook_ctx "$out")" "level warn (the guard warns at 500 MB" "warn facts"
+  has "$(hook_ctx "$out")" "level warn (the guard warns at 256 MB" "warn facts"
   has "$(hook_ctx "$out")" "every 3 hours at this level" "warn cadence"
   rm -rf "$FSG_HINT_DIR"; mem 5000K; out=$(hook prompt); json_ok "$out"
   has "$(hook_msg "$out")" "fseventsd is fine now (4 MB, within Apple's 30 MB budget), but it can grow" "ok line"
@@ -5191,6 +5449,26 @@ if ! skip_case claude-hook-agent; then
   eq "$(hook prompt UserPromptSubmit b)" "" "another session soon after"
   hint_stamp last-agent-stopped 21000; eq "$(hook prompt)" "" "warned 5h50m ago"
   hint_stamp last-agent-stopped 21700; has "$(hook prompt)" "last tick was" "warned over 6 h ago: again"
+
+  t "claude-hook prompt: prompts at once give one stopped-agent warning"
+  agent_plist; hb 7200
+  ps_=""
+  for i in 1 2 3 4 5 6; do hook prompt UserPromptSubmit "s$i" > "$C/p$i" 2>/dev/null & ps_="$ps_ $!"; done
+  for p in $ps_; do wait "$p"; done
+  eq "$(cat "$C"/p[1-6] | grep -c 'last tick was')" 1 "one warning for six prompts at once (two sessions, subagents)"
+  hint_stamp last-agent-stopped 21700; has "$(hook prompt)" "last tick was" "and again once the window passed"
+
+  t "claude-hook prompt: the plist's longer StartInterval sets the stale limit"
+  # plist_iv SECONDS: the installed agent's plist, with only its StartInterval.
+  plist_iv() {
+    printf '<?xml version="1.0" encoding="UTF-8"?>\n<plist version="1.0"><dict><key>StartInterval</key><integer>%s</integer></dict></plist>\n' "$1" \
+      > "$FSG_LAUNCH_AGENTS_DIR/io.github.ruslantar.fseventsd-guard.plist"
+  }
+  plist_iv 900; hb 1000
+  eq "$(hook prompt)" "" "1000 s after the last tick of an agent that ticks every 900 s"
+  hb 2000; has "$(hook_msg "$(hook prompt)")" "more than twice the 15m00s interval" "past twice the plist's interval: warned, naming it"
+  rm -rf "$FSG_HINT_DIR"; plist_iv 120; hb 700
+  has "$(hook_msg "$(hook prompt)")" "more than twice the 5m00s interval" "a shorter plist interval leaves the config's"
 
   t "claude-hook prompt: no stopped-agent warning in the first two intervals after a boot or a wake"
   agent_plist; hb 7200

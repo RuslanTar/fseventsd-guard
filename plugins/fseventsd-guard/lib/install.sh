@@ -512,16 +512,23 @@ fsg_shared_dirs_cache_text() {
   esac
 }
 
+# Replaces the agent's copy with TEXT (a temp file renamed into place); 1 when it
+# cannot be written, the old copy kept.
+fsg__shared_cache_put() { # text
+  { printf '%s\n' "$1" > "$FSG_SHARED_CACHE.new" && mv -f "$FSG_SHARED_CACHE.new" "$FSG_SHARED_CACHE"; } 2>/dev/null && return 0
+  rm -f "$FSG_SHARED_CACHE.new"
+  return 1
+}
+
 # Install runs in a terminal, which macOS lets read Docker Desktop's settings; the
 # agent may not, so it gets a copy. One that cannot be read here keeps the old copy.
 fsg_shared_dirs_cache_write() {
   local text n
   if ! text=$(fsg_shared_dirs_cache_text); then
-    echo "  WARNING: cannot read Docker Desktop's File Sharing list from here, so nothing new is cached for the agent; heals may skip the bind-mount check: run install from a terminal, or set FSG_PROBE_DIR"
+    echo "  WARNING: cannot read Docker Desktop's File Sharing list from here (macOS app-data protection refuses this terminal too), so nothing new is cached for the agent; heals may skip the bind-mount check: let this terminal app access other apps' data (macOS asks, or System Settings > Privacy & Security), then run doctor; or set FSG_PROBE_DIR"
     return 0
   fi
-  if ! { printf '%s\n' "$text" > "$FSG_SHARED_CACHE.new" && mv -f "$FSG_SHARED_CACHE.new" "$FSG_SHARED_CACHE"; }; then
-    rm -f "$FSG_SHARED_CACHE.new"
+  if ! fsg__shared_cache_put "$text"; then
     echo "  WARNING: cannot write $FSG_SHARED_CACHE; heals may skip the bind-mount check"
     return 0
   fi
@@ -1259,7 +1266,7 @@ fsg_doctor_exit_timeout() { # launchctl-print-output
   got=$(printf '%s\n' "$1" | sed -n 's/^[[:space:]]*exit timeout = \([0-9][0-9]*\).*/\1/p' | head -n 1)
   want=$(plutil -extract ExitTimeOut raw -o - "$FSG_PLIST" 2>/dev/null)
   fsg_is_uint "$got" && fsg_is_uint "$want" && [ "$got" -lt "$want" ] || return 0
-  fsg_doc info "launchctl: launchd gives the agent $got s from SIGTERM to SIGKILL, not the plist's ExitTimeOut of $want s (launchd caps it), so a heal stopped part way (logout, launchctl bootout) can be killed in its Docker restore; its Docker intent stays, and the next tick restores Docker (docs/DESIGN.md §5.5)"
+  fsg_doc info "launchctl: launchd gives the agent $got s from SIGTERM to SIGKILL, not the plist's ExitTimeOut of $want s (launchd caps it), so a heal stopped part way (logout, launchctl bootout) can be killed in its Docker restore; its Docker intent stays, and the next tick, once the agent is loaded again (at login, or with launchctl bootstrap), restores Docker; leased runs hold behind the Docker intent meanwhile, for at most FSG_FAILED_HOLD_S (docs/DESIGN.md §5.5)"
 }
 
 fsg_cmd_doctor() {
@@ -1277,6 +1284,7 @@ fsg_cmd_doctor() {
   fsg_affected
   if [ $affected_only = 1 ]; then
     echo "affected: $FSG_AFF - $FSG_AFF_WHY"
+    [ -n "$FSG_AFF_NOTE" ] && echo "$FSG_AFF_NOTE"
     case $FSG_AFF in yes) return 0 ;; no) return 1 ;; *) return 3 ;; esac
   fi
   DOC_WARN=0; DOC_FAIL=0
@@ -1285,6 +1293,7 @@ fsg_cmd_doctor() {
   echo "fseventsd-guard doctor (version $FSG_VERSION)"
   fsg_where
   fsg_doc info "macOS ${FSG_OS_VER:-?} (${FSG_OS_BUILD:-?}): affected=$FSG_AFF - $FSG_AFF_WHY"
+  [ -n "$FSG_AFF_NOTE" ] && fsg_doc info "${FSG_AFF_NOTE#info: }"
   if [ "$FSG_AFF" != yes ] && [ -f "$FSG_HELPER_PATH" ]; then
     fsg_doc info "this version is outside the affected range (docs/DESIGN.md §9). Keep the guard if fseventsd still runs away here"
   fi
@@ -1301,6 +1310,11 @@ EOF
   done <<EOF
 ${FSG_CONFIG_IGNORED:-}
 EOF
+  local mt
+  if [ $(( FSG_MEASURE_TRIES * (FSG_TOP_TIMEOUT_S + FSG_MEASURE_RETRY_S) )) -ge "$FSG_AGENT_INTERVAL_S" ]; then
+    mt=$(fsg_measure_tries_max)
+    fsg_doc warn "config: FSG_MEASURE_TRIES=$FSG_MEASURE_TRIES tries of FSG_TOP_TIMEOUT_S ($FSG_TOP_TIMEOUT_S s) and FSG_MEASURE_RETRY_S ($FSG_MEASURE_RETRY_S s) take up to $(( FSG_MEASURE_TRIES * (FSG_TOP_TIMEOUT_S + FSG_MEASURE_RETRY_S) )) s, at least the agent interval ($FSG_AGENT_INTERVAL_S s): a check stops after $mt tr$( [ "$mt" = 1 ] && echo y || echo ies), at half the interval"
+  fi
 
   # Root helper.
   if [ -f "$FSG_HELPER_PATH" ]; then
@@ -1400,14 +1414,20 @@ EOF
   # User side.
   if [ -f "$FSG_PLIST" ]; then
     plutil -lint "$FSG_PLIST" >/dev/null 2>&1 && fsg_doc ok "agent plist $FSG_PLIST" || fsg_doc fail "agent plist $FSG_PLIST is invalid: re-run install"
-    # Older installs ran /bin/bash, which Background Items lists as "bash".
+    # Older installs ran /bin/bash, which Login Items & Extensions lists as "bash".
     local prog
     prog=$(plutil -extract ProgramArguments.0 raw -o - "$FSG_PLIST" 2>/dev/null)
     if [ "$prog" != "$FSG_STATE_DIR/app/fseventsd-guard" ]; then
-      fsg_doc warn "agent plist runs '${prog:-?}', not $FSG_STATE_DIR/app/fseventsd-guard (Background Items shows it as '$(basename "${prog:-?}")'): re-run install"
+      fsg_doc warn "agent plist runs '${prog:-?}', not $FSG_STATE_DIR/app/fseventsd-guard (Login Items & Extensions shows it as '$(basename "${prog:-?}")'): re-run install"
     fi
     [ "$(plutil -extract ProcessType raw -o - "$FSG_PLIST" 2>/dev/null)" = Interactive ] ||
       fsg_doc warn "agent plist sets no ProcessType Interactive, so launchd throttles the agent and on a loaded Mac its top sample can miss FSG_TOP_TIMEOUT_S (cannot measure, no heal): re-run install"
+    # install renders the interval into the plist; a config changed since then
+    # reaches launchd only through install.
+    local si
+    si=$(plutil -extract StartInterval raw -o - "$FSG_PLIST" 2>/dev/null)
+    fsg_is_uint "$si" && [ "$si" != "$FSG_AGENT_INTERVAL_S" ] &&
+      fsg_doc warn "agent plist ticks every $si s (StartInterval), but FSG_AGENT_INTERVAL_S is $FSG_AGENT_INTERVAL_S s: re-run install to apply it"
     local lc
     if lc=$(launchctl print "gui/$(id -u)/$FSG_LABEL" 2>/dev/null); then
       fsg_doc ok "agent $FSG_LABEL is loaded"
@@ -1458,19 +1478,25 @@ EOF
     fsg_probe_dir
     [ "$BM_SHARED" = 0 ] &&
       fsg_doc warn "bind-mount probe dir $BM_DIR is not in Docker Desktop's File Sharing list, so heals skip the bind-mount check: set FSG_PROBE_DIR to a dir in a shared folder, or share one in Docker Desktop (Settings > Resources > File sharing)"
-    # The agent works from install's copy when macOS keeps it from Desktop's file, and
-    # this runs where the live one may be readable, so the two are compared.
-    if [ -z "${FSG_PROBE_DIR:-}" ]; then
-      local want
-      if ! want=$(fsg_shared_dirs_cache_text); then
-        [ "$BM_LIST_SRC" = none ] &&
-          fsg_doc warn "Docker Desktop's File Sharing list cannot be read and no copy was cached at install, so heals probe $BM_DIR and skip the bind-mount check if Docker Desktop does not share it: run install from a terminal, or set FSG_PROBE_DIR"
-      elif [ -f "$FSG_SHARED_CACHE" ]; then
-        [ "$(cat "$FSG_SHARED_CACHE" 2>/dev/null)" = "$want" ] ||
-          fsg_doc warn "the File Sharing list cached at install differs from Docker Desktop's current list, and the agent may only see the cached one (macOS app-data protection): re-run install, or set FSG_PROBE_DIR"
-      elif [ "$want" != '#default' ]; then
-        fsg_doc warn "no copy of Docker Desktop's File Sharing list is cached for the agent, which macOS may keep from reading it, so heals may probe an unshared dir and skip the bind-mount check: re-run install"
+    # The agent works from its copy when macOS keeps it from Desktop's file (and
+    # checks FSG_PROBE_DIR against it too). This runs where the live one may be
+    # readable, so doctor refreshes the copy from it when they differ, or when there
+    # is none and sharing is not the default; a live list it cannot read leaves the
+    # copy as it is. doctor --affected returns before this and writes nothing.
+    local want what
+    if want=$(fsg_shared_dirs_cache_text); then
+      if { [ -f "$FSG_SHARED_CACHE" ] && [ "$(cat "$FSG_SHARED_CACHE" 2>/dev/null)" != "$want" ]; } ||
+         { [ ! -f "$FSG_SHARED_CACHE" ] && [ "$want" != '#default' ]; }; then
+        if [ "$want" = '#default' ]; then what="default sharing"
+        else what=$(printf '%s\n' "$want" | sed 1d | grep -c .); what="$what folder$( [ "$what" = 1 ] || echo s)"; fi
+        if fsg__shared_cache_put "$want"; then
+          fsg_doc ok "refreshed the agent's copy of Docker Desktop's File Sharing list ($what), which macOS may keep it from reading"
+        else
+          fsg_doc warn "cannot write $FSG_SHARED_CACHE, the agent's copy of Docker Desktop's File Sharing list, which is missing or differs from the current list: heals may probe an unshared dir and skip the bind-mount check"
+        fi
       fi
+    elif [ -z "${FSG_PROBE_DIR:-}" ] && [ "$BM_LIST_SRC" = none ]; then
+      fsg_doc warn "Docker Desktop's File Sharing list cannot be read and no copy is cached for the agent, so heals probe $BM_DIR and skip the bind-mount check if Docker Desktop does not share it: let this terminal app access other apps' data (macOS asks, or System Settings > Privacy & Security), then run doctor again; or set FSG_PROBE_DIR"
     fi
   fi
   if fsg_drain_hold_active; then

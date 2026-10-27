@@ -48,7 +48,9 @@ Why it is shaped like this:
   finish: leased runs up to the 60-minute cap, unleased runs (found by process
   name, exec session, or as a running `--rm` or `docker compose run` container) up
   to `FSG_UNLEASED_CAP_S`, 10 min. If they do not, a wave heal gives up
-  (exit 4) instead of cutting them. Only leased runs (§2) are held while the heal
+  (exit 4) instead of cutting them. That is at runaway (status 2): below it the
+  agent heals only when nothing is running, and with any such run going it returns
+  4 at once, holding nothing. Only leased runs (§2) are held while the heal
   runs; an unleased run started meanwhile meets a stopped Docker. Leases of the
   workflow itself and its ancestors are not waited for while the call waits for
   the result, so a leased workflow can ask for a heal.
@@ -92,11 +94,14 @@ Why it is shaped like this:
   second drain. Exit 5 is no longer returned.
 - Exit 6 means the root helper would refuse (healthy, or rate limited). Proceed.
 - At **warn** (status 1), a failed heal does not stop the wave. File watching is
-  degraded, not broken, and the developer was notified.
-- After a wave heal gives up at the cap (exit 4), wave heals from every session
-  return 11 for `FSG_WAVE_RETRY_MIN` (60) minutes without draining, so a busy
-  machine does not get an hour-long hold at every wave boundary. Whether warn should drain at all is an open question
-  (`DESIGN.md` §12 item 7).
+  degraded, not broken, and the developer was notified. The agent heals at warn
+  only when nothing is running (it drains with a cap of 0): with work going, from
+  any session, it returns 4 at once, with no drain, no `healing` notice and no
+  back-off, so a warn never holds other sessions' runs. The agent measures again
+  before it heals, so this follows the level at the heal, not at the `status` call.
+- After a wave heal at runaway gives up at the cap (exit 4), wave heals from every
+  session return 11 for `FSG_WAVE_RETRY_MIN` (60) minutes without draining, so a
+  busy machine does not get an hour-long hold at every wave boundary.
 
 ### How a workflow pauses when status is 2 and heal fails
 
@@ -174,6 +179,11 @@ fi
 - Nested leased scripts inherit the outer lease, so they never deadlock.
 - Exit 75 means the run gave up waiting for a drain (only with `FSG_RUN_MAX_WAIT_S`
   set). Treat it like a transient infrastructure failure: retry later.
+- A held run waits by default, and no runner should set `FSG_RUN_ON_TIMEOUT=proceed`:
+  a run that proceeds starts exactly while Docker is stopped or being restored, so
+  every heal would show up as false test failures. A runner under a hard time limit
+  of its own sets `FSG_RUN_MAX_WAIT_S` below that limit and turns 75 into its own
+  "did not run" result.
 
 ### 2.1 Which runners to lease
 

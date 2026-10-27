@@ -55,8 +55,12 @@ TERM_WAIT_S=10
 RESPAWN_WAIT_S=15
 KILL_WAIT_S=30
 KEEP_RECORDS=20
-# Wall-time bounds on top and on the scan of the history directory.
+# Wall-time bounds on top and on the scan of the history directory. A top that
+# misses is tried again TOP_RETRY_S later, up to TOP_TRIES tries in all (55 s at
+# most), the genuine pid checked again before each further try.
 TOP_LIMIT_S=15
+TOP_TRIES=3
+TOP_RETRY_S=5
 SCAN_LIMIT_S=30
 
 # TOOLS is empty in every real install: install sets it only under a fake --prefix
@@ -179,8 +183,17 @@ case $rc in
   *) refuse 69 "no fseventsd process found" ;;
 esac
 
-MB=$(footprint_mb "$PID") || MB=
-[ -n "$MB" ] || refuse 70 "cannot read the footprint of pid $PID"
+TRY=1
+while :; do
+  MB=$(footprint_mb "$PID") || MB=
+  [ -n "$MB" ] && break
+  log "NOTE top gave no footprint for pid $PID (try $TRY of $TOP_TRIES)"
+  [ "$TRY" -lt "$TOP_TRIES" ] || refuse 70 "cannot read the footprint of pid $PID ($TOP_TRIES tries)"
+  "$SLEEP" "$TOP_RETRY_S"
+  TRY=$((TRY + 1))
+  PID2=$(genuine_pid) || PID2=
+  [ "$PID2" = "$PID" ] || refuse 69 "fseventsd changed from pid $PID to '${PID2:-none}' while its footprint was read"
+done
 [ "$MB" -ge "$MIN_MB" ] || refuse 65 "fseventsd pid $PID is healthy: footprint $MB MB is below the $MIN_MB MB floor ($MODE)"
 
 if [ -f "$STAMP" ]; then

@@ -5,7 +5,8 @@
 #
 # heal exit codes:
 #   0 healed                         3 cannot measure fseventsd / not macOS
-#   4 drain cap reached, policy abort
+#   4 drain cap reached, policy abort; or a wave heal below runaway found work
+#     running (nothing was held)
 #   6 nothing to do: the helper would refuse (healthy or rate limited)
 #   7 the restart failed (Docker restored; held runs stay held unless it verified)
 #   8 fseventsd restarted, but the Docker restore or a verification failed; or
@@ -690,7 +691,8 @@ Asks the background agent to heal: it drains Docker-dependent runs, runs the Doc
 step, restarts fseventsd through the root helper, restores Docker, verifies and
 notifies. This waits for the result and prints the heal's progress; stopping the
 wait (Ctrl-C, a timeout) does not stop the heal. --dry-run prints the plan only.
-Exit: 0 healed, 3 cannot measure, 4 drain cap (abort), 6 helper would refuse,
+Exit: 0 healed, 3 cannot measure, 4 drain cap (abort), or a wave heal below
+runaway with work running (nothing held), 6 helper would refuse,
 7 restart failed, 8 Docker restore/verify failed, or refused while an earlier
 heal's Docker is not verified, 9 not installed (or the agent is not loaded or
 older than this checkout), 10 request, drain marker or Docker intent not written,
@@ -775,14 +777,50 @@ fsg_heal_precheck() { # force
   HEAL_VARIANT=$(fsg_docker_effective_variant "$HEAL_VARIANT_REQ")
 }
 
+# A wave heal below runaway heals only when nothing is running (owner, 2026-10-27).
+# At warn file watching is degraded, not broken, and a runaway still heals (the
+# agent's emergency tier; a wave heal at runaway drains with its full cap), so it
+# must not hold every session's leased runs for up to the drain cap and then give
+# up. 0 for such a heal (it sets HEAL_WAVE_IDLE=1 and S_LEVEL from the precheck's
+# measurement, probe and CPU streak); its caller then drains with a cap of 0 and
+# policy abort, and returns 4 at once, with no drain, notice or back-off, when
+# fsg__heal_idle finds work.
+fsg__heal_wave_idle_only() {
+  [ "$HEAL_TRIGGER" = wave ] && [ "${H_MRC:-3}" -eq 0 ] || return 1
+  fsg_classify 0
+  [ "$S_LEVEL" != runaway ] || return 1
+  HEAL_WAVE_IDLE=1
+}
+
+# 0 when nothing is live that a drain would wait for: no lease or unleased work (the
+# requester's own leases left out while it waits, as in the drain), and engine work
+# listed. Interactive sessions do not count. Sets HEAL_LIVE (the work lines),
+# HEAL_LIVE_N and HEAL_LIVE_UNKNOWN (1 when the engine did not list its work).
+fsg__heal_idle() {
+  local rc
+  HEAL_LIVE=$(fsg_live_work 0); rc=$?
+  HEAL_LIVE=$(printf '%s\n' "$HEAL_LIVE" | awk -F'\t' 'NF >= 4 && $1 !~ /^interactive/')
+  HEAL_LIVE_N=$(printf '%s\n' "$HEAL_LIVE" | sed '/^$/d' | wc -l | tr -d ' ')
+  HEAL_LIVE_UNKNOWN=0; [ $rc -eq 2 ] && HEAL_LIVE_UNKNOWN=1
+  [ "$HEAL_LIVE_N" = 0 ] && [ "$HEAL_LIVE_UNKNOWN" = 0 ]
+}
+fsg__heal_live_text() {
+  local t=""
+  [ "$HEAL_LIVE_N" -gt 0 ] && t=$(fsg_work_list "$HEAL_LIVE" 3)
+  [ "$HEAL_LIVE_UNKNOWN" = 1 ] && t="${t:+$t; }$(fsg_drain_unknown_what), unknown (the engine did not list them)"
+  printf '%s\n' "$t"
+}
+
 # heal --dry-run: what a request would do right now. Read-only, in the caller.
 fsg_heal_dry_run() { # trigger variant policy cap force
-  local policy=$3 cap=$4 work wrc held left
+  local policy=$3 cap=$4 work wrc held left idle=0
   HEAL_TRIGGER=$1; HEAL_VARIANT_REQ=$2
   fsg_heal_precheck "$5"
+  if fsg__heal_wave_idle_only; then idle=1; cap=0; policy=abort; fi
   work=$(fsg_live_work 0); wrc=$?
   held=$(printf '%s\n' "$work" | awk -F'\t' 'NF >= 4 && $1 !~ /^interactive/' | wc -l | tr -d ' ')
   echo "fseventsd-guard heal --dry-run (trigger $HEAL_TRIGGER, docker variant $HEAL_VARIANT_REQ -> $HEAL_VARIANT, drain cap ${cap}s, unleased cap $(fsg_unleased_cap "$cap")s, at the cap: $policy)"
+  [ $idle = 1 ] && echo "at $S_LEVEL a wave heal runs only when nothing is running (drain cap 0)"
   if [ $H_MRC -eq 0 ]; then
     echo "now: fseventsd pid $M_PID, footprint $M_MB MB, probe ${P_RESULT:-skipped}"
   else
@@ -827,6 +865,10 @@ fsg_heal_dry_run() { # trigger variant policy cap force
   if [ -n "$H_REFUSE" ]; then echo "would stop before step 2: $H_REFUSE (exit 6)"; return 6; fi
   left=$(fsg_wave_backoff_left)
   if [ -n "$left" ]; then echo "would stop before step 2: wave back-off, $(fsg_dur "$left") left (exit 11)"; return 11; fi
+  if [ $idle = 1 ] && { [ "$held" -gt 0 ] || [ $wrc -eq 2 ]; }; then
+    echo "would stop before step 2: at $S_LEVEL a wave heal runs only when nothing is running ($held item(s) now$( [ $wrc -eq 2 ] && echo ', engine work unknown')) (exit 4)"
+    return 4
+  fi
   return 0
 }
 
@@ -835,12 +877,16 @@ fsg_heal_dry_run() { # trigger variant policy cap force
 # Docker if it is stopped part way (fsg_tick_cleanup).
 fsg_heal_main() { # trigger variant policy cap force
   local policy=$3 cap=$4 t0 backoff hrc
-  HEAL_TRIGGER=$1; HEAL_VARIANT_REQ=$2; HEAL_DIR=
+  HEAL_TRIGGER=$1; HEAL_VARIANT_REQ=$2; HEAL_DIR=; HEAL_WAVE_IDLE=0
   HEAL_DK_PRE_DONE=0; HEAL_DK_POST_DONE=0; HEAL_DK_VERIFIED=0; HEAL_DK_HELD=0; HEAL_DK_RESTORE=0
   t0=$(fsg_now)
   fsg_heal_precheck "$5"
   if [ $H_MRC -ne 0 ]; then
-    fsg_notify "fseventsd-guard: cannot heal" "cannot measure" "$M_ERR. Next: fseventsd-guard doctor."
+    # The agent tries again every tick while the Mac stays loaded (nothing stamps
+    # an attempt here): one notice per renotify window.
+    if [ "$HEAL_TRIGGER" != emergency ] || fsg_throttle heal-cannot-measure "$FSG_WARN_RENOTIFY_MIN"; then
+      fsg_notify "fseventsd-guard: cannot heal" "cannot measure" "$M_ERR. Next: fseventsd-guard doctor."
+    fi
     fsg_say "heal: cannot measure fseventsd ($M_ERR)"
     return 3
   fi
@@ -869,6 +915,14 @@ fsg_heal_main() { # trigger variant policy cap force
     fsg_say "heal: backing off: a recent wave heal gave up at the drain cap; the next wave heal may drain in $(fsg_dur "$backoff") (FSG_WAVE_RETRY_MIN=$FSG_WAVE_RETRY_MIN). The agent still heals a runaway, and a manual heal is not affected."
     return 11
   fi
+  if fsg__heal_wave_idle_only; then
+    cap=0; policy=abort
+    if ! fsg__heal_idle; then
+      fsg_log "HEAL skipped trigger=wave level=$S_LEVEL reason=\"$HEAL_LIVE_N item(s) running$( [ "$HEAL_LIVE_UNKNOWN" = 1 ] && echo ', engine work unknown')\""
+      fsg_say "heal: not started: at $S_LEVEL a wave heal runs only when nothing is running; running now: $(fsg__heal_live_text). Nothing was held, stopped or restarted. A runaway still heals with the full drain cap (the agent's own emergency heal, or a wave heal at runaway)."
+      return 4
+    fi
+  fi
   fsg_heal_run "$t0" "$H_OLD_PID" "$cap" "$policy"; hrc=$?
   fsg_heal_cleanup
   return $hrc
@@ -885,10 +939,37 @@ fsg__heal_refuse() { # result t0 subtitle body what
   fsg_say "heal: refused: $5; nothing was stopped or restarted"
 }
 
-# Logs the root helper's outcome (HELPER_RC) and stamps a restart it made.
+# 0 when this heal's restart or attempt counts against the agent's emergency
+# interval: an emergency heal's always (no restart loops), any other one only at a
+# footprint (MB) at or above FSG_HELPER_MIN_MB. Below it (a trial, or a heal in a
+# trial window) no runaway was healed, so it must not hold back the emergency heal
+# of one that starts next; the helper's own interval still applies (owner, 2026-10-27).
+fsg__heal_counts() { # mb
+  [ "$HEAL_TRIGGER" = emergency ] && return 0
+  fsg_is_uint "${1:-}" && [ "$1" -ge "$FSG_HELPER_MIN_MB" ]
+}
+
+# Logs the root helper's outcome (HELPER_RC) and stamps a restart it made: in
+# last-restart when it counts (fsg__heal_counts, with the helper's own reading of the
+# footprint, else the precheck's), else in last-restart-uncounted ("epoch mb
+# trigger"), also for a call that stamped the helper's root stamp without a restart:
+# the tick then ignores a root stamp no newer than that record (fsg_tick_check).
 fsg__heal_helper_done() {
+  local mb stamped=0
   fsg_log "HEAL helper rc=$HELPER_RC ($(fsg_helper_meaning "$HELPER_RC")) $(tr '\n' ' ' < "$HEAL_DIR/helper.out" 2>/dev/null | cut -c1-200)"
-  case $HELPER_RC in 0|72|73) fsg_now > "$FSG_STATE_DIR/last-restart" ;; esac
+  mb=$(sed -n 's/.*footprint_mb_before=\([0-9][0-9]*\).*/\1/p' "$HEAL_DIR/helper.out" 2>/dev/null | head -n 1)
+  [ -n "$mb" ] || mb=${HEAL_MB_BEFORE:-}
+  case $HELPER_RC in 0|72|73) stamped=1 ;; esac
+  if fsg__heal_counts "$mb"; then
+    [ $stamped = 1 ] && fsg_now > "$FSG_STATE_DIR/last-restart"
+    return 0
+  fi
+  if [ $stamped = 0 ]; then
+    [ "$(head -n 1 "$FSG_ROOT_LOG_DIR/last-restart" 2>/dev/null)" != "${HEAL_ROOT_STAMP:-}" ] || return 0
+    stamped=2
+  fi
+  echo "$(fsg_now) ${mb:-?} $HEAL_TRIGGER" > "$FSG_STATE_DIR/last-restart-uncounted"
+  fsg_log "HEAL $( [ $stamped = 1 ] && echo restart || echo 'restart attempt') at ${mb:-?} MB, below the helper floor $FSG_HELPER_MIN_MB MB: it does not count against the emergency interval"
 }
 
 # 0 when the heal's Docker step acts on Docker: B and C always, A when it has
@@ -896,8 +977,8 @@ fsg__heal_helper_done() {
 fsg__heal_docker_acts() { case $HEAL_VARIANT in B|C) return 0 ;; A) [ -n "$DK_STOP_IDS" ] ;; *) return 1 ;; esac; }
 
 # One more top, right before the Docker step of a heal whose precheck needed more
-# than one try: the root helper takes a single top sample of its own and refuses
-# (70) when it misses, after the Docker step. 1 when top did not answer again
+# than one try: the root helper's own top (up to three 15 s tries) can miss too on
+# such a Mac, and it refuses (70) after the Docker step. 1 when top did not answer again
 # (H_GATE_ERR says so); any other result goes on, and the precheck's measurement
 # stays as it was.
 fsg__heal_top_gate() {
@@ -967,7 +1048,8 @@ fsg_heal_run() { # t0 old_pid cap policy
   [ -n "$DRAIN_LEFT" ] && left=" Interactive sessions left alone: $(fsg_work_list "$DRAIN_LEFT" 2)."
   if [ $drc -eq 4 ]; then
     fsg_heal_record aborted-at-cap $(( $(fsg_now) - t0 ))
-    [ "$HEAL_TRIGGER" = wave ] && fsg_now > "$FSG_STATE_DIR/wave-gave-up"
+    # A wave heal below runaway held nothing for long (work started as it began).
+    [ "$HEAL_TRIGGER" = wave ] && [ "${HEAL_WAVE_IDLE:-0}" = 0 ] && fsg_now > "$FSG_STATE_DIR/wave-gave-up"
     [ "$cut_n" -gt 0 ] && cut_txt="$cut_n item(s) still running after $(fsg_dur "$DRAIN_CAP_HIT"): $(printf '%s\n' "$DRAIN_CUT" | head -n 3 | tr '\n' ';' | sed 's/;$//; s/;/; /g'). "
     fsg_notify "fseventsd: heal given up" "drain cap reached" \
       "$cut_txt$(fsg_drain_unknown_text | sed 's/$/ /')Nothing was restarted. Next: run fseventsd-guard heal again when runs are done, or: fseventsd-guard heal --on-cap proceed"
@@ -1005,7 +1087,7 @@ fsg_heal_run() { # t0 old_pid cap policy
       DK_NOTE="Docker step $HEAL_VARIANT ran unchecked: Docker did not answer docker info (wedged), so its containers were not listed, and any --rm container with an anonymous volume that it stopped lost that volume"
   fi
   # A precheck that needed a second top ran on a Mac that misses FSG_TOP_TIMEOUT_S;
-  # if top misses again now, the helper's own single sample likely would too, after
+  # if top misses again now, the helper's own tries likely would too, after
   # Docker was stopped. Ends like the other refusals here: fsg_heal_main ends the drain,
   # and an emergency heal counts as an attempt, else the agent would drain again every
   # tick while the Mac stays loaded.
@@ -1013,8 +1095,10 @@ fsg_heal_run() { # t0 old_pid cap policy
     fsg_log "HEAL busy: top missed again before the Docker step; Docker left alone ($H_GATE_ERR)"
     fsg_heal_record refused-cannot-measure $(( $(fsg_now) - t0 ))
     [ "$HEAL_TRIGGER" = emergency ] && fsg_now > "$FSG_STATE_DIR/last-attempt"
-    fsg_notify "fseventsd-guard: cannot heal" "cannot measure" \
-      "top missed again before the Docker step; Docker left alone ($H_GATE_ERR; the precheck needed $H_TRIES tries). Nothing was stopped or restarted. Next: fseventsd-guard doctor."
+    if [ "$HEAL_TRIGGER" != emergency ] || fsg_throttle heal-cannot-measure "$FSG_WARN_RENOTIFY_MIN"; then
+      fsg_notify "fseventsd-guard: cannot heal" "cannot measure" \
+        "top missed again before the Docker step; Docker left alone ($H_GATE_ERR; the precheck needed $H_TRIES tries). Nothing was stopped or restarted. Next: fseventsd-guard doctor."
+    fi
     fsg_say "heal: cannot measure fseventsd before the Docker step ($H_GATE_ERR); Docker left alone, nothing was stopped or restarted"
     return 3
   fi
@@ -1042,8 +1126,9 @@ fsg_heal_run() { # t0 old_pid cap policy
   fi
   ts=$(fsg_now)
   # Every attempt that reaches Docker counts against the agent's emergency
-  # interval, whether or not the restart then works (no restart loops).
-  fsg_now > "$FSG_STATE_DIR/last-attempt"
+  # interval, whether or not the restart then works (no restart loops); below the
+  # helper floor, only an emergency heal's (fsg__heal_counts).
+  fsg__heal_counts "$HEAL_MB_BEFORE" && fsg_now > "$FSG_STATE_DIR/last-attempt"
   HEAL_DK_PRE_DONE=1
   if ! fsg_docker_before "$HEAL_VARIANT"; then
     fsg_log "HEAL docker before-step failed: $DK_ERR (continuing: the restart is what heals Docker's file sharing)"
@@ -1054,6 +1139,7 @@ fsg_heal_run() { # t0 old_pid cap policy
   fsg_drain_phase restarting
   ts=$(fsg_now)
   # Bounded, so the phase budget runners see holds (sudo forwards the TERM).
+  HEAL_ROOT_STAMP=$(head -n 1 "$FSG_ROOT_LOG_DIR/last-restart" 2>/dev/null)
   HEAL_IN_HELPER=1
   fsg_timeout "$FSG_HELPER_TIMEOUT_S" "$(fsg_root_tool sudo)" -n "$FSG_HELPER_PATH" > "$HEAL_DIR/helper.out" 2>&1
   HELPER_RC=$?
@@ -1346,6 +1432,8 @@ fsg_req_run() { # id
     TICK_REQ_RC=$rc
     fsg_req_finish "$id" "$rc" "$(tail -n 1 "$log" 2>/dev/null)" "${HEAL_DIR:-}"
   fi
+  # A heal can outlast the stale limit; the rest of this tick starts fresh.
+  fsg_heartbeat_write running
   unset HEAL_REQ_CHAIN HEAL_REQ_PID HEAL_REQ_LSTART HEAL_REQ_WAITS
 }
 
@@ -1380,6 +1468,7 @@ fsg_tick_check() {
       [ "$P_RESULT" = stalled ] || fsg_log "TICK probe stalled once, then $P_RESULT (not counted)"
     fi
   fi
+  fsg_tick_external_restart
   fsg_tick_sample
   fsg_classify 0
   TICK_LEVEL=$S_LEVEL
@@ -1414,11 +1503,17 @@ fsg_tick_check() {
   fi
   # The newest of: the guard's last restart, its last attempt that reached the
   # Docker step (a failing helper must not bounce Docker every tick), and the
-  # root helper's own stamp (a restart made outside this state dir).
-  local last_r=0 age stamp f
+  # root helper's own stamp (a restart made outside this state dir). Restarts and
+  # attempts below the helper floor do not count (fsg__heal_counts), nor does a root
+  # stamp no newer than the guard's last such restart: the helper wrote it first.
+  local last_r=0 age stamp f low
+  low=$(awk 'NR == 1 { print $1 }' "$FSG_STATE_DIR/last-restart-uncounted" 2>/dev/null)
+  fsg_is_uint "$low" || low=0
   for f in "$FSG_STATE_DIR/last-restart" "$FSG_STATE_DIR/last-attempt" "$FSG_ROOT_LOG_DIR/last-restart"; do
     stamp=$(head -n 1 "$f" 2>/dev/null)
-    if fsg_is_uint "$stamp" && [ "$stamp" -gt "$last_r" ]; then last_r=$stamp; fi
+    fsg_is_uint "$stamp" || continue
+    [ "$f" = "$FSG_ROOT_LOG_DIR/last-restart" ] && [ "$stamp" -le "$low" ] && continue
+    [ "$stamp" -gt "$last_r" ] && last_r=$stamp
   done
   age=$((now - last_r))
   # A stamp in the future means the clock moved back; like the helper, ignore it.
@@ -1431,7 +1526,10 @@ fsg_tick_check() {
     fi
     return 2
   fi
-  fsg_heal_main emergency "$FSG_DOCKER_VARIANT" "$FSG_CAP_POLICY_EMERGENCY" "$FSG_DRAIN_CAP_S" 0
+  local hrc
+  fsg_heal_main emergency "$FSG_DOCKER_VARIANT" "$FSG_CAP_POLICY_EMERGENCY" "$FSG_DRAIN_CAP_S" 0; hrc=$?
+  fsg_heartbeat_write running
+  return "$hrc"
 }
 
 # --- Docker trial (docs/DOCKER-TRIALS.md) ----------------------------------------------

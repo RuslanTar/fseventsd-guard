@@ -295,9 +295,11 @@ fsg_ver_ge() {
     exit 0 }'
 }
 
-# Sets FSG_AFF (yes|no|unknown), FSG_AFF_WHY and FSG_OS_VER / FSG_OS_BUILD.
+# Sets FSG_AFF (yes|no|unknown), FSG_AFF_WHY and FSG_OS_VER / FSG_OS_BUILD, and
+# FSG_AFF_NOTE: the info line for a release the range counts as affected that is
+# newer than FSG_AFFECTED_REVIEWED, else empty (docs/DESIGN.md §9).
 fsg_affected() {
-  FSG_OS_VER=; FSG_OS_BUILD=
+  FSG_OS_VER=; FSG_OS_BUILD=; FSG_AFF_NOTE=
   if [ "$(uname -s)" != Darwin ]; then
     FSG_AFF=no; FSG_AFF_WHY="not macOS"; return 0
   fi
@@ -322,6 +324,10 @@ fsg_affected() {
   fi
   FSG_AFF=yes
   FSG_AFF_WHY="macOS $FSG_OS_VER is in the affected range (from ${min:-any version}, ${fixed:+fixed in $fixed}${fixed:-no fix known for ${FSG_OS_VER%%.*}.x})"
+  local rev=${FSG_AFFECTED_REVIEWED:-}
+  if [ -n "$rev" ] && ! fsg_ver_ge "$rev" "$FSG_OS_VER"; then
+    FSG_AFF_NOTE="info: macOS $FSG_OS_VER is newer than $rev, the newest release the affected range was checked against: it counts as affected until a fix is recorded; report it if Apple names an fseventsd fix"
+  fi
 }
 
 # --- Installed helper facts -----------------------------------------------------------

@@ -643,8 +643,10 @@ fsg_probe_dir() {
   if fsg__under_any "$BM_DIR" "$BM_LIST"; then BM_SHARED=1; return 0; fi
   BM_SHARED=0
   [ -z "${FSG_PROBE_DIR:-}" ] || return 0
+  # docker run -v splits at ':', so a folder with one in its path cannot host it.
   while IFS= read -r e; do
     case $e in
+      *:*) ;;
       "$HOME"/*) if [ -d "$e" ] && [ -w "$e" ]; then BM_DIR="${e%/}/.fseventsd-guard-mountprobe"; BM_SHARED=1; return 0; fi ;;
     esac
   done <<EOF
@@ -667,8 +669,19 @@ fsg_docker_verify_bind_mount() {
   local dir f out nonce img got rc made=0 tried=""
   fsg_probe_dir
   case $BM_LIST_SRC in
-    cache) fsg_log "DOCKER File Sharing list unreadable by the agent (macOS app-data protection); using the list cached at install" ;;
-    none) fsg_log "DOCKER File Sharing list unreadable by the agent (macOS app-data protection) and none cached at install" ;;
+    cache) fsg_log "DOCKER File Sharing list unreadable by the agent (macOS app-data protection); using the list cached by install or doctor" ;;
+    # With FSG_PROBE_DIR set the list picks nothing, so no copy is no news.
+    none) [ -z "${FSG_PROBE_DIR:-}" ] &&
+      fsg_log "DOCKER File Sharing list unreadable by the agent (macOS app-data protection) and none cached by install or doctor" ;;
+  esac
+  # A path with ':' would split docker run's -v SRC:DST and fail as no mounts
+  # denied does, holding runs for a setup issue: skipped instead.
+  case $BM_DIR in
+    *:*)
+      BM_DETAIL="the probe dir $BM_DIR has a ':' in its path, which docker run -v cannot mount; set FSG_PROBE_DIR to a dir without one, in a folder of Docker Desktop's File Sharing list"
+      BM_NOTE="Bind mount check skipped: $BM_DETAIL."
+      fsg_log "DOCKER $BM_NOTE"
+      return 0 ;;
   esac
   dir=$BM_DIR; f="$BM_DIR/$FSG__PROBE_FILE"; out="$FSG_STATE_DIR/mountprobe.out"
   [ -d "$dir" ] || made=1
@@ -687,7 +700,9 @@ fsg_docker_verify_bind_mount() {
         *"mounts denied"*|*"is not shared"*)
           BM_RESULT=skipped
           if [ "$BM_LIST_SRC" = none ] && [ -z "${FSG_PROBE_DIR:-}" ]; then
-            BM_DETAIL="the probe dir $dir is not shared with Docker Desktop (mounts denied); the agent could not read Docker Desktop's settings and no cached list exists: run install from a terminal, or set FSG_PROBE_DIR to a dir in a folder of its File Sharing list"
+            BM_DETAIL="the probe dir $dir is not shared with Docker Desktop (mounts denied); the agent could not read Docker Desktop's settings and no cached list exists: run doctor in a terminal, or set FSG_PROBE_DIR to a dir in a folder of its File Sharing list"
+          elif [ "$BM_LIST_SRC" = cache ] && [ -z "${FSG_PROBE_DIR:-}" ]; then
+            BM_DETAIL="the probe dir $dir is not shared with Docker Desktop (mounts denied); the agent picked it from the File Sharing list cached for it, which may be stale: run doctor in a terminal to refresh it, or set FSG_PROBE_DIR"
           else
             BM_DETAIL="the probe dir $dir is not shared with Docker Desktop (mounts denied); set FSG_PROBE_DIR to a dir in a folder of its File Sharing list"
           fi

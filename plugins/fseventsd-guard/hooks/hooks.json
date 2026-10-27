@@ -1,5 +1,5 @@
 {
-  "description": "fseventsd-guard: install nudge and heal notices on macOS; silent elsewhere",
+  "description": "fseventsd-guard: install nudge, stopped-agent warning and heal notices on macOS; silent elsewhere",
   "hooks": {
     "UserPromptSubmit": [
       {

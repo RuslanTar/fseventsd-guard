@@ -11,6 +11,11 @@ elif [ -f "$FSG_FAKE/probe" ]; then
   r=$(cat "$FSG_FAKE/probe")
 fi
 echo "probe $r" >> "$FSG_FAKE/calls.log"
+# With $FSG_FAKE/probe-heartbeat: the age of the agent's heartbeat at this probe.
+if [ -f "$FSG_FAKE/probe-heartbeat" ]; then
+  e=$(sed -n 's/^epoch=//p' "$FSG_STATE_DIR/heartbeat" 2>/dev/null)
+  [ -n "$e" ] && echo "probe heartbeat_age=$(( $(date +%s) - e ))" >> "$FSG_FAKE/calls.log"
+fi
 s=$(cat "$FSG_FAKE/probe-start-ms" 2>/dev/null || echo 0)
 [ -f "$FSG_FAKE/probe-eid" ] && s="$s eid=$(cat "$FSG_FAKE/probe-eid")"
 case $r in

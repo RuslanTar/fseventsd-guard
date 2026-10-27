@@ -66,20 +66,39 @@ fsg_measure() {
   return 0
 }
 
+# FSG_MEASURE_TRIES, cut to the tries that fit in half the agent interval: a slow
+# try takes FSG_TOP_TIMEOUT_S, and each further one FSG_MEASURE_RETRY_S more. At
+# least 1.
+fsg_measure_tries_max() {
+  local n=$FSG_MEASURE_TRIES half=$((FSG_AGENT_INTERVAL_S / 2)) step=$((FSG_TOP_TIMEOUT_S + FSG_MEASURE_RETRY_S)) fit
+  [ "$n" -ge 1 ] || n=1
+  if [ "$step" -gt 0 ]; then
+    fit=1
+    [ "$FSG_TOP_TIMEOUT_S" -gt "$half" ] || fit=$(( 1 + (half - FSG_TOP_TIMEOUT_S) / step ))
+    [ "$n" -le "$fit" ] || n=$fit
+  fi
+  echo "$n"
+}
+
 # fsg_measure for the agent's tick and a heal's precheck: a top that did not answer
 # in time is tried again, up to FSG_MEASURE_TRIES tries FSG_MEASURE_RETRY_S apart,
 # as a runaway comes on a loaded Mac and no heal runs without a measurement. Other
-# failures return at once. After the last try M_ERR also gives the number of tries
-# and ps's resident size, a lower bound on the footprint (ps leaves out compressed
-# and swapped pages), for the log and the notices only. Sets M_TRIES to the number
-# of tries it took.
+# failures return at once (M_ERR then names any slow tries before). After the last
+# try M_ERR also gives the number of tries and ps's resident size, a lower bound on
+# the footprint (ps leaves out compressed and swapped pages), for the log and the
+# notices only. The tries stop within half the agent interval
+# (fsg_measure_tries_max), so a tick ends before the next is due. Sets M_TRIES to
+# the number of tries it took.
 fsg_measure_retry() {
-  local i=1 n=$FSG_MEASURE_TRIES rss note=
-  [ "$n" -ge 1 ] || n=1
+  local i=1 n rss note=
+  n=$(fsg_measure_tries_max)
   while :; do
     M_TRIES=$i
     fsg_measure && return 0
-    [ "$M_SLOW" = 1 ] || return 3
+    if [ "$M_SLOW" != 1 ]; then
+      [ "$i" -gt 1 ] && M_ERR="$M_ERR (after $((i - 1)) slow tr$( [ $((i - 1)) = 1 ] && echo y || echo ies))"
+      return 3
+    fi
     fsg_log "MEASURE $M_ERR (try $i of $n)"
     [ "$i" -lt "$n" ] || break
     i=$((i + 1))
@@ -121,6 +140,39 @@ fsg_tick_sample() {
   mkdir -p "$FSG_STATE_DIR" 2>/dev/null
   printf 'epoch=%s\npid=%s\ncpu_ms=%s\ncpu_pct=%s\nstreak=%s\nboot=%s\neid=%s\n' "$now" "$M_PID" "$M_CPU_MS" "$T_CPU_PCT" \
     "$T_CPU_STREAK" "$boot" "$P_EID" > "$f.new.$$" 2>/dev/null && mv -f "$f.new.$$" "$f" 2>/dev/null
+}
+
+# A restart of fseventsd the guard did not make (owner, 2026-10-27): the pid differs
+# from the previous tick's record (tick-sample) on the same boot, and neither a
+# restart the guard recorded (last-restart, last-restart-uncounted) nor the root
+# helper's stamp is as new as that record. Logs one EXTERNAL_RESTART line and writes
+# last-external-restart, which status shows; no notice, and nothing else changes.
+# Runs before fsg_tick_sample replaces the record.
+fsg_tick_external_restart() {
+  local f="$FSG_STATE_DIR/tick-sample" pp pe boot g s now started= at=
+  pp=$(fsg__kv "$f" pid); pe=$(fsg__kv "$f" epoch)
+  fsg_is_uint "$pp" && fsg_is_uint "$pe" && fsg_is_uint "${M_PID:-}" && [ "$pp" != "$M_PID" ] || return 0
+  boot=$(sysctl -n kern.boottime 2>/dev/null | sed -n 's/^{ sec = \([0-9]*\),.*/\1/p')
+  [ -n "$boot" ] && [ "$(fsg__kv "$f" boot)" = "$boot" ] || return 0
+  for g in "$FSG_STATE_DIR/last-restart" "$FSG_STATE_DIR/last-restart-uncounted" "$FSG_ROOT_LOG_DIR/last-restart"; do
+    s=$(awk 'NR == 1 { print $1 }' "$g" 2>/dev/null)
+    fsg_is_uint "$s" && [ "$s" -ge "$pe" ] && return 0
+  done
+  now=$(fsg_now)
+  if fsg_is_uint "${M_UP:-}"; then started=$((now - M_UP)); at=$(date -u -r "$started" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null); fi
+  fsg_log "EXTERNAL_RESTART old_pid=$pp new_pid=$M_PID up_s=${M_UP:-} started_at=$at"
+  printf 'epoch=%s\nold_pid=%s\nnew_pid=%s\nup_s=%s\nstarted_epoch=%s\n' "$now" "$pp" "$M_PID" "${M_UP:-}" "$started" \
+    > "$FSG_STATE_DIR/last-external-restart.new.$$" 2>/dev/null &&
+    mv -f "$FSG_STATE_DIR/last-external-restart.new.$$" "$FSG_STATE_DIR/last-external-restart" 2>/dev/null
+  return 0
+}
+
+# status's line on the last restart the guard did not make, or nothing.
+fsg_status_external_text() {
+  local f="$FSG_STATE_DIR/last-external-restart" e s
+  e=$(fsg__kv "$f" epoch); fsg_is_uint "$e" || return 0
+  s=$(fsg__kv "$f" started_epoch)
+  echo "last restart not made by the guard: pid $(fsg__kv "$f" old_pid) -> $(fsg__kv "$f" new_pid), started $(fsg_is_uint "$s" && date -u -r "$s" +%Y-%m-%dT%H:%M:%SZ || echo 'at an unknown time'), seen by the agent $(fsg_dur $(( $(fsg_now) - e ))) ago (logged as EXTERNAL_RESTART; the guard does not act on it)"
 }
 
 # The per-day summary, $FSG_STATE_DIR/daily: one line per local day, rewritten as
@@ -236,15 +288,17 @@ fsg_status_drain_fields() {
 # A_INSTALLED (the plist exists), A_REQUESTS (the installed app copy serves this
 # checkout's heal requests), A_EPOCH, A_AGE, A_RESULT, A_EXIT, A_RUNNING (the tick
 # that wrote it still runs), A_SINCE (the seconds judged below, empty when not
-# judged), A_STALE and A_TEXT (one line). Stale: the last write,
+# judged), A_STALE, A_TEXT (one line) and A_INTERVAL. Stale: the last write,
 # or with no heartbeat the newest TICK line in the user log or else the install, is
-# older than twice the interval. A tick that is still in a heal is not stale: a
+# older than twice the interval (A_INTERVAL: FSG_AGENT_INTERVAL_S, or the plist's
+# StartInterval when that is longer). A tick that is still in a heal is not stale: a
 # drain takes up to its cap. An agent from before heartbeats (A_LEGACY: no
 # heartbeat, its plist runs /bin/bash) is judged by its TICK lines only, which every
 # tick of it writes; without one it is not judged.
 fsg_agent_fields() {
-  local f="$FSG_STATE_DIR/heartbeat" now limit since pid t pl
+  local f="$FSG_STATE_DIR/heartbeat" now limit since pid t pl pi
   A_INSTALLED=false; A_REQUESTS=false; A_LEGACY=false; A_EPOCH=; A_AGE=; A_RESULT=; A_EXIT=; A_RUNNING=false; A_SINCE=; A_STALE=false; A_TEXT=
+  A_INTERVAL=$FSG_AGENT_INTERVAL_S
   [ -f "$FSG_PLIST" ] && A_INSTALLED=true
   [ "$(sed -n 's/^FSG_REQUEST_PROTOCOL=//p' "$FSG_STATE_DIR/app/lib/common.sh" 2>/dev/null | head -n 1)" = "$FSG_REQUEST_PROTOCOL" ] &&
     A_REQUESTS=true
@@ -299,12 +353,19 @@ fsg_agent_fields() {
   [ "$A_INSTALLED" = true ] || { A_TEXT="$A_TEXT; the agent is not installed"; return 0; }
   A_SINCE=$since
   [ "$since" -gt "$limit" ] || return 0
+  # Only past the config's limit: launchd ticks at the plist's StartInterval, which
+  # install rendered from the config of then, and a longer one is the real limit.
+  pi=$(plutil -extract StartInterval raw -o - "$FSG_PLIST" 2>/dev/null)
+  if fsg_is_uint "$pi" && [ "$pi" -gt "$A_INTERVAL" ]; then
+    A_INTERVAL=$pi
+    [ "$since" -gt $((2 * pi)) ] || return 0
+  fi
   if [ "$A_RUNNING" = true ] && fsg_heal_running; then
     A_TEXT="$A_TEXT (in a heal)"
     return 0
   fi
   A_STALE=true
-  A_TEXT="STALE: $A_TEXT, more than twice the $(fsg_dur "$FSG_AGENT_INTERVAL_S") interval. The agent may be unloaded, switched off in Background Items, or hung, and is not protecting this Mac (run: fseventsd-guard doctor)"
+  A_TEXT="STALE: $A_TEXT, more than twice the $(fsg_dur "$A_INTERVAL") interval. The agent may be unloaded, switched off in Login Items & Extensions, or hung, and is not protecting this Mac (run: fseventsd-guard doctor)"
 }
 
 # One line on the Docker intent, or nothing.
@@ -409,6 +470,7 @@ fsg_cmd_status() {
       [ -n "$P_START_MS" ] && echo "probe stream start: $P_START_MS ms (a healthy fseventsd takes 0-1 ms; logged only, no heal acts on it)"
     fi
     [ -n "$S_REASONS" ] && [ $mrc -eq 0 ] && printf '%s\n' "$S_REASONS" | sed 's/^/  reason: /'
+    fsg_status_external_text
     if [ "$D_PENDING" = true ]; then echo "drain: pending (phase $D_PHASE; $D_REASON); live leases: $D_LEASES"
     else echo "drain: none; live leases: $D_LEASES"; fi
     # Written by the draining heal at each poll (lib/drain.sh).
@@ -425,6 +487,7 @@ fsg_cmd_status() {
     echo "agent: $A_TEXT"
     fsg_status_install_text
     echo "macOS ${FSG_OS_VER:-?} (${FSG_OS_BUILD:-?}): affected=$FSG_AFF - $FSG_AFF_WHY"
+    [ -n "$FSG_AFF_NOTE" ] && echo "$FSG_AFF_NOTE"
   fi
   return "$S_EXIT"
 }

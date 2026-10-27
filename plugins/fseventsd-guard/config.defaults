@@ -16,10 +16,13 @@
 # --- Thresholds (MB of physical footprint, as top's MEM column reports it) ---------
 # Apple's own launchd memory budget for fseventsd. Reported only.
 FSG_BUDGET_MB=30
-# Warn tier: notify only. A healthy daemon sat at 4-90 MB on the author's Mac.
-FSG_WARN_MB=500
-# Emergency tier: the background agent heals (through the drain).
-FSG_ACT_MB=2048
+# Warn tier: notify only. A healthy daemon stayed at or below 102 MB over a week of
+# checks on the author's Mac, and the one growth seen there peaked at 498 MB.
+FSG_WARN_MB=256
+# Emergency tier: the background agent heals (through the drain). 10x the healthy
+# maximum; at the fastest growth seen there (2.8 GB/h), a drain that runs its whole
+# 60-minute cap from here ends near 3.8 GB.
+FSG_ACT_MB=1024
 # CPU escalator: a footprint at or above warn with fseventsd at or above this share
 # of one core (percent, from the CPU time it used between two ticks) for
 # FSG_CPU_ESCALATE_TICKS ticks in a row counts as runaway, like the act threshold
@@ -31,9 +34,12 @@ FSG_CPU_ESCALATE_TICKS=3
 FSG_TOP_TIMEOUT_S=15
 # The agent's check and a heal's precheck try a `top` that did not answer in time up
 # to this many times in all, this many seconds apart (a loaded Mac; with the
-# defaults about a minute at most). status, the hooks and the checks inside a heal
+# defaults about a minute at most). So does heal --dry-run, which can therefore take
+# up to about a minute on a loaded Mac. status, the hooks and the checks inside a heal
 # try once; a heal whose precheck needed more than one try checks once more before
 # its Docker step and stops there (exit 3, Docker untouched) if top misses again.
+# The tries stop within half of FSG_AGENT_INTERVAL_S whatever these say (doctor
+# warns when they would reach the interval).
 FSG_MEASURE_TRIES=3
 FSG_MEASURE_RETRY_S=5
 
@@ -47,12 +53,17 @@ FSG_STATUS_PROBE=0
 FSG_AGENT_PROBE=1
 
 # --- Background agent ---------------------------------------------------------------
-# launchd StartInterval of the agent (rendered into the plist at install).
+# launchd StartInterval of the agent (rendered into the plist at install; re-run
+# install after changing it). doctor warns while the plist's value differs, and
+# status, doctor and the stopped-agent warning judge a stale agent by the longer one.
 FSG_AGENT_INTERVAL_S=300
 # At most one emergency heal per this many seconds, counted from the newest of: the
 # last restart the guard made for any reason, the last heal attempt that reached the
 # Docker step (even if the restart then failed), and the root helper's own stamp.
-# Inside the window the agent notifies only.
+# Inside the window the agent notifies only. A restart or attempt counts only at a
+# footprint at or above FSG_HELPER_MIN_MB, or by an emergency heal: a trial (or a
+# heal in a trial window) below that floor leaves the window alone, and the
+# helper's own interval still applies to it.
 FSG_EMERGENCY_MIN_INTERVAL_S=10800
 # Repeat a warn notification after this many minutes, or sooner if the footprint
 # has doubled since the last one. Also the repeat limit of the other agent notices.
@@ -111,8 +122,9 @@ FSG_PROBE_IMAGE=
 # Host dir for the bind-mount probe (quote a path with spaces). Empty = the state
 # dir's mountprobe when Docker Desktop shares it, else a dir in the first folder
 # under your home in its File Sharing list. macOS may keep the agent from reading
-# that list, so the agent then uses the copy install cached (re-run install after
-# changing File Sharing). A probe dir Docker Desktop does not share skips the check
+# that list, so the agent then uses the copy install cached (run doctor in a
+# terminal after changing File Sharing: it refreshes the copy). A probe dir Docker
+# Desktop does not share skips the check
 # (doctor warns).
 FSG_PROBE_DIR=
 
@@ -149,10 +161,12 @@ FSG_CAP_POLICY_EMERGENCY=proceed
 FSG_CAP_POLICY_MANUAL=abort
 # After a wave heal gives up at the cap, further wave heals (from any session)
 # return 11 without draining for this many minutes (0 = no back-off). Manual and
-# emergency heals are not affected.
+# emergency heals are not affected. A wave heal below runaway heals only when
+# nothing is running (a drain cap of 0, else exit 4 at once) and never starts it.
 FSG_WAVE_RETRY_MIN=60
 # Emergency heals stop waiting early when the footprint passes this (0 = never).
-FSG_EMERGENCY_CUT_MB=8192
+# From the act threshold, growth faster than 3 GB/h reaches it within the drain cap.
+FSG_EMERGENCY_CUT_MB=4096
 # The agent drops a heal request older than this when it takes it (exit 13): it
 # was queued while the agent was unloaded or the user logged out.
 FSG_REQUEST_MAX_AGE_S=7200
@@ -201,6 +215,10 @@ FSG_AFFECTED_MIN=15.6.1
 FSG_AFFECTED_FIXED=
 # Force the answer (yes|no); empty = use the range.
 FSG_AFFECTED=
+# The newest macOS release the range was last checked against (the newest row in
+# docs/DESIGN.md "Affected versions"). On a newer one that the range counts as
+# affected, doctor, doctor --affected and status add an info line (exit codes stay).
+FSG_AFFECTED_REVIEWED=27.0.1
 
 # --- Notifications ------------------------------------------------------------------
 FSG_NOTIFY=1
