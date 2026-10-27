@@ -524,6 +524,10 @@ None of them lets a non-root user gain root.
   `install`) in a terminal, which refreshes the copy. A wrong pick only makes the
   check skip, never fail. With no copy (the terminal could not read the list
   either), set `FSG_PROBE_DIR`.
+- **No bind-mount check in a path with ':'.** `docker run -v` splits its argument
+  at ':', so the guard never picks a shared folder with one in its path, and a
+  probe dir with one (`FSG_PROBE_DIR`, or a state dir under such a path) skips the
+  check. Set `FSG_PROBE_DIR` to a dir without one.
 - **PID reuse between the re-check and the kill.** Tens of milliseconds; macOS
   hands out pids in sequence, so reuse there is not practical, and a respawn in
   that window makes `kill` fail with ESRCH (exit 71). Accepted.

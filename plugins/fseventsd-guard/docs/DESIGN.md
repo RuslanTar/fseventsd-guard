@@ -918,7 +918,11 @@ one was a trial's.
   shared folder under your home, or `FSG_PROBE_DIR`. A `docker run` that fails with
   "Mounts denied" / "not shared" marks the check **skipped**, not failed, and the
   notice says so: an unshared probe dir is a setup issue, not a broken Docker, and
-  must not hold runs or refuse heals. Doctor warns when the probe dir is not
+  must not hold runs or refuse heals. A probe dir with ':' in its path is skipped
+  the same way before any `docker run` (`-v` splits at ':', and its error is not
+  "mounts denied", so it would count as failed and hold runs), and no shared
+  folder with one is picked. A skip in a dir picked from the cached list (below)
+  says that copy may be stale. Doctor warns when the probe dir is not
   shared. Watching inside a container is checked by hand in the trials (no stock
   image ships inotify tools).
 - **The agent may not read that list.** The settings file sits in Docker Desktop's
@@ -933,7 +937,7 @@ one was a trial's.
   state dir (`#list` and the paths, or `#default`; written to a temp file, then
   renamed), and the agent uses that copy when the live file is refused (and checks
   `FSG_PROBE_DIR` against it). With neither, the state
-  dir is probed as before, and a "Mounts denied" skip says to run install from a
+  dir is probed as before, and a "Mounts denied" skip says to run doctor in a
   terminal or set `FSG_PROBE_DIR`. Doctor refreshes the copy (owner, 2026-10-27)
   when it can read the live list and the two differ, or when there is no copy and
   Docker Desktop does not use its default sharing (the fallback dir is shared
