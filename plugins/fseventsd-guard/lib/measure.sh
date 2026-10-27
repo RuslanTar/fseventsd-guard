@@ -66,20 +66,39 @@ fsg_measure() {
   return 0
 }
 
+# FSG_MEASURE_TRIES, cut to the tries that fit in half the agent interval: a slow
+# try takes FSG_TOP_TIMEOUT_S, and each further one FSG_MEASURE_RETRY_S more. At
+# least 1.
+fsg_measure_tries_max() {
+  local n=$FSG_MEASURE_TRIES half=$((FSG_AGENT_INTERVAL_S / 2)) step=$((FSG_TOP_TIMEOUT_S + FSG_MEASURE_RETRY_S)) fit
+  [ "$n" -ge 1 ] || n=1
+  if [ "$step" -gt 0 ]; then
+    fit=1
+    [ "$FSG_TOP_TIMEOUT_S" -gt "$half" ] || fit=$(( 1 + (half - FSG_TOP_TIMEOUT_S) / step ))
+    [ "$n" -le "$fit" ] || n=$fit
+  fi
+  echo "$n"
+}
+
 # fsg_measure for the agent's tick and a heal's precheck: a top that did not answer
 # in time is tried again, up to FSG_MEASURE_TRIES tries FSG_MEASURE_RETRY_S apart,
 # as a runaway comes on a loaded Mac and no heal runs without a measurement. Other
-# failures return at once. After the last try M_ERR also gives the number of tries
-# and ps's resident size, a lower bound on the footprint (ps leaves out compressed
-# and swapped pages), for the log and the notices only. Sets M_TRIES to the number
-# of tries it took.
+# failures return at once (M_ERR then names any slow tries before). After the last
+# try M_ERR also gives the number of tries and ps's resident size, a lower bound on
+# the footprint (ps leaves out compressed and swapped pages), for the log and the
+# notices only. The tries stop within half the agent interval
+# (fsg_measure_tries_max), so a tick ends before the next is due. Sets M_TRIES to
+# the number of tries it took.
 fsg_measure_retry() {
-  local i=1 n=$FSG_MEASURE_TRIES rss note=
-  [ "$n" -ge 1 ] || n=1
+  local i=1 n rss note=
+  n=$(fsg_measure_tries_max)
   while :; do
     M_TRIES=$i
     fsg_measure && return 0
-    [ "$M_SLOW" = 1 ] || return 3
+    if [ "$M_SLOW" != 1 ]; then
+      [ "$i" -gt 1 ] && M_ERR="$M_ERR (after $((i - 1)) slow tr$( [ $((i - 1)) = 1 ] && echo y || echo ies))"
+      return 3
+    fi
     fsg_log "MEASURE $M_ERR (try $i of $n)"
     [ "$i" -lt "$n" ] || break
     i=$((i + 1))

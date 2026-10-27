@@ -1310,6 +1310,11 @@ EOF
   done <<EOF
 ${FSG_CONFIG_IGNORED:-}
 EOF
+  local mt
+  if [ $(( FSG_MEASURE_TRIES * (FSG_TOP_TIMEOUT_S + FSG_MEASURE_RETRY_S) )) -ge "$FSG_AGENT_INTERVAL_S" ]; then
+    mt=$(fsg_measure_tries_max)
+    fsg_doc warn "config: FSG_MEASURE_TRIES=$FSG_MEASURE_TRIES tries of FSG_TOP_TIMEOUT_S ($FSG_TOP_TIMEOUT_S s) and FSG_MEASURE_RETRY_S ($FSG_MEASURE_RETRY_S s) take up to $(( FSG_MEASURE_TRIES * (FSG_TOP_TIMEOUT_S + FSG_MEASURE_RETRY_S) )) s, at least the agent interval ($FSG_AGENT_INTERVAL_S s): a check stops after $mt tr$( [ "$mt" = 1 ] && echo y || echo ies), at half the interval"
+  fi
 
   # Root helper.
   if [ -f "$FSG_HELPER_PATH" ]; then

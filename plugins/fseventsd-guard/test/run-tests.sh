@@ -440,6 +440,13 @@ EOF
   echo '# planted' >> "$GUARD_HOME/lib/root-steps.sh"
   install_fake --no-agent; eq $? 1 "an edited root-steps.sh is still refused with the planted gate"
   tgit checkout -q -- plugins/fseventsd-guard/lib/root-steps.sh
+
+  t "doctor warns when the measure tries outlast the agent interval"
+  docker_default; install_fake --no-agent
+  "$G" doctor --prefix "$FSG_PREFIX" > "$C/doc.out" 2>/dev/null
+  hasnt "$(cat "$C/doc.out")" "FSG_MEASURE_TRIES" "silent with the defaults"
+  FSG_MEASURE_TRIES=20 "$G" doctor --prefix "$FSG_PREFIX" > "$C/doc.out" 2>/dev/null
+  has "$(cat "$C/doc.out")" "WARN  config: FSG_MEASURE_TRIES=20 tries of FSG_TOP_TIMEOUT_S (15 s) and FSG_MEASURE_RETRY_S (5 s) take up to 400 s, at least the agent interval (300 s): a check stops after 7 tries, at half the interval" "names the knobs and the cut"
 fi
 
 # ======================================================================== helper
@@ -2993,6 +3000,23 @@ if ! skip_case slow-top; then
   [ $(( $(date +%s) - s )) -lt 5 ] && ok || bad "no pause for another try: took $(( $(date +%s) - s )) s"
   hasnt "$(cat "$FSG_LOG")" "MEASURE" "no retry logged"
   hasnt "$(cat "$FSG_LOG")" "tries" "the reason is the first try's"
+
+  t "the tries stop at half the agent interval"
+  docker_default; install_fake --no-agent
+  echo 8 > "$FSG_FAKE/top-delay"; s=$(date +%s)
+  FSG_TOP_TIMEOUT_S=1 FSG_MEASURE_RETRY_S=0 FSG_MEASURE_TRIES=1000 FSG_AGENT_INTERVAL_S=8 "$G" tick >/dev/null 2>&1; eq $? 3 "cannot measure"
+  w=$(( $(date +%s) - s ))
+  [ "$w" -lt 15 ] && ok || bad "bounded by half the interval: took $w s"
+  eq "$(grep -c 'MEASURE top did not answer within 1s' "$FSG_LOG")" 4 "four tries of 1 s fit in 4 s"
+  has "$(cat "$FSG_LOG")" "(try 4 of 4)" "the tries counted against the bound"
+  rm -f "$FSG_FAKE/top-delay"
+
+  t "a slow try followed by another failure keeps the try count"
+  docker_default; install_fake --no-agent
+  mem garbage; printf '5\n0\n' > "$FSG_FAKE/top-delay-seq"
+  FSG_TOP_TIMEOUT_S=1 FSG_MEASURE_RETRY_S=0 "$G" tick >/dev/null 2>&1; eq $? 3 "cannot measure"
+  has "$(grep 'TICK cannot-measure' "$FSG_LOG")" "cannot read the footprint of pid 4242" "the last try's reason"
+  has "$(grep 'TICK cannot-measure' "$FSG_LOG")" "(after 1 slow try)" "and the slow try before it"
 fi
 
 # ======================================================================== stall-notice

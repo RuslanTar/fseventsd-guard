@@ -37,6 +37,8 @@ FSG_TOP_TIMEOUT_S=15
 # defaults about a minute at most). status, the hooks and the checks inside a heal
 # try once; a heal whose precheck needed more than one try checks once more before
 # its Docker step and stops there (exit 3, Docker untouched) if top misses again.
+# The tries stop within half of FSG_AGENT_INTERVAL_S whatever these say (doctor
+# warns when they would reach the interval).
 FSG_MEASURE_TRIES=3
 FSG_MEASURE_RETRY_S=5
 
