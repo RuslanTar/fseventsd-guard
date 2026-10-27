@@ -9,7 +9,7 @@
     {
       "name": "fseventsd-guard",
       "source": "./plugins/fseventsd-guard",
-      "description": "Claude Code hooks for fseventsd-guard: an install nudge on affected Macs and heal notices while the guard restarts fseventsd. Silent off macOS.",
+      "description": "Claude Code hooks for fseventsd-guard: an install nudge on affected Macs, a warning when the installed guard's agent stops ticking, and heal notices while the guard restarts fseventsd. Silent off macOS.",
       "category": "productivity"
     }
   ]

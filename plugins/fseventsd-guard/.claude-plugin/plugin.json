@@ -1,6 +1,6 @@
 {
   "name": "fseventsd-guard",
-  "description": "Hooks for fseventsd-guard, which heals a runaway macOS fseventsd: an install nudge on affected Macs without the guard, and a notice to Claude while a heal stops Docker. Silent off macOS.",
+  "description": "Hooks for fseventsd-guard, which heals a runaway macOS fseventsd: an install nudge on affected Macs without the guard, a warning when the installed guard's agent stops ticking, and a notice to Claude while a heal stops Docker. Silent off macOS.",
   "author": {
     "name": "Ruslan Taranenko",
     "url": "https://github.com/RuslanTar"
