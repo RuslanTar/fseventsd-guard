@@ -123,6 +123,39 @@ fsg_tick_sample() {
     "$T_CPU_STREAK" "$boot" "$P_EID" > "$f.new.$$" 2>/dev/null && mv -f "$f.new.$$" "$f" 2>/dev/null
 }
 
+# A restart of fseventsd the guard did not make (owner, 2026-10-27): the pid differs
+# from the previous tick's record (tick-sample) on the same boot, and neither a
+# restart the guard recorded (last-restart, last-restart-uncounted) nor the root
+# helper's stamp is as new as that record. Logs one EXTERNAL_RESTART line and writes
+# last-external-restart, which status shows; no notice, and nothing else changes.
+# Runs before fsg_tick_sample replaces the record.
+fsg_tick_external_restart() {
+  local f="$FSG_STATE_DIR/tick-sample" pp pe boot g s now started= at=
+  pp=$(fsg__kv "$f" pid); pe=$(fsg__kv "$f" epoch)
+  fsg_is_uint "$pp" && fsg_is_uint "$pe" && fsg_is_uint "${M_PID:-}" && [ "$pp" != "$M_PID" ] || return 0
+  boot=$(sysctl -n kern.boottime 2>/dev/null | sed -n 's/^{ sec = \([0-9]*\),.*/\1/p')
+  [ -n "$boot" ] && [ "$(fsg__kv "$f" boot)" = "$boot" ] || return 0
+  for g in "$FSG_STATE_DIR/last-restart" "$FSG_STATE_DIR/last-restart-uncounted" "$FSG_ROOT_LOG_DIR/last-restart"; do
+    s=$(awk 'NR == 1 { print $1 }' "$g" 2>/dev/null)
+    fsg_is_uint "$s" && [ "$s" -ge "$pe" ] && return 0
+  done
+  now=$(fsg_now)
+  if fsg_is_uint "${M_UP:-}"; then started=$((now - M_UP)); at=$(date -u -r "$started" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null); fi
+  fsg_log "EXTERNAL_RESTART old_pid=$pp new_pid=$M_PID up_s=${M_UP:-} started_at=$at"
+  printf 'epoch=%s\nold_pid=%s\nnew_pid=%s\nup_s=%s\nstarted_epoch=%s\n' "$now" "$pp" "$M_PID" "${M_UP:-}" "$started" \
+    > "$FSG_STATE_DIR/last-external-restart.new.$$" 2>/dev/null &&
+    mv -f "$FSG_STATE_DIR/last-external-restart.new.$$" "$FSG_STATE_DIR/last-external-restart" 2>/dev/null
+  return 0
+}
+
+# status's line on the last restart the guard did not make, or nothing.
+fsg_status_external_text() {
+  local f="$FSG_STATE_DIR/last-external-restart" e s
+  e=$(fsg__kv "$f" epoch); fsg_is_uint "$e" || return 0
+  s=$(fsg__kv "$f" started_epoch)
+  echo "last restart not made by the guard: pid $(fsg__kv "$f" old_pid) -> $(fsg__kv "$f" new_pid), started $(fsg_is_uint "$s" && date -u -r "$s" +%Y-%m-%dT%H:%M:%SZ || echo 'at an unknown time'), seen by the agent $(fsg_dur $(( $(fsg_now) - e ))) ago (logged as EXTERNAL_RESTART; the guard does not act on it)"
+}
+
 # The per-day summary, $FSG_STATE_DIR/daily: one line per local day, rewritten as
 # the day goes on, with the ticks, the largest footprint and CPU share, the heals
 # that restarted fseventsd and the event rate's median and 95th percentile. The
@@ -409,6 +442,7 @@ fsg_cmd_status() {
       [ -n "$P_START_MS" ] && echo "probe stream start: $P_START_MS ms (a healthy fseventsd takes 0-1 ms; logged only, no heal acts on it)"
     fi
     [ -n "$S_REASONS" ] && [ $mrc -eq 0 ] && printf '%s\n' "$S_REASONS" | sed 's/^/  reason: /'
+    fsg_status_external_text
     if [ "$D_PENDING" = true ]; then echo "drain: pending (phase $D_PHASE; $D_REASON); live leases: $D_LEASES"
     else echo "drain: none; live leases: $D_LEASES"; fi
     # Written by the draining heal at each poll (lib/drain.sh).

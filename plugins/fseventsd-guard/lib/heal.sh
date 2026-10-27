@@ -1460,6 +1460,7 @@ fsg_tick_check() {
       [ "$P_RESULT" = stalled ] || fsg_log "TICK probe stalled once, then $P_RESULT (not counted)"
     fi
   fi
+  fsg_tick_external_restart
   fsg_tick_sample
   fsg_classify 0
   TICK_LEVEL=$S_LEVEL

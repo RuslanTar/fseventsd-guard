@@ -4302,6 +4302,31 @@ if ! skip_case tick; then
   "$G" tick >/dev/null 2>&1; rc=$?
   eq $rc 0 "confirmed stall above the floor heals"
   has "$(cat "$FSG_FAKE/calls.log")" "sudo -n /" "restart"
+
+  t "tick logs a restart of fseventsd it did not make, once; status shows the last one"
+  docker_default; install_fake --no-agent
+  "$G" tick; eq $? 0 "first tick"
+  hasnt "$("$G" status)" "not made by the guard" "nothing to show yet"
+  echo 4300 > "$FSG_FAKE/fsev/pids"; echo 00:25 > "$FSG_FAKE/fsev/4300.etime"; : > "$FSG_FAKE/notifications.log"
+  "$G" tick; eq $? 0 "a new pid the guard did not start"
+  line=$(grep ' EXTERNAL_RESTART ' "$FSG_LOG")
+  has "$line" "EXTERNAL_RESTART old_pid=4242 new_pid=4300 up_s=25 started_at=20" "logged: both pids, uptime, start"
+  before "$FSG_LOG" " EXTERNAL_RESTART " "TICK level=ok pid=4300"
+  eq "$(cat "$FSG_FAKE/notifications.log")" "" "no notification"
+  absent "$FSG_STATE_DIR/last-restart" "no restart stamp"; absent "$FSG_STATE_DIR/last-attempt" "no attempt stamp"
+  "$G" tick; eq "$(grep -c ' EXTERNAL_RESTART ' "$FSG_LOG")" 1 "logged once"
+  out=$("$G" status); has "$out" "last restart not made by the guard: pid 4242 -> 4300, started 20" "status shows it"
+  out=$("$G" status --json); json_ok "$out"
+  # The guard's own restart is not one.
+  mem 3G; "$G" tick >/dev/null 2>&1; eq $? 0 "an emergency heal restarts it"
+  "$G" tick; eq "$(grep -c ' EXTERNAL_RESTART ' "$FSG_LOG")" 1 "the guard's restart is not logged as one"
+  # Nor is a reboot.
+  echo "{ sec = 1760009999, usec = 0 } Thu Oct  9 11:39:59 2025" > "$FSG_FAKE/boottime"
+  echo 4400 > "$FSG_FAKE/fsev/pids"; "$G" tick
+  eq "$(grep -c ' EXTERNAL_RESTART ' "$FSG_LOG")" 1 "a new boot is not logged as one"
+  echo 4500 > "$FSG_FAKE/fsev/pids"; echo 01:00 > "$FSG_FAKE/fsev/4500.etime"; "$G" tick
+  eq "$(grep -c ' EXTERNAL_RESTART ' "$FSG_LOG")" 2 "the next one on that boot is"
+  has "$("$G" status)" "last restart not made by the guard: pid 4400 -> 4500" "status shows the last one"
 fi
 
 # ======================================================================== tick-loop
