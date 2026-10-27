@@ -1414,11 +1414,11 @@ EOF
   # User side.
   if [ -f "$FSG_PLIST" ]; then
     plutil -lint "$FSG_PLIST" >/dev/null 2>&1 && fsg_doc ok "agent plist $FSG_PLIST" || fsg_doc fail "agent plist $FSG_PLIST is invalid: re-run install"
-    # Older installs ran /bin/bash, which Background Items lists as "bash".
+    # Older installs ran /bin/bash, which Login Items & Extensions lists as "bash".
     local prog
     prog=$(plutil -extract ProgramArguments.0 raw -o - "$FSG_PLIST" 2>/dev/null)
     if [ "$prog" != "$FSG_STATE_DIR/app/fseventsd-guard" ]; then
-      fsg_doc warn "agent plist runs '${prog:-?}', not $FSG_STATE_DIR/app/fseventsd-guard (Background Items shows it as '$(basename "${prog:-?}")'): re-run install"
+      fsg_doc warn "agent plist runs '${prog:-?}', not $FSG_STATE_DIR/app/fseventsd-guard (Login Items & Extensions shows it as '$(basename "${prog:-?}")'): re-run install"
     fi
     [ "$(plutil -extract ProcessType raw -o - "$FSG_PLIST" 2>/dev/null)" = Interactive ] ||
       fsg_doc warn "agent plist sets no ProcessType Interactive, so launchd throttles the agent and on a loaded Mac its top sample can miss FSG_TOP_TIMEOUT_S (cannot measure, no heal): re-run install"

@@ -365,7 +365,7 @@ fsg_agent_fields() {
     return 0
   fi
   A_STALE=true
-  A_TEXT="STALE: $A_TEXT, more than twice the $(fsg_dur "$A_INTERVAL") interval. The agent may be unloaded, switched off in Background Items, or hung, and is not protecting this Mac (run: fseventsd-guard doctor)"
+  A_TEXT="STALE: $A_TEXT, more than twice the $(fsg_dur "$A_INTERVAL") interval. The agent may be unloaded, switched off in Login Items & Extensions, or hung, and is not protecting this Mac (run: fseventsd-guard doctor)"
 }
 
 # One line on the Docker intent, or nothing.

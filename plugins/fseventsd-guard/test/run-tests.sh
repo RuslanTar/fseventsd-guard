@@ -656,7 +656,7 @@ if ! skip_case install; then
   plutil -insert ProgramArguments.0 -string /bin/bash "$PL"
   "$G" doctor --prefix "$FSG_PREFIX" > "$C/doc.out" 2>&1; eq $? 1 "doctor warns on a plist that runs /bin/bash"
   has "$(cat "$C/doc.out")" "agent plist runs '/bin/bash'" "doctor names the program"
-  has "$(cat "$C/doc.out")" "Background Items shows it as 'bash'" "doctor says how it shows"
+  has "$(cat "$C/doc.out")" "Login Items & Extensions shows it as 'bash'" "doctor says how it shows, by the pane's name"
   stub_dir "$C/wrap"
   printf '#!/bin/bash\ncase "$*" in *app.new/fseventsd-guard) exec /bin/chmod 0644 "${@: -1}" ;; esac\nexec /bin/chmod "$@"\n' > "$C/wrap/chmod"
   /bin/chmod 755 "$C/wrap/chmod"
@@ -4554,6 +4554,7 @@ if ! skip_case heartbeat; then
   has "$("$G" status)" "agent: STALE" "text status"
   "$G" doctor --prefix "$FSG_PREFIX" > "$C/doc.out" 2>&1; eq $? 1 "doctor warns"
   has "$(cat "$C/doc.out")" "WARN  agent heartbeat: STALE" "doctor line"
+  has "$(cat "$C/doc.out")" "switched off in Login Items & Extensions, or hung" "doctor names the pane as System Settings does"
   FSG_AGENT_INTERVAL_S=400 "$G" status --json >/dev/null 2>"$C/err"; eq "$(cat "$C/err")" "" "within twice a longer interval"
   hb 500 ok 0 1 x
   out=$("$G" status --json); eq "$(jget "$out" 'd["agent"]["stale"]')" False "500 s is within 600"
