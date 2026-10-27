@@ -288,15 +288,17 @@ fsg_status_drain_fields() {
 # A_INSTALLED (the plist exists), A_REQUESTS (the installed app copy serves this
 # checkout's heal requests), A_EPOCH, A_AGE, A_RESULT, A_EXIT, A_RUNNING (the tick
 # that wrote it still runs), A_SINCE (the seconds judged below, empty when not
-# judged), A_STALE and A_TEXT (one line). Stale: the last write,
+# judged), A_STALE, A_TEXT (one line) and A_INTERVAL. Stale: the last write,
 # or with no heartbeat the newest TICK line in the user log or else the install, is
-# older than twice the interval. A tick that is still in a heal is not stale: a
+# older than twice the interval (A_INTERVAL: FSG_AGENT_INTERVAL_S, or the plist's
+# StartInterval when that is longer). A tick that is still in a heal is not stale: a
 # drain takes up to its cap. An agent from before heartbeats (A_LEGACY: no
 # heartbeat, its plist runs /bin/bash) is judged by its TICK lines only, which every
 # tick of it writes; without one it is not judged.
 fsg_agent_fields() {
-  local f="$FSG_STATE_DIR/heartbeat" now limit since pid t pl
+  local f="$FSG_STATE_DIR/heartbeat" now limit since pid t pl pi
   A_INSTALLED=false; A_REQUESTS=false; A_LEGACY=false; A_EPOCH=; A_AGE=; A_RESULT=; A_EXIT=; A_RUNNING=false; A_SINCE=; A_STALE=false; A_TEXT=
+  A_INTERVAL=$FSG_AGENT_INTERVAL_S
   [ -f "$FSG_PLIST" ] && A_INSTALLED=true
   [ "$(sed -n 's/^FSG_REQUEST_PROTOCOL=//p' "$FSG_STATE_DIR/app/lib/common.sh" 2>/dev/null | head -n 1)" = "$FSG_REQUEST_PROTOCOL" ] &&
     A_REQUESTS=true
@@ -351,12 +353,19 @@ fsg_agent_fields() {
   [ "$A_INSTALLED" = true ] || { A_TEXT="$A_TEXT; the agent is not installed"; return 0; }
   A_SINCE=$since
   [ "$since" -gt "$limit" ] || return 0
+  # Only past the config's limit: launchd ticks at the plist's StartInterval, which
+  # install rendered from the config of then, and a longer one is the real limit.
+  pi=$(plutil -extract StartInterval raw -o - "$FSG_PLIST" 2>/dev/null)
+  if fsg_is_uint "$pi" && [ "$pi" -gt "$A_INTERVAL" ]; then
+    A_INTERVAL=$pi
+    [ "$since" -gt $((2 * pi)) ] || return 0
+  fi
   if [ "$A_RUNNING" = true ] && fsg_heal_running; then
     A_TEXT="$A_TEXT (in a heal)"
     return 0
   fi
   A_STALE=true
-  A_TEXT="STALE: $A_TEXT, more than twice the $(fsg_dur "$FSG_AGENT_INTERVAL_S") interval. The agent may be unloaded, switched off in Background Items, or hung, and is not protecting this Mac (run: fseventsd-guard doctor)"
+  A_TEXT="STALE: $A_TEXT, more than twice the $(fsg_dur "$A_INTERVAL") interval. The agent may be unloaded, switched off in Background Items, or hung, and is not protecting this Mac (run: fseventsd-guard doctor)"
 }
 
 # One line on the Docker intent, or nothing.

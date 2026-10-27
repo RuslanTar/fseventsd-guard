@@ -187,7 +187,7 @@ fsg_hint_agent_json() {
   g="\"$g\""
   off=$FSG_HINT_DIR
   case $off in "$HOME"/*) off="~${off#"$HOME"}" ;; esac
-  age=$(fsg_dur "$A_SINCE"); iv=$(fsg_dur "$FSG_AGENT_INTERVAL_S")
+  age=$(fsg_dur "$A_SINCE"); iv=$(fsg_dur "${A_INTERVAL:-$FSG_AGENT_INTERVAL_S}")
   every=$(( $(fsg_hint_every agent-stopped) / 3600 ))
   if [ -n "$A_EPOCH" ]; then
     msg="the agent's last tick was $age ago"; what="its background agent last ticked $age ago"

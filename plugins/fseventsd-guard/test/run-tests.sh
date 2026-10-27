@@ -1441,6 +1441,9 @@ if ! skip_case install-heal; then
   has "$(cat "$C/doc.out")" "WARN  agent plist sets no ProcessType Interactive" "doctor names it"
   has "$(grep 'ProcessType' "$C/doc.out")" "re-run install" "and the fix"
   install_fake; eq "$(plutil -extract ProcessType raw -o - "$P" 2>/dev/null)" Interactive "install puts it back"
+  hasnt "$(cat "$C/doc.out")" "StartInterval" "the plist's interval is the config's"
+  FSG_AGENT_INTERVAL_S=600 "$G" doctor --prefix "$FSG_PREFIX" > "$C/doc.out" 2>&1; eq $? 1 "doctor warns when the config's interval is not the plist's"
+  has "$(cat "$C/doc.out")" "WARN  agent plist ticks every 300 s (StartInterval), but FSG_AGENT_INTERVAL_S is 600 s: re-run install to apply it" "names both and the fix"
 
   t "doctor names launchd's cap on the agent's exit time"
   docker_default; install_fake
@@ -5442,6 +5445,18 @@ if ! skip_case claude-hook-agent; then
   for p in $ps_; do wait "$p"; done
   eq "$(cat "$C"/p[1-6] | grep -c 'last tick was')" 1 "one warning for six prompts at once (two sessions, subagents)"
   hint_stamp last-agent-stopped 21700; has "$(hook prompt)" "last tick was" "and again once the window passed"
+
+  t "claude-hook prompt: the plist's longer StartInterval sets the stale limit"
+  # plist_iv SECONDS: the installed agent's plist, with only its StartInterval.
+  plist_iv() {
+    printf '<?xml version="1.0" encoding="UTF-8"?>\n<plist version="1.0"><dict><key>StartInterval</key><integer>%s</integer></dict></plist>\n' "$1" \
+      > "$FSG_LAUNCH_AGENTS_DIR/io.github.ruslantar.fseventsd-guard.plist"
+  }
+  plist_iv 900; hb 1000
+  eq "$(hook prompt)" "" "1000 s after the last tick of an agent that ticks every 900 s"
+  hb 2000; has "$(hook_msg "$(hook prompt)")" "more than twice the 15m00s interval" "past twice the plist's interval: warned, naming it"
+  rm -rf "$FSG_HINT_DIR"; plist_iv 120; hb 700
+  has "$(hook_msg "$(hook prompt)")" "more than twice the 5m00s interval" "a shorter plist interval leaves the config's"
 
   t "claude-hook prompt: no stopped-agent warning in the first two intervals after a boot or a wake"
   agent_plist; hb 7200

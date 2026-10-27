@@ -1422,6 +1422,12 @@ EOF
     fi
     [ "$(plutil -extract ProcessType raw -o - "$FSG_PLIST" 2>/dev/null)" = Interactive ] ||
       fsg_doc warn "agent plist sets no ProcessType Interactive, so launchd throttles the agent and on a loaded Mac its top sample can miss FSG_TOP_TIMEOUT_S (cannot measure, no heal): re-run install"
+    # install renders the interval into the plist; a config changed since then
+    # reaches launchd only through install.
+    local si
+    si=$(plutil -extract StartInterval raw -o - "$FSG_PLIST" 2>/dev/null)
+    fsg_is_uint "$si" && [ "$si" != "$FSG_AGENT_INTERVAL_S" ] &&
+      fsg_doc warn "agent plist ticks every $si s (StartInterval), but FSG_AGENT_INTERVAL_S is $FSG_AGENT_INTERVAL_S s: re-run install to apply it"
     local lc
     if lc=$(launchctl print "gui/$(id -u)/$FSG_LABEL" 2>/dev/null); then
       fsg_doc ok "agent $FSG_LABEL is loaded"
