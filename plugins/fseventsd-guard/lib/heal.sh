@@ -973,8 +973,8 @@ fsg__heal_helper_done() {
 fsg__heal_docker_acts() { case $HEAL_VARIANT in B|C) return 0 ;; A) [ -n "$DK_STOP_IDS" ] ;; *) return 1 ;; esac; }
 
 # One more top, right before the Docker step of a heal whose precheck needed more
-# than one try: the root helper takes a single top sample of its own and refuses
-# (70) when it misses, after the Docker step. 1 when top did not answer again
+# than one try: the root helper's own top (up to three 15 s tries) can miss too on
+# such a Mac, and it refuses (70) after the Docker step. 1 when top did not answer again
 # (H_GATE_ERR says so); any other result goes on, and the precheck's measurement
 # stays as it was.
 fsg__heal_top_gate() {
@@ -1083,7 +1083,7 @@ fsg_heal_run() { # t0 old_pid cap policy
       DK_NOTE="Docker step $HEAL_VARIANT ran unchecked: Docker did not answer docker info (wedged), so its containers were not listed, and any --rm container with an anonymous volume that it stopped lost that volume"
   fi
   # A precheck that needed a second top ran on a Mac that misses FSG_TOP_TIMEOUT_S;
-  # if top misses again now, the helper's own single sample likely would too, after
+  # if top misses again now, the helper's own tries likely would too, after
   # Docker was stopped. Ends like the other refusals here: fsg_heal_main ends the drain,
   # and an emergency heal counts as an attempt, else the agent would drain again every
   # tick while the Mac stays loaded.

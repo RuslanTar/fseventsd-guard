@@ -502,10 +502,36 @@ if ! skip_case helper; then
   rec=$(cat "$EV"/restart-*.txt)
   has "$rec" "files=(find timed out)" "find bounded"; has "$rec" "size_kb=(du timed out)" "du bounded"
   rm -f "$FSG_FAKE/find-delay" "$FSG_FAKE/du-delay" "$EV/last-restart"; echo 4242 > "$FSG_FAKE/fsev/pids"; mem 3G
-  echo 5 > "$FSG_FAKE/top-delay"; s=$(date +%s)
+  echo 5 > "$FSG_FAKE/top-delay"; : > "$FSG_FAKE/top-calls"; s=$(date +%s)
   /bin/sh "$H" 2> "$C/err"; eq $? 70 "a hung top: cannot measure"
-  [ $(( $(date +%s) - s )) -lt 4 ] && ok || bad "top bounded: took $(( $(date +%s) - s )) s"
+  # Three tries of at most 1 s each here, 0.1 s apart (helper-tools/sleep).
+  [ $(( $(date +%s) - s )) -lt 8 ] && ok || bad "top bounded: took $(( $(date +%s) - s )) s"
+  eq "$(grep -c -- '-stats mem$' "$FSG_FAKE/top-calls")" 3 "three tries of top"
+  has "$(cat "$C/err")" "cannot read the footprint of pid 4242 (3 tries)" "says how often it tried"
+  eq "$(grep -c 'NOTE top gave no footprint for pid 4242' "$EV/helper.log")" 3 "one NOTE per miss"
   rm -f "$FSG_FAKE/top-delay"
+
+  t "helper retries its top"
+  render_helper "$C/h0" 0; H="$C/helper"
+  sed 's/^TOP_LIMIT_S=.*/TOP_LIMIT_S=1/' "$C/h0" > "$H"
+  EV="$FSG_PREFIX/Library/Logs/fseventsd-guard"
+  mem 3G; printf '5\n0\n' > "$FSG_FAKE/top-delay-seq"; : > "$FSG_FAKE/top-calls"
+  out=$(/bin/sh "$H" 2> "$C/err"); eq $? 0 "one miss, then an answer: restarted"
+  has "$out" "restarted old=4242 new=4243" "output"
+  eq "$(grep -c -- '-stats mem$' "$FSG_FAKE/top-calls")" 2 "a second try"
+  has "$(cat "$EV/helper.log")" "NOTE top gave no footprint for pid 4242 (try 1 of 3)" "the miss is logged"
+  has "$(cat "$EV/helper.log")" "RESTARTED old=4242" "restart logged"
+  # fseventsd goes away during the first try (its pid no longer answers top) and
+  # launchd starts another one: the helper does not go on with the new pid.
+  rm -f "$EV/last-restart" "$FSG_FAKE/top-delay-seq"; echo 4242 > "$FSG_FAKE/fsev/pids"; mem 3G
+  mkdir -p "$C/tk"; cp -R "$TOOLS" "$C/tk/helper-tools"; ln -s "$STUBS" "$C/tk/stubs"
+  printf '#!/bin/bash\n[ -f "$FSG_FAKE/pid-moved" ] || { touch "$FSG_FAKE/pid-moved"; echo 4250 > "$FSG_FAKE/fsev/pids"; }\nexec "$(dirname "$0")/../stubs/top" "$@"\n' > "$C/tk/helper-tools/top"
+  sed -e "s|^TOOLS=.*|TOOLS=$C/tk/helper-tools|" "$H" > "$C/helper-moved"
+  : > "$FSG_FAKE/calls.log"
+  /bin/sh "$C/helper-moved" 2> "$C/err"; eq $? 69 "the pid changed between tries"
+  has "$(cat "$C/err")" "fseventsd changed from pid 4242 to '4250' while its footprint was read" "says so"
+  hasnt "$(cat "$FSG_FAKE/calls.log")" "kill -TERM" "nothing killed"
+  absent "$EV/last-restart" "no rate-limit stamp"
 
   t "helper trial window"
   H="$C/helper"; render_helper "$H" $(( $(date +%s) + 3600 ))
