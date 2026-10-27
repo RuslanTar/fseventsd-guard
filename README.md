@@ -111,10 +111,12 @@ In a project's `.claude/settings.json`:
 }
 ```
 
-These entries turn the plugin on for the project but do not install it. Claude Code
-(checked with 2.1.310) does not add a marketplace that only a project's settings
-declare, so a session reports the plugin as enabled but not installed. Each
-teammate installs it once, from the project's directory:
+These entries turn the plugin on for the project but do not install it. The
+`claude` CLI (checked with 2.1.310) does not register a marketplace that only a
+project's settings declare, so a session reports the plugin as enabled but not
+installed. An interactive session may offer to add it when you trust the folder
+(not verified); the commands below work either way. Each teammate installs it once,
+from the project's directory:
 
 ```sh
 claude plugin marketplace add RuslanTar/fseventsd-guard --scope local
