@@ -2993,11 +2993,12 @@ if ! skip_case slow-top; then
 
   t "only a slow top is tried again"
   docker_default; install_fake --no-agent
+  # A retry would pause 30 s; two whole ticks take far less on a loaded Mac too.
   : > "$FSG_FAKE/fsev/pids"; s=$(date +%s)
-  FSG_MEASURE_RETRY_S=5 "$G" tick >/dev/null 2>&1; eq $? 3 "no daemon"
+  FSG_MEASURE_RETRY_S=30 "$G" tick >/dev/null 2>&1; eq $? 3 "no daemon"
   echo 4242 > "$FSG_FAKE/fsev/pids"; mem garbage
-  FSG_MEASURE_RETRY_S=5 "$G" tick >/dev/null 2>&1; eq $? 3 "unparseable top"
-  [ $(( $(date +%s) - s )) -lt 5 ] && ok || bad "no pause for another try: took $(( $(date +%s) - s )) s"
+  FSG_MEASURE_RETRY_S=30 "$G" tick >/dev/null 2>&1; eq $? 3 "unparseable top"
+  [ $(( $(date +%s) - s )) -lt 30 ] && ok || bad "no pause for another try: took $(( $(date +%s) - s )) s"
   hasnt "$(cat "$FSG_LOG")" "MEASURE" "no retry logged"
   hasnt "$(cat "$FSG_LOG")" "tries" "the reason is the first try's"
 
