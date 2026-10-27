@@ -5435,6 +5435,14 @@ if ! skip_case claude-hook-agent; then
   hint_stamp last-agent-stopped 21000; eq "$(hook prompt)" "" "warned 5h50m ago"
   hint_stamp last-agent-stopped 21700; has "$(hook prompt)" "last tick was" "warned over 6 h ago: again"
 
+  t "claude-hook prompt: prompts at once give one stopped-agent warning"
+  agent_plist; hb 7200
+  ps_=""
+  for i in 1 2 3 4 5 6; do hook prompt UserPromptSubmit "s$i" > "$C/p$i" 2>/dev/null & ps_="$ps_ $!"; done
+  for p in $ps_; do wait "$p"; done
+  eq "$(cat "$C"/p[1-6] | grep -c 'last tick was')" 1 "one warning for six prompts at once (two sessions, subagents)"
+  hint_stamp last-agent-stopped 21700; has "$(hook prompt)" "last tick was" "and again once the window passed"
+
   t "claude-hook prompt: no stopped-agent warning in the first two intervals after a boot or a wake"
   agent_plist; hb 7200
   booted 300; eq "$(hook prompt)" "" "booted 5 minutes ago: the agent's first tick may not have run"

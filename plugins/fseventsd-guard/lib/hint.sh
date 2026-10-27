@@ -148,8 +148,22 @@ fsg_hint_agent() {
   . "$FSG_HOME/lib/heal.sh"
   fsg_agent_fields
   [ "$A_STALE" = true ] || return 0
+  # Prompts at once (sessions, subagents) all get here: only the one that takes the
+  # lock, and then still finds no stamp in the window, warns. A lock a killed hook
+  # left behind goes after a minute (that prompt stays silent).
+  local lock="$FSG_HINT_DIR/agent-stopped.lock"
+  mkdir -p "$FSG_HINT_DIR" 2>/dev/null || return 0
+  if ! mkdir "$lock" 2>/dev/null; then
+    [ -n "$(find "$lock" -maxdepth 0 -mmin +1 2>/dev/null)" ] && rmdir "$lock" 2>/dev/null
+    return 0
+  fi
+  t=$(fsg_hint_stamp last-agent-stopped)
+  if [ -n "$t" ] && [ $((now - t)) -ge 0 ] && [ $((now - t)) -lt "$(fsg_hint_every agent-stopped)" ]; then
+    rmdir "$lock" 2>/dev/null; return 0
+  fi
   # Stamped first: no stamp, no warning, else it would repeat on every prompt.
-  { mkdir -p "$FSG_HINT_DIR" && echo "$now" > "$FSG_HINT_DIR/last-agent-stopped"; } 2>/dev/null || return 0
+  if ! echo "$now" > "$FSG_HINT_DIR/last-agent-stopped" 2>/dev/null; then rmdir "$lock" 2>/dev/null; return 0; fi
+  rmdir "$lock" 2>/dev/null
   fsg_hint_agent_json
 }
 
