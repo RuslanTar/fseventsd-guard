@@ -667,8 +667,8 @@ fsg_docker_verify_bind_mount() {
   local dir f out nonce img got rc made=0 tried=""
   fsg_probe_dir
   case $BM_LIST_SRC in
-    cache) fsg_log "DOCKER File Sharing list unreadable by the agent (macOS app-data protection); using the list cached at install" ;;
-    none) fsg_log "DOCKER File Sharing list unreadable by the agent (macOS app-data protection) and none cached at install" ;;
+    cache) fsg_log "DOCKER File Sharing list unreadable by the agent (macOS app-data protection); using the list cached by install or doctor" ;;
+    none) fsg_log "DOCKER File Sharing list unreadable by the agent (macOS app-data protection) and none cached by install or doctor" ;;
   esac
   dir=$BM_DIR; f="$BM_DIR/$FSG__PROBE_FILE"; out="$FSG_STATE_DIR/mountprobe.out"
   [ -d "$dir" ] || made=1

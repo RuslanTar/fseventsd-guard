@@ -512,6 +512,14 @@ fsg_shared_dirs_cache_text() {
   esac
 }
 
+# Replaces the agent's copy with TEXT (a temp file renamed into place); 1 when it
+# cannot be written, the old copy kept.
+fsg__shared_cache_put() { # text
+  { printf '%s\n' "$1" > "$FSG_SHARED_CACHE.new" && mv -f "$FSG_SHARED_CACHE.new" "$FSG_SHARED_CACHE"; } 2>/dev/null && return 0
+  rm -f "$FSG_SHARED_CACHE.new"
+  return 1
+}
+
 # Install runs in a terminal, which macOS lets read Docker Desktop's settings; the
 # agent may not, so it gets a copy. One that cannot be read here keeps the old copy.
 fsg_shared_dirs_cache_write() {
@@ -520,8 +528,7 @@ fsg_shared_dirs_cache_write() {
     echo "  WARNING: cannot read Docker Desktop's File Sharing list from here, so nothing new is cached for the agent; heals may skip the bind-mount check: run install from a terminal, or set FSG_PROBE_DIR"
     return 0
   fi
-  if ! { printf '%s\n' "$text" > "$FSG_SHARED_CACHE.new" && mv -f "$FSG_SHARED_CACHE.new" "$FSG_SHARED_CACHE"; }; then
-    rm -f "$FSG_SHARED_CACHE.new"
+  if ! fsg__shared_cache_put "$text"; then
     echo "  WARNING: cannot write $FSG_SHARED_CACHE; heals may skip the bind-mount check"
     return 0
   fi
@@ -1460,19 +1467,25 @@ EOF
     fsg_probe_dir
     [ "$BM_SHARED" = 0 ] &&
       fsg_doc warn "bind-mount probe dir $BM_DIR is not in Docker Desktop's File Sharing list, so heals skip the bind-mount check: set FSG_PROBE_DIR to a dir in a shared folder, or share one in Docker Desktop (Settings > Resources > File sharing)"
-    # The agent works from install's copy when macOS keeps it from Desktop's file, and
-    # this runs where the live one may be readable, so the two are compared.
-    if [ -z "${FSG_PROBE_DIR:-}" ]; then
-      local want
-      if ! want=$(fsg_shared_dirs_cache_text); then
-        [ "$BM_LIST_SRC" = none ] &&
-          fsg_doc warn "Docker Desktop's File Sharing list cannot be read and no copy was cached at install, so heals probe $BM_DIR and skip the bind-mount check if Docker Desktop does not share it: run install from a terminal, or set FSG_PROBE_DIR"
-      elif [ -f "$FSG_SHARED_CACHE" ]; then
-        [ "$(cat "$FSG_SHARED_CACHE" 2>/dev/null)" = "$want" ] ||
-          fsg_doc warn "the File Sharing list cached at install differs from Docker Desktop's current list, and the agent may only see the cached one (macOS app-data protection): re-run install, or set FSG_PROBE_DIR"
-      elif [ "$want" != '#default' ]; then
-        fsg_doc warn "no copy of Docker Desktop's File Sharing list is cached for the agent, which macOS may keep from reading it, so heals may probe an unshared dir and skip the bind-mount check: re-run install"
+    # The agent works from its copy when macOS keeps it from Desktop's file (and
+    # checks FSG_PROBE_DIR against it too). This runs where the live one may be
+    # readable, so doctor refreshes the copy from it when they differ, or when there
+    # is none and sharing is not the default; a live list it cannot read leaves the
+    # copy as it is. doctor --affected returns before this and writes nothing.
+    local want what
+    if want=$(fsg_shared_dirs_cache_text); then
+      if { [ -f "$FSG_SHARED_CACHE" ] && [ "$(cat "$FSG_SHARED_CACHE" 2>/dev/null)" != "$want" ]; } ||
+         { [ ! -f "$FSG_SHARED_CACHE" ] && [ "$want" != '#default' ]; }; then
+        if [ "$want" = '#default' ]; then what="default sharing"
+        else what=$(printf '%s\n' "$want" | sed 1d | grep -c .); what="$what folder$( [ "$what" = 1 ] || echo s)"; fi
+        if fsg__shared_cache_put "$want"; then
+          fsg_doc ok "refreshed the agent's copy of Docker Desktop's File Sharing list ($what), which macOS may keep it from reading"
+        else
+          fsg_doc warn "cannot write $FSG_SHARED_CACHE, the agent's copy of Docker Desktop's File Sharing list, which is missing or differs from the current list: heals may probe an unshared dir and skip the bind-mount check"
+        fi
       fi
+    elif [ -z "${FSG_PROBE_DIR:-}" ] && [ "$BM_LIST_SRC" = none ]; then
+      fsg_doc warn "Docker Desktop's File Sharing list cannot be read and no copy was cached at install, so heals probe $BM_DIR and skip the bind-mount check if Docker Desktop does not share it: run install from a terminal, or set FSG_PROBE_DIR"
     fi
   fi
   if fsg_drain_hold_active; then
