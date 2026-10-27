@@ -1432,6 +1432,8 @@ fsg_req_run() { # id
     TICK_REQ_RC=$rc
     fsg_req_finish "$id" "$rc" "$(tail -n 1 "$log" 2>/dev/null)" "${HEAL_DIR:-}"
   fi
+  # A heal can outlast the stale limit; the rest of this tick starts fresh.
+  fsg_heartbeat_write running
   unset HEAL_REQ_CHAIN HEAL_REQ_PID HEAL_REQ_LSTART HEAL_REQ_WAITS
 }
 
@@ -1524,7 +1526,10 @@ fsg_tick_check() {
     fi
     return 2
   fi
-  fsg_heal_main emergency "$FSG_DOCKER_VARIANT" "$FSG_CAP_POLICY_EMERGENCY" "$FSG_DRAIN_CAP_S" 0
+  local hrc
+  fsg_heal_main emergency "$FSG_DOCKER_VARIANT" "$FSG_CAP_POLICY_EMERGENCY" "$FSG_DRAIN_CAP_S" 0; hrc=$?
+  fsg_heartbeat_write running
+  return "$hrc"
 }
 
 # --- Docker trial (docs/DOCKER-TRIALS.md) ----------------------------------------------

@@ -612,6 +612,10 @@ fsg_cmd_release() {
 # operator releases a trial hold.
 fsg_drain_end() { # [verified]
   [ "${DRAIN_HELD:-0}" = 1 ] || return 0
+  # In a tick: its heartbeat dates from the tick's start, and only the live drain
+  # keeps a long heal from looking stale (fsg_heal_running). Refreshed before the
+  # drain goes, it covers the rest of the tick.
+  [ -n "${TICK_LEVEL:-}" ] && command -v fsg_heartbeat_write >/dev/null 2>&1 && fsg_heartbeat_write running
   DRAIN_HELD=0
   rm -f "$FSG_DRAIN_DIR/blockers"
   if [ -n "${DRAIN_SAVED:-}" ] && { [ "${1:-}" != verified ] || [ "$DRAIN_SAVED_TRIGGER" = trial ]; } &&

@@ -4648,6 +4648,17 @@ if ! skip_case heartbeat; then
   eq "$(jget "$out" 'd["agent"]["installed"]')" False "not installed"
   eq "$(jget "$out" 'd["agent"]["stale"]')" False "not stale"
   eq "$(cat "$C/err")" "" "no warning"
+
+  t "a long heal leaves a fresh heartbeat for the rest of its tick"
+  # The live drain covers a tick in a heal (fsg_heal_running) only until the drain
+  # ends; the tick's own check comes after it.
+  docker_default; install_fake; mem 3G
+  touch "$FSG_FAKE/probe-heartbeat"
+  bg "$G" run --label long -- sleep 10; sleep 1
+  heal --docker-variant B > "$C/o" 2>&1; eq $? 0 "healed ($(tail -n 1 "$C/o"))"
+  has "$(cat "$FSG_LOG")" "DRAIN end" "the drain ended"
+  a=$(sed -n 's/^probe heartbeat_age=//p' "$FSG_FAKE/calls.log" | tail -n 1)
+  [ -n "$a" ] && [ "$a" -le 5 ] && ok || bad "the tick's check after a heal of 10 s or more sees a heartbeat ${a:-?} s old"
 fi
 
 # ======================================================================== trial
