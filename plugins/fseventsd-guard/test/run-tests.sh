@@ -3483,8 +3483,42 @@ if ! skip_case bind-probe; then
   echo 4242 > "$FSG_FAKE/fsev/pids"; mem 3G; rm -f "$FSG_PREFIX/Library/Logs/fseventsd-guard/last-restart"
   HOME=$C/home heal --docker-variant B > "$C/o" 2>&1; eq $? 0 "healed, the check skipped ($(tail -n 1 "$C/o"))"
   has "$(grep '^bind_mount=' "$(cat "$FSG_STATE_DIR/last-heal-dir")/result.txt")" "bind_mount=skipped the probe dir $FSG_STATE_DIR/mountprobe is not shared with Docker Desktop (mounts denied)" "recorded as skipped"
-  has "$(grep '^bind_mount=' "$(cat "$FSG_STATE_DIR/last-heal-dir")/result.txt")" "the agent could not read Docker Desktop's settings and no cached list exists: run install from a terminal, or set FSG_PROBE_DIR" "the record says why"
+  has "$(grep '^bind_mount=' "$(cat "$FSG_STATE_DIR/last-heal-dir")/result.txt")" "the agent could not read Docker Desktop's settings and no cached list exists: run doctor in a terminal, or set FSG_PROBE_DIR" "the record says why"
   has "$(cat "$FSG_LOG")" "DOCKER File Sharing list unreadable by the agent (macOS app-data protection) and none cached by install or doctor" "logged"
+  readable
+
+  t "a probe dir with ':' in its path is skipped, and runs are not held"
+  mkdir -p "$C/home/a:b" "$C/home/.local/share"
+  sharing "$C/home/a:b" "$C/home/.local/share"
+  eq "$(probe_dir)" "1 $C/home/.local/share/.fseventsd-guard-mountprobe" "a shared folder with ':' is passed over"
+  docker_default; HOME=$C/home install_fake; mem 3G
+  agent_env FSG_PROBE_DIR="$C/home/a:b/p"
+  HOME=$C/home heal --docker-variant B > "$C/o" 2>&1; eq $? 0 "healed, Docker verified ($(tail -n 1 "$C/o"))"
+  r=$(grep '^bind_mount=' "$(cat "$FSG_STATE_DIR/last-heal-dir")/result.txt")
+  has "$r" "bind_mount=skipped the probe dir $C/home/a:b/p has a ':' in its path, which docker run -v cannot mount" "recorded as skipped"
+  has "$r" "set FSG_PROBE_DIR to a dir without one" "says what to do"
+  absent "$FSG_STATE_DIR/drain/pending" "runs are not held"
+  hasnt "$(cat "$FSG_FAKE/calls.log")" "/fsg-probe" "no docker run with that path"
+
+  t "with FSG_PROBE_DIR set, no copy of an unreadable list is not logged as missing"
+  docker_default; mkdir -p "$C/home/Projects/p"
+  sharing "$C/home/Projects"; HOME=$C/home install_fake; mem 3G
+  unreadable; rm -f "$FSG_STATE_DIR/desktop-shared-dirs"
+  agent_env FSG_PROBE_DIR="$C/home/Projects/p"
+  HOME=$C/home heal --docker-variant B > "$C/o" 2>&1; eq $? 0 "healed ($(tail -n 1 "$C/o"))"
+  grep -q '^bind_mount=ok' "$(cat "$FSG_STATE_DIR/last-heal-dir")/result.txt" && ok || bad "verified in FSG_PROBE_DIR"
+  hasnt "$(cat "$FSG_LOG")" "none cached" "the list does not pick the dir, so its absence is not logged"
+  readable
+
+  t "mounts denied in a dir picked from the cached list says the copy may be stale"
+  docker_default; mkdir -p "$C/home/.local/share" "$C/home/Projects"
+  sharing "$C/home/.local/share"; HOME=$C/home install_fake; mem 3G
+  unreadable; cache '#list' "$C/home/Projects"
+  echo "$C/home/.local/share" > "$FSG_FAKE/docker/mounts-denied"
+  HOME=$C/home heal --docker-variant B > "$C/o" 2>&1; eq $? 0 "healed, the check skipped ($(tail -n 1 "$C/o"))"
+  r=$(grep '^bind_mount=' "$(cat "$FSG_STATE_DIR/last-heal-dir")/result.txt")
+  has "$r" "bind_mount=skipped the probe dir $C/home/Projects/.fseventsd-guard-mountprobe is not shared with Docker Desktop (mounts denied)" "skipped"
+  has "$r" "the agent picked it from the File Sharing list cached for it, which may be stale: run doctor in a terminal to refresh it, or set FSG_PROBE_DIR" "names the stale copy and doctor"
   readable
 fi
 

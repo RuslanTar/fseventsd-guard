@@ -327,6 +327,9 @@ case $cmd in
     known=$( { cat "$D/images" 2>/dev/null; awk '{ print $5 }' "$CF"; } | grep -cxF "$img")
     [ "$known" -gt 0 ] || { echo "Unable to find image '$img' locally" >&2; exit 125; }
     host=${vol%:*}
+    # -v is SRC:DST[:MODE], split at every ':', so a host path with one is
+    # refused, and not as "mounts denied" (modelled on the -v syntax).
+    case $host in *:*) echo "docker: Error response from daemon: invalid volume specification: '$vol'." >&2; exit 125 ;; esac
     shared=no
     [ -f "$D/mounts-denied" ] && while IFS= read -r s; do
       [ -n "$s" ] && case $host in "$s"|"$s"/*) shared=yes ;; esac
