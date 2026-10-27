@@ -399,7 +399,7 @@ If the install created `/usr/local/libexec` and it is now empty,
 | `fseventsd runaway ... not healing: Docker not verified` | A runaway while an earlier heal's Docker is still not verified: the agent starts no new heal (a `heal` exits 8) | Get Docker back (`docker desktop status`, `docker ps`), then `fseventsd-guard release`; the agent heals at its next tick. |
 | `fseventsd-guard: agent cannot run` | The agent could not create its lock (disk full): it neither heals nor serves heal requests, and a waiting `heal` ends with exit 10 | Free disk space. |
 | `fseventsd-guard: held runs released` | Docker is healthy again after an incomplete heal | Nothing. |
-| `fseventsd runaway again ... not auto-healing` | Second runaway within 3 hours of the last restart or restart attempt | Heal by hand (`fseventsd-guard heal`) and look for the file-churn source. |
+| `fseventsd runaway again ... not auto-healing` | Second runaway within 3 hours of the last restart or restart attempt. Only one made at 150 MB or more (the helper's floor), or by an emergency heal, counts: a trial's at a healthy footprint does not | Heal by hand (`fseventsd-guard heal`) and look for the file-churn source. |
 | `fseventsd-guard cannot measure fseventsd` | Three checks in a row could not read the daemon; the guard can neither warn nor heal. A check tries a `top` that does not answer within 15 s three times, 5 s apart (a busy Mac), and the reason then gives `ps`'s resident size, a lower bound on the footprint | `fseventsd-guard doctor`, `fseventsd-guard status`. |
 | `fseventsd: delivery stalled` | The probe got no event, but the footprint is below the helper's floor | Manual fix shown in the notification. Report it: it is an open question for the thresholds. |
 
