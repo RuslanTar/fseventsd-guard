@@ -5,7 +5,8 @@
 #
 # heal exit codes:
 #   0 healed                         3 cannot measure fseventsd / not macOS
-#   4 drain cap reached, policy abort
+#   4 drain cap reached, policy abort; or a wave heal below runaway found work
+#     running (nothing was held)
 #   6 nothing to do: the helper would refuse (healthy or rate limited)
 #   7 the restart failed (Docker restored; held runs stay held unless it verified)
 #   8 fseventsd restarted, but the Docker restore or a verification failed; or
@@ -690,7 +691,8 @@ Asks the background agent to heal: it drains Docker-dependent runs, runs the Doc
 step, restarts fseventsd through the root helper, restores Docker, verifies and
 notifies. This waits for the result and prints the heal's progress; stopping the
 wait (Ctrl-C, a timeout) does not stop the heal. --dry-run prints the plan only.
-Exit: 0 healed, 3 cannot measure, 4 drain cap (abort), 6 helper would refuse,
+Exit: 0 healed, 3 cannot measure, 4 drain cap (abort), or a wave heal below
+runaway with work running (nothing held), 6 helper would refuse,
 7 restart failed, 8 Docker restore/verify failed, or refused while an earlier
 heal's Docker is not verified, 9 not installed (or the agent is not loaded or
 older than this checkout), 10 request, drain marker or Docker intent not written,
@@ -775,14 +777,50 @@ fsg_heal_precheck() { # force
   HEAL_VARIANT=$(fsg_docker_effective_variant "$HEAL_VARIANT_REQ")
 }
 
+# A wave heal below runaway heals only when nothing is running (owner, 2026-10-27).
+# At warn file watching is degraded, not broken, and a runaway still heals (the
+# agent's emergency tier; a wave heal at runaway drains with its full cap), so it
+# must not hold every session's leased runs for up to the drain cap and then give
+# up. 0 for such a heal (it sets HEAL_WAVE_IDLE=1 and S_LEVEL from the precheck's
+# measurement, probe and CPU streak); its caller then drains with a cap of 0 and
+# policy abort, and returns 4 at once, with no drain, notice or back-off, when
+# fsg__heal_idle finds work.
+fsg__heal_wave_idle_only() {
+  [ "$HEAL_TRIGGER" = wave ] && [ "${H_MRC:-3}" -eq 0 ] || return 1
+  fsg_classify 0
+  [ "$S_LEVEL" != runaway ] || return 1
+  HEAL_WAVE_IDLE=1
+}
+
+# 0 when nothing is live that a drain would wait for: no lease or unleased work (the
+# requester's own leases left out while it waits, as in the drain), and engine work
+# listed. Interactive sessions do not count. Sets HEAL_LIVE (the work lines),
+# HEAL_LIVE_N and HEAL_LIVE_UNKNOWN (1 when the engine did not list its work).
+fsg__heal_idle() {
+  local rc
+  HEAL_LIVE=$(fsg_live_work 0); rc=$?
+  HEAL_LIVE=$(printf '%s\n' "$HEAL_LIVE" | awk -F'\t' 'NF >= 4 && $1 !~ /^interactive/')
+  HEAL_LIVE_N=$(printf '%s\n' "$HEAL_LIVE" | sed '/^$/d' | wc -l | tr -d ' ')
+  HEAL_LIVE_UNKNOWN=0; [ $rc -eq 2 ] && HEAL_LIVE_UNKNOWN=1
+  [ "$HEAL_LIVE_N" = 0 ] && [ "$HEAL_LIVE_UNKNOWN" = 0 ]
+}
+fsg__heal_live_text() {
+  local t=""
+  [ "$HEAL_LIVE_N" -gt 0 ] && t=$(fsg_work_list "$HEAL_LIVE" 3)
+  [ "$HEAL_LIVE_UNKNOWN" = 1 ] && t="${t:+$t; }$(fsg_drain_unknown_what), unknown (the engine did not list them)"
+  printf '%s\n' "$t"
+}
+
 # heal --dry-run: what a request would do right now. Read-only, in the caller.
 fsg_heal_dry_run() { # trigger variant policy cap force
-  local policy=$3 cap=$4 work wrc held left
+  local policy=$3 cap=$4 work wrc held left idle=0
   HEAL_TRIGGER=$1; HEAL_VARIANT_REQ=$2
   fsg_heal_precheck "$5"
+  if fsg__heal_wave_idle_only; then idle=1; cap=0; policy=abort; fi
   work=$(fsg_live_work 0); wrc=$?
   held=$(printf '%s\n' "$work" | awk -F'\t' 'NF >= 4 && $1 !~ /^interactive/' | wc -l | tr -d ' ')
   echo "fseventsd-guard heal --dry-run (trigger $HEAL_TRIGGER, docker variant $HEAL_VARIANT_REQ -> $HEAL_VARIANT, drain cap ${cap}s, unleased cap $(fsg_unleased_cap "$cap")s, at the cap: $policy)"
+  [ $idle = 1 ] && echo "at $S_LEVEL a wave heal runs only when nothing is running (drain cap 0)"
   if [ $H_MRC -eq 0 ]; then
     echo "now: fseventsd pid $M_PID, footprint $M_MB MB, probe ${P_RESULT:-skipped}"
   else
@@ -827,6 +865,10 @@ fsg_heal_dry_run() { # trigger variant policy cap force
   if [ -n "$H_REFUSE" ]; then echo "would stop before step 2: $H_REFUSE (exit 6)"; return 6; fi
   left=$(fsg_wave_backoff_left)
   if [ -n "$left" ]; then echo "would stop before step 2: wave back-off, $(fsg_dur "$left") left (exit 11)"; return 11; fi
+  if [ $idle = 1 ] && { [ "$held" -gt 0 ] || [ $wrc -eq 2 ]; }; then
+    echo "would stop before step 2: at $S_LEVEL a wave heal runs only when nothing is running ($held item(s) now$( [ $wrc -eq 2 ] && echo ', engine work unknown')) (exit 4)"
+    return 4
+  fi
   return 0
 }
 
@@ -835,7 +877,7 @@ fsg_heal_dry_run() { # trigger variant policy cap force
 # Docker if it is stopped part way (fsg_tick_cleanup).
 fsg_heal_main() { # trigger variant policy cap force
   local policy=$3 cap=$4 t0 backoff hrc
-  HEAL_TRIGGER=$1; HEAL_VARIANT_REQ=$2; HEAL_DIR=
+  HEAL_TRIGGER=$1; HEAL_VARIANT_REQ=$2; HEAL_DIR=; HEAL_WAVE_IDLE=0
   HEAL_DK_PRE_DONE=0; HEAL_DK_POST_DONE=0; HEAL_DK_VERIFIED=0; HEAL_DK_HELD=0; HEAL_DK_RESTORE=0
   t0=$(fsg_now)
   fsg_heal_precheck "$5"
@@ -868,6 +910,14 @@ fsg_heal_main() { # trigger variant policy cap force
     fsg_log "HEAL wave back-off: ${backoff}s left after a wave heal gave up at the drain cap"
     fsg_say "heal: backing off: a recent wave heal gave up at the drain cap; the next wave heal may drain in $(fsg_dur "$backoff") (FSG_WAVE_RETRY_MIN=$FSG_WAVE_RETRY_MIN). The agent still heals a runaway, and a manual heal is not affected."
     return 11
+  fi
+  if fsg__heal_wave_idle_only; then
+    cap=0; policy=abort
+    if ! fsg__heal_idle; then
+      fsg_log "HEAL skipped trigger=wave level=$S_LEVEL reason=\"$HEAL_LIVE_N item(s) running$( [ "$HEAL_LIVE_UNKNOWN" = 1 ] && echo ', engine work unknown')\""
+      fsg_say "heal: not started: at $S_LEVEL a wave heal runs only when nothing is running; running now: $(fsg__heal_live_text). Nothing was held, stopped or restarted. A runaway still heals with the full drain cap (the agent's own emergency heal, or a wave heal at runaway)."
+      return 4
+    fi
   fi
   fsg_heal_run "$t0" "$H_OLD_PID" "$cap" "$policy"; hrc=$?
   fsg_heal_cleanup
@@ -994,7 +1044,8 @@ fsg_heal_run() { # t0 old_pid cap policy
   [ -n "$DRAIN_LEFT" ] && left=" Interactive sessions left alone: $(fsg_work_list "$DRAIN_LEFT" 2)."
   if [ $drc -eq 4 ]; then
     fsg_heal_record aborted-at-cap $(( $(fsg_now) - t0 ))
-    [ "$HEAL_TRIGGER" = wave ] && fsg_now > "$FSG_STATE_DIR/wave-gave-up"
+    # A wave heal below runaway held nothing for long (work started as it began).
+    [ "$HEAL_TRIGGER" = wave ] && [ "${HEAL_WAVE_IDLE:-0}" = 0 ] && fsg_now > "$FSG_STATE_DIR/wave-gave-up"
     [ "$cut_n" -gt 0 ] && cut_txt="$cut_n item(s) still running after $(fsg_dur "$DRAIN_CAP_HIT"): $(printf '%s\n' "$DRAIN_CUT" | head -n 3 | tr '\n' ';' | sed 's/;$//; s/;/; /g'). "
     fsg_notify "fseventsd: heal given up" "drain cap reached" \
       "$cut_txt$(fsg_drain_unknown_text | sed 's/$/ /')Nothing was restarted. Next: run fseventsd-guard heal again when runs are done, or: fseventsd-guard heal --on-cap proceed"

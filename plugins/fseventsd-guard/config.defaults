@@ -155,7 +155,8 @@ FSG_CAP_POLICY_EMERGENCY=proceed
 FSG_CAP_POLICY_MANUAL=abort
 # After a wave heal gives up at the cap, further wave heals (from any session)
 # return 11 without draining for this many minutes (0 = no back-off). Manual and
-# emergency heals are not affected.
+# emergency heals are not affected. A wave heal below runaway heals only when
+# nothing is running (a drain cap of 0, else exit 4 at once) and never starts it.
 FSG_WAVE_RETRY_MIN=60
 # Emergency heals stop waiting early when the footprint passes this (0 = never).
 # From the act threshold, growth faster than 3 GB/h reaches it within the drain cap.

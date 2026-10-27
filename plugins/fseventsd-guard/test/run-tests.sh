@@ -2124,7 +2124,8 @@ EOS
   hasnt "$(cat "$FSG_LOG")" "DRAIN waiting" "nothing to wait for"
 
   t "a leased requester killed mid-wait: its workflow's lease then holds the drain"
-  docker_default; install_fake; mem 600M
+  # At runaway, where a wave heal drains; the agent's own emergency heal kept out.
+  docker_default; install_fake; mem 3G; date +%s > "$FSG_STATE_DIR/last-restart"
   bg "$G" run --label other -- sleep 60; op=$LAST_BG; sleep 1
   # The workflow goes on after its heal call, as a wave started on a timeout would.
   bg "$G" run --label workflow -- /bin/bash -c '"$1" heal --trigger wave --drain-cap 8 --docker-variant B > "$2/w.out" 2>&1; exec sleep 60' _ "$G" "$C"; wp=$LAST_BG
@@ -2145,7 +2146,7 @@ EOS
   killbg "$wp"
 
   t "a leased requester that does not wait exempts nothing"
-  docker_default; install_fake; mem 600M
+  docker_default; install_fake; mem 3G; date +%s > "$FSG_STATE_DIR/last-restart"
   bg "$G" run --label workflow -- /bin/bash -c 'id=$("$1" heal --trigger wave --no-wait --drain-cap 5 --docker-variant B 2> "$2/w.err"); echo "$id" > "$2/id"; exec sleep 60' _ "$G" "$C"; wp=$LAST_BG
   waitfor 20 test -s "$C/id" || bad "queued"
   id=$(cat "$C/id")
@@ -2954,8 +2955,10 @@ fi
 
 # ======================================================================== wave-backoff
 if ! skip_case wave-backoff; then
+  # At runaway a wave heal drains with its cap. A recent restart stamp keeps the
+  # agent's own emergency heal out of these cases: inside its interval it notifies only.
   t "a wave heal that gave up at the cap does not start another drain at the next wave"
-  docker_default; install_fake; mem 600M
+  docker_default; install_fake; mem 3G; date +%s > "$FSG_STATE_DIR/last-restart"
   bg "$G" run --label long -- sleep 60; sleep 1
   heal --trigger wave --drain-cap 2 >/dev/null 2>&1; eq $? 4 "first wave heal gives up at the cap"
   s=$(date +%s); heal --trigger wave --drain-cap 2 > "$C/o" 2>&1; eq $? 11 "the next wave heal backs off"
@@ -2966,7 +2969,7 @@ if ! skip_case wave-backoff; then
   killbg "$LAST_BG"
 
   t "a wave caller stopped while waiting leaves the heal draining and starts no back-off"
-  docker_default; install_fake; mem 600M
+  docker_default; install_fake; mem 3G; date +%s > "$FSG_STATE_DIR/last-restart"
   bg "$G" run --label long -- sleep 60; lr=$LAST_BG; sleep 1
   for sig in TERM KILL; do
     "$G" heal --trigger wave --drain-cap 30 > "$C/w.out" 2>&1 & hp=$!; BG_PIDS="$BG_PIDS $hp"
@@ -2983,6 +2986,35 @@ if ! skip_case wave-backoff; then
   id=$(basename "$(ls -t "$FSG_STATE_DIR"/requests/*.run | head -n 1)" .run)
   killbg "$lr"
   "$G" heal --result "$id" >/dev/null 2>&1; eq $? 0 "the KILLed caller's heal healed"
+
+  t "below runaway a wave heal with work running ends at once: no drain, no notice, no back-off"
+  docker_default; install_fake; mem 600M
+  bg "$G" run --label long -- sleep 60; sleep 1
+  : > "$FSG_FAKE/calls.log"; : > "$FSG_FAKE/notifications.log"
+  out=$("$G" heal --dry-run --trigger wave); eq $? 4 "dry-run: would stop"
+  has "$out" "would stop before step 2: at warn a wave heal runs only when nothing is running (1 item(s) now) (exit 4)" "dry-run says why"
+  s=$(date +%s); heal --trigger wave > "$C/o" 2>&1; eq $? 4 "work running at warn: 4"
+  [ $(( $(date +%s) - s )) -lt 10 ] && ok || bad "at once, not after the 20 s cap"
+  has "$(cat "$C/o")" "at warn a wave heal runs only when nothing is running; running now: long (pid" "the caller is told why and what runs"
+  has "$(cat "$FSG_LOG")" "HEAL skipped trigger=wave level=warn" "logged"
+  hasnt "$(cat "$FSG_LOG")" "DRAIN begin" "no drain"
+  absent "$FSG_STATE_DIR/drain/pending" "no drain marker"
+  hasnt "$(cat "$FSG_FAKE/notifications.log")" "healing" "no healing notice"
+  hasnt "$(cat "$FSG_FAKE/notifications.log")" "heal given up" "no given-up notice"
+  absent "$FSG_STATE_DIR/wave-gave-up" "no back-off"
+  heal --trigger wave --on-cap proceed > "$C/o" 2>&1; eq $? 4 "--on-cap proceed does not cut it either"
+  hasnt "$(cat "$FSG_FAKE/calls.log")" "sudo -n /" "nothing restarted"
+  # A runaway wave heal right after is not backed off: it drains with its cap.
+  mem 3G; date +%s > "$FSG_STATE_DIR/last-restart"
+  heal --trigger wave --drain-cap 2 > "$C/o" 2>&1; eq $? 4 "a runaway wave heal drains to its cap"
+  has "$(cat "$FSG_LOG")" "DRAIN begin trigger=wave cap_s=2" "with the caller's cap"
+  killbg "$LAST_BG"
+
+  t "below runaway a wave heal with nothing running heals"
+  docker_default; install_fake; mem 600M; : > "$FSG_FAKE/calls.log"
+  heal --trigger wave > "$C/o" 2>&1; eq $? 0 "healed at warn ($(tail -n 1 "$C/o"))"
+  has "$(cat "$FSG_LOG")" "DRAIN begin trigger=wave cap_s=0" "with a drain cap of 0"
+  has "$(cat "$FSG_FAKE/calls.log")" "sudo -n /" "restarted"
 fi
 
 # ======================================================================== heal-hold
