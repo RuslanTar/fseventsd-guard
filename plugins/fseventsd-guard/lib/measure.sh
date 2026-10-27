@@ -425,6 +425,7 @@ fsg_cmd_status() {
     echo "agent: $A_TEXT"
     fsg_status_install_text
     echo "macOS ${FSG_OS_VER:-?} (${FSG_OS_BUILD:-?}): affected=$FSG_AFF - $FSG_AFF_WHY"
+    [ -n "$FSG_AFF_NOTE" ] && echo "$FSG_AFF_NOTE"
   fi
   return "$S_EXIT"
 }

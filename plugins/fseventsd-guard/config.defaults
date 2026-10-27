@@ -209,6 +209,10 @@ FSG_AFFECTED_MIN=15.6.1
 FSG_AFFECTED_FIXED=
 # Force the answer (yes|no); empty = use the range.
 FSG_AFFECTED=
+# The newest macOS release the range was last checked against (the newest row in
+# docs/DESIGN.md "Affected versions"). On a newer one that the range counts as
+# affected, doctor, doctor --affected and status add an info line (exit codes stay).
+FSG_AFFECTED_REVIEWED=27.0.1
 
 # --- Notifications ------------------------------------------------------------------
 FSG_NOTIFY=1

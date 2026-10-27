@@ -1277,6 +1277,7 @@ fsg_cmd_doctor() {
   fsg_affected
   if [ $affected_only = 1 ]; then
     echo "affected: $FSG_AFF - $FSG_AFF_WHY"
+    [ -n "$FSG_AFF_NOTE" ] && echo "$FSG_AFF_NOTE"
     case $FSG_AFF in yes) return 0 ;; no) return 1 ;; *) return 3 ;; esac
   fi
   DOC_WARN=0; DOC_FAIL=0
@@ -1285,6 +1286,7 @@ fsg_cmd_doctor() {
   echo "fseventsd-guard doctor (version $FSG_VERSION)"
   fsg_where
   fsg_doc info "macOS ${FSG_OS_VER:-?} (${FSG_OS_BUILD:-?}): affected=$FSG_AFF - $FSG_AFF_WHY"
+  [ -n "$FSG_AFF_NOTE" ] && fsg_doc info "${FSG_AFF_NOTE#info: }"
   if [ "$FSG_AFF" != yes ] && [ -f "$FSG_HELPER_PATH" ]; then
     fsg_doc info "this version is outside the affected range (docs/DESIGN.md §9). Keep the guard if fseventsd still runs away here"
   fi

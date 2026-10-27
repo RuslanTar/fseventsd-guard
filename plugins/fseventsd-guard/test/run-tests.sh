@@ -147,7 +147,7 @@ t() { # start a test: t NAME
     FSG_DOCKER_TIMEOUT_S=10 FSG_DOCKER_QUERY_TIMEOUT_S=2 FSG_PROBE_TIMEOUT_S=2 FSG_RUN_POLL_S=1 \
     FSG_DETECT_COMMANDS=fsgtestrspec FSG_DETECT_DOCKER_CLI=0 FSG_DETECT_DOCKER_EXECS=1 FSG_DETECT_DOCKER_CONTAINERS=1 \
     FSG_DESKTOP_SOCKET="$FSG_DESKTOP_SOCKET" FSG_DESKTOP_BACKEND_SOCKET="$FSG_DESKTOP_BACKEND_SOCKET" FSG_DESKTOP_SETTINGS="$FSG_DESKTOP_SETTINGS"
-  unset FSG_AFFECTED FSG_AFFECTED_MIN FSG_AFFECTED_FIXED FSG_LEASE_FILE FSG_PROBE_BIN FSG_PROBE_DIR 2>/dev/null
+  unset FSG_AFFECTED FSG_AFFECTED_MIN FSG_AFFECTED_FIXED FSG_AFFECTED_REVIEWED FSG_LEASE_FILE FSG_PROBE_BIN FSG_PROBE_DIR 2>/dev/null
   echo 4242 > "$FSG_FAKE/fsev/pids"
   echo 5000K > "$FSG_FAKE/fsev/4242.mem"
   : > "$FSG_FAKE/calls.log"
@@ -357,6 +357,34 @@ if ! skip_case status; then
   echo 28.0 > "$FSG_FAKE/sw_vers"
   out=$("$G" status --json); eq "$(jget "$out" 'd["os"]["version"]')" 28.0 "version in JSON"
   eq "$(jget "$out" 'd["os"]["affected"]')" True "a newer major line without a fix is affected"
+
+  t "affected versions: a release newer than the one the range was checked against gets an info line"
+  newer="info: macOS 27.1 is newer than 27.0.1, the newest release the affected range was checked against: it counts as affected until a fix is recorded; report it if Apple names an fseventsd fix"
+  echo 27.1 > "$FSG_FAKE/sw_vers"
+  out=$("$G" doctor --affected); eq $? 0 "doctor --affected: still affected"
+  has "$out" "$newer" "doctor --affected"
+  eq "$(printf '%s\n' "$out" | grep -c 'newer than')" 1 "one line"
+  out=$("$G" status); eq $? 0 "status: exit unchanged"; has "$out" "$newer" "status"
+  out=$("$G" status --json); json_ok "$out"; hasnt "$out" "newer than" "status --json stays JSON"
+  docker_default; install_fake --no-agent
+  "$G" doctor --prefix "$FSG_PREFIX" > "$C/doc.new" 2>&1; rc_new=$?
+  has "$(cat "$C/doc.new")" "info  ${newer#info: }" "doctor: an info line"
+  hasnt "$(cat "$C/doc.new")" "WARN  macOS" "not a warning"
+  echo 27.0.1 > "$FSG_FAKE/sw_vers"
+  "$G" doctor --prefix "$FSG_PREFIX" > "$C/doc.old" 2>&1; eq $rc_new $? "doctor: exit unchanged"
+  hasnt "$(cat "$C/doc.old")" "newer than" "doctor: none on the reviewed release"
+  hasnt "$("$G" doctor --affected)" "newer than" "doctor --affected: none on the reviewed release"
+  hasnt "$("$G" status)" "newer than" "status: none on the reviewed release"
+  echo 26.7.1 > "$FSG_FAKE/sw_vers"; hasnt "$("$G" status)" "newer than" "none on an older release"
+  echo 27.1 > "$FSG_FAKE/sw_vers"
+  FSG_AFFECTED_REVIEWED=27.1 "$G" doctor --affected > "$C/o"; hasnt "$(cat "$C/o")" "newer than" "none once 27.1 is reviewed"
+  FSG_AFFECTED_FIXED=27.1 "$G" doctor --affected > "$C/o"; eq $? 1 "fixed"; hasnt "$(cat "$C/o")" "newer than" "none on a fixed release"
+  FSG_AFFECTED=yes "$G" doctor --affected > "$C/o"; hasnt "$(cat "$C/o")" "newer than" "none when forced"
+  FSG_AFFECTED_REVIEWED= "$G" doctor --affected > "$C/o"; hasnt "$(cat "$C/o")" "newer than" "none without a reviewed release"
+  # The knob names the newest release in DESIGN §9's table: both change in one PR.
+  newest=$(awk '/^## 9\./ { f = 1; next } /^## / { f = 0 } f && /^\| [0-9]+\.[0-9]/ { print $2 }' "$GUARD_HOME/docs/DESIGN.md" |
+    sort -t. -k1,1n -k2,2n -k3,3n | tail -n 1)
+  eq "$(sed -n 's/^FSG_AFFECTED_REVIEWED=//p' "$GUARD_HOME/config.defaults")" "${newest:-none}" "FSG_AFFECTED_REVIEWED is the newest release in DESIGN §9"
 fi
 
 # ======================================================================== config-check
