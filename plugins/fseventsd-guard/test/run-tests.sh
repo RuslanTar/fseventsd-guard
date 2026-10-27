@@ -1449,6 +1449,7 @@ if ! skip_case install-heal; then
   printf '\texit timeout = 60\n\tlast exit code = 0\n' > "$FSG_FAKE/launchctl-print"
   out=$("$G" doctor --prefix "$FSG_PREFIX" 2>&1); rc=$?
   has "$out" "info  launchctl: launchd gives the agent 60 s from SIGTERM to SIGKILL, not the plist's ExitTimeOut of $want s" "the cap"
+  has "$out" "the next tick, once the agent is loaded again (at login, or with launchctl bootstrap), restores Docker; leased runs hold behind the Docker intent meanwhile, for at most FSG_FAILED_HOLD_S" "a booted-out agent ticks again only once loaded"
   eq $rc 0 "info only"
   printf '\texit timeout = %s\n\tlast exit code = 0\n' "$want" > "$FSG_FAKE/launchctl-print"
   hasnt "$("$G" doctor --prefix "$FSG_PREFIX" 2>&1)" "from SIGTERM to SIGKILL" "nothing when launchd honours it"
@@ -3427,6 +3428,8 @@ if ! skip_case bind-probe; then
   install_fake; eq $? 0 "installs anyway"
   eq "$(cached)" "#default" "an unreadable list leaves the cache as it was"
   has "$(cat "$C/install.out")" "cannot read Docker Desktop's File Sharing list" "install warns"
+  has "$(cat "$C/install.out")" "let this terminal app access other apps' data (macOS asks, or System Settings > Privacy & Security), then run doctor; or set FSG_PROBE_DIR" "what to do from this terminal"
+  hasnt "$(cat "$C/install.out")" "run install from a terminal" "not the command already running in one"
   readable
 
   t "doctor refreshes the agent's cached File Sharing list when it is missing or stale"
@@ -3457,7 +3460,9 @@ if ! skip_case bind-probe; then
   hasnt "$(cat "$C/doc.out")" "File Sharing list" "unreadable with a cache: silent"
   rm -f "$FSG_STATE_DIR/desktop-shared-dirs"
   "$G" doctor --prefix "$FSG_PREFIX" > "$C/doc.out" 2>/dev/null
-  has "$(cat "$C/doc.out")" "Docker Desktop's File Sharing list cannot be read and no copy was cached at install" "warned: unreadable, nothing cached"
+  has "$(cat "$C/doc.out")" "Docker Desktop's File Sharing list cannot be read and no copy is cached for the agent" "warned: unreadable, nothing cached"
+  has "$(cat "$C/doc.out")" "let this terminal app access other apps' data (macOS asks, or System Settings > Privacy & Security), then run doctor again; or set FSG_PROBE_DIR" "what to do from this terminal"
+  hasnt "$(cat "$C/doc.out")" "run install from a terminal" "not install, nor a terminal it already runs in"
   absent "$FSG_STATE_DIR/desktop-shared-dirs" "nothing written"
   readable
   rm -f "$FSG_DESKTOP_SETTINGS"

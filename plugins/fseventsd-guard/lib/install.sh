@@ -525,7 +525,7 @@ fsg__shared_cache_put() { # text
 fsg_shared_dirs_cache_write() {
   local text n
   if ! text=$(fsg_shared_dirs_cache_text); then
-    echo "  WARNING: cannot read Docker Desktop's File Sharing list from here, so nothing new is cached for the agent; heals may skip the bind-mount check: run install from a terminal, or set FSG_PROBE_DIR"
+    echo "  WARNING: cannot read Docker Desktop's File Sharing list from here (macOS app-data protection refuses this terminal too), so nothing new is cached for the agent; heals may skip the bind-mount check: let this terminal app access other apps' data (macOS asks, or System Settings > Privacy & Security), then run doctor; or set FSG_PROBE_DIR"
     return 0
   fi
   if ! fsg__shared_cache_put "$text"; then
@@ -1266,7 +1266,7 @@ fsg_doctor_exit_timeout() { # launchctl-print-output
   got=$(printf '%s\n' "$1" | sed -n 's/^[[:space:]]*exit timeout = \([0-9][0-9]*\).*/\1/p' | head -n 1)
   want=$(plutil -extract ExitTimeOut raw -o - "$FSG_PLIST" 2>/dev/null)
   fsg_is_uint "$got" && fsg_is_uint "$want" && [ "$got" -lt "$want" ] || return 0
-  fsg_doc info "launchctl: launchd gives the agent $got s from SIGTERM to SIGKILL, not the plist's ExitTimeOut of $want s (launchd caps it), so a heal stopped part way (logout, launchctl bootout) can be killed in its Docker restore; its Docker intent stays, and the next tick restores Docker (docs/DESIGN.md §5.5)"
+  fsg_doc info "launchctl: launchd gives the agent $got s from SIGTERM to SIGKILL, not the plist's ExitTimeOut of $want s (launchd caps it), so a heal stopped part way (logout, launchctl bootout) can be killed in its Docker restore; its Docker intent stays, and the next tick, once the agent is loaded again (at login, or with launchctl bootstrap), restores Docker; leased runs hold behind the Docker intent meanwhile, for at most FSG_FAILED_HOLD_S (docs/DESIGN.md §5.5)"
 }
 
 fsg_cmd_doctor() {
@@ -1490,7 +1490,7 @@ EOF
         fi
       fi
     elif [ -z "${FSG_PROBE_DIR:-}" ] && [ "$BM_LIST_SRC" = none ]; then
-      fsg_doc warn "Docker Desktop's File Sharing list cannot be read and no copy was cached at install, so heals probe $BM_DIR and skip the bind-mount check if Docker Desktop does not share it: run install from a terminal, or set FSG_PROBE_DIR"
+      fsg_doc warn "Docker Desktop's File Sharing list cannot be read and no copy is cached for the agent, so heals probe $BM_DIR and skip the bind-mount check if Docker Desktop does not share it: let this terminal app access other apps' data (macOS asks, or System Settings > Privacy & Security), then run doctor again; or set FSG_PROBE_DIR"
     fi
   fi
   if fsg_drain_hold_active; then
