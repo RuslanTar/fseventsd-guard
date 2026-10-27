@@ -139,8 +139,9 @@ Say this out loud before you heal by hand; the notifications repeat it.
   Spotlight re-indexes changed areas, IDEs (RubyMine, VS Code) rescan the project,
   Docker Desktop's file sharing resyncs, file watchers restart.
 - **Time Machine probably runs a slower, deeper scan** on its next backup, because
-  it uses the event history to find changes. This is an inference, not measured
-  yet. Watch the next backup after a heal and report it.
+  it uses the event history to find changes. This is an inference, not measured:
+  Time Machine is not set up on the Mac the guard was tested on ("Known
+  limitations"). Watch the next backup after a heal and report it.
 - Docker: depending on the variant, containers are stopped and started (A), or
   Docker Desktop quits and starts again (B) or restarts (C). One-off containers
   (`docker compose run`) are stopped but never started again, since that would run
@@ -589,6 +590,10 @@ None of them lets a non-root user gain root.
   would need a probe that root runs, and the only one is a binary you build, which
   root never runs. The stalls below the floor seen so far had cleared by the heal's
   own precheck. Kept that way on purpose (owner, 2026-10-27).
+- **Rescans after a restart are not measured.** A restart erases fseventsd's event
+  history, so the clients that read it (Time Machine, Spotlight) may scan more
+  deeply afterwards ("What a restart costs"). Not measured: Time Machine is not set
+  up on the Mac the guard was tested on (owner, 2026-10-27).
 - **An agent killed outright mid-heal.** A caller cannot stop a heal, but the
   agent's tick can still be killed (`kill -9`, or launchd's SIGKILL at the end of
   its exit time, above). That runs no cleanup: Docker stays as the heal left it

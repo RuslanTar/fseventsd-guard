@@ -222,7 +222,8 @@ $G trial --summary
 Optional: after the first heal, watch the next Time Machine backup. If
 it takes clearly longer than usual or logs a deep scan
 (`log show --last 3h --predicate 'subsystem == "com.apple.TimeMachine"' | grep -iE 'deep|fsevents|full'`),
-the restart cost noted in the README is confirmed.
+the restart cost noted in the README is confirmed. Not checked yet: Time Machine is
+not set up on the Mac the guard was tested on (README "Known limitations").
 
 ### Recorded results
 

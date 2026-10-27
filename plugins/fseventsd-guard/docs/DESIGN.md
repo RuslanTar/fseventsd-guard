@@ -23,6 +23,7 @@ decision from an accident. The user-facing summary is `../README.md`.
 | A wave heal below runaway heals only when nothing is running; at runaway it keeps the full drain cap | owner, 2026-10-27 (§4, §12 item 7) |
 | The public repo's maintainer records a fix only on evidence; `doctor` and `status` note a release newer than the last one checked | owner, 2026-10-27 (§9) |
 | A restart of fseventsd the guard did not make is logged only (`EXTERNAL_RESTART`; `status` shows the last one) | owner, 2026-10-27 (§5.3) |
+| The deeper rescans a restart may cause (Time Machine, Spotlight) stay a documented, unmeasured cost | owner, 2026-10-27 (§12 item 5) |
 
 ## 2. Parts and where they live
 
@@ -1172,7 +1173,12 @@ machine measured 50-200 events/s normally and 2,117-5,715 on flood days
    below the floor had cleared by the heal's own precheck. Revisit only if the log
    shows a below-floor stall that persists (`HEAL skipped ... delivery is stalled but
    the footprint`).
-5. Whether Time Machine really runs a deeper scan after a restart.
+5. Whether Time Machine really runs a deeper scan after a restart. Not measured:
+   Time Machine is not set up on the Mac the guard was tested on. The owner's
+   ruling (2026-10-27) is to state it as a cost: README "Known limitations" says a
+   restart may make the clients of the event history (Time Machine, Spotlight)
+   rescan more deeply, and `DOCKER-TRIALS.md` §3 has the check for a Mac that
+   runs Time Machine.
 6. Which runners to integrate first (see `WORKFLOW-INTEGRATION.md`). Until then the
    fallback detector carries the drain.
 7. Should a **warn** (status 1) drain at all at a wave boundary? Settled (owner,
