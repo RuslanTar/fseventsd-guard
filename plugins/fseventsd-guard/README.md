@@ -51,7 +51,7 @@ you at each step.
 | `fseventsd-guard run -- CMD` | you | Runs a Docker-dependent command under a lease, so a heal waits for it and it waits for a heal. |
 | root helper `/usr/local/libexec/fseventsd-guard-restart` | root, via one sudoers rule, no arguments | Re-checks for itself that the target is the real fseventsd, that it is over the floor and not rate limited, saves a small evidence record, then sends SIGTERM (SIGKILL if the same daemon still runs 10 s later). launchd respawns the daemon at once. |
 | launchd agent `io.github.ruslantar.fseventsd-guard` | you | The only process that heals. Every 5 minutes, and at once when `heal` or `trial` asks: runs the queued heal requests in order; warns at 256 MB (notification only); at 1 GB, a stalled probe, or 256 MB with fseventsd using half a core or more for 3 checks in a row, an emergency heal at most once per 3 hours. |
-| `install` / `uninstall` / `doctor` | you, one sudo prompt | Sets everything up, removes every trace, checks every piece. |
+| `install` / `uninstall` / `doctor` | you, one sudo prompt | Sets everything up, removes every trace, checks every piece (and refreshes the agent's copy of Docker Desktop's File Sharing list). |
 | `claude-hook prompt\|bash` (run by the Claude Code plugin's `hooks/fseventsd-guard-hook.sh`) | you, from Claude Code, macOS only | Not installed: suggests installing, with fseventsd's footprint. Installed: warns when the agent stopped ticking, and tells Claude sessions when a heal stops Docker ("Claude Code hooks" below). |
 
 Two tiers act:
@@ -119,8 +119,9 @@ Desktop's File Sharing list: the guard picks one there (or set `FSG_PROBE_DIR`),
 and a probe Docker refuses ("Mounts denied") is reported as skipped, not as a
 broken Docker. `doctor` warns when the probe dir is not shared. macOS can keep the
 launchd agent from reading Docker Desktop's settings while a terminal reads them
-(app-data protection), so `install` caches the list for the agent: re-run
-`install` after you change File Sharing (`doctor` warns when the copy is stale).
+(app-data protection), so `install` caches the list for the agent: run `doctor`
+from a terminal after you change File Sharing, and it refreshes that copy (the
+one file `doctor` writes).
 
 The `healing` notification and `status` name what the drain waits for (command,
 pid, age). At a cap a manual or pre-run (`--trigger wave`) heal gives up and tells you what was
@@ -516,12 +517,13 @@ None of them lets a non-root user gain root.
 - **Stale Docker Desktop sockets.** A Docker Desktop that crashed and left its
   socket files behind is seen as stopped only through its status; otherwise B's
   stop wait runs out (logged; the heal goes on). Accepted.
-- **The agent's File Sharing list is install's copy.** Where macOS app-data
-  protection refuses the agent Docker Desktop's settings (seen on 2026-10-25), the
-  bind-mount probe picks its dir from the list `install` cached. Change File Sharing
-  later and the agent works from the old list until `install` runs again; `doctor`
-  reports the difference. A wrong pick only makes the check skip, never fail. With
-  no copy (install could not read the list either), set `FSG_PROBE_DIR`.
+- **The agent's File Sharing list is a copy.** Where macOS app-data protection
+  refuses the agent Docker Desktop's settings (seen on 2026-10-25), the bind-mount
+  probe picks its dir from the list `install` or `doctor` cached. Change File
+  Sharing later and the agent works from the old list until you run `doctor` (or
+  `install`) in a terminal, which refreshes the copy. A wrong pick only makes the
+  check skip, never fail. With no copy (the terminal could not read the list
+  either), set `FSG_PROBE_DIR`.
 - **PID reuse between the re-check and the kill.** Tens of milliseconds; macOS
   hands out pids in sequence, so reuse there is not practical, and a respawn in
   that window makes `kill` fail with ESRCH (exit 71). Accepted.

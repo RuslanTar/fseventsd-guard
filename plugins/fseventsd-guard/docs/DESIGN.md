@@ -924,15 +924,20 @@ one was a trial's.
   reads the file. Seen live on 2026-10-25: the heal probed the state dir, which
   Docker Desktop did not share, and skipped the check, while `doctor` in the
   terminal picked a shared dir. A refused open (anything but "No such file or
-  directory") therefore counts as unknown, not as default sharing. `install`, which
-  runs in a terminal, writes the list to `desktop-shared-dirs` in the state dir
-  (`#list` and the paths, or `#default`; written to a temp file, then renamed), and
-  the agent uses that copy when the live file is refused. With neither, the state
+  directory") therefore counts as unknown, not as default sharing. `install` and
+  `doctor`, which run in a terminal, write the list to `desktop-shared-dirs` in the
+  state dir (`#list` and the paths, or `#default`; written to a temp file, then
+  renamed), and the agent uses that copy when the live file is refused (and checks
+  `FSG_PROBE_DIR` against it). With neither, the state
   dir is probed as before, and a "Mounts denied" skip says to run install from a
-  terminal or set `FSG_PROBE_DIR`. Doctor warns when the copy is missing or differs
-  from the live list, and when neither can be read. The copy goes stale when the
-  File Sharing list changes after install, until install runs again; a stale pick
-  can only make the check skip, never fail.
+  terminal or set `FSG_PROBE_DIR`. Doctor refreshes the copy (owner, 2026-10-27)
+  when it can read the live list and the two differ, or when there is no copy and
+  Docker Desktop does not use its default sharing (the fallback dir is shared
+  then), and says so in one ok line; this copy is the only file doctor writes. A
+  live list it cannot read leaves the copy as it is, never blanked (doctor warns
+  only when there is no copy either), and `doctor --affected` writes nothing. The
+  copy goes stale when the File Sharing list changes, until doctor or install runs
+  again in a terminal; a stale pick can only make the check skip, never fail.
 - If the engine is wedged and `docker ps` cannot list the containers, the restore set
   is empty. B and C still restart Docker Desktop, and containers with an
   `unless-stopped` or `always` restart policy come back. The record
