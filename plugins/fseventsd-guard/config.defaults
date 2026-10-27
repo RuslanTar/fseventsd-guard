@@ -55,7 +55,10 @@ FSG_AGENT_INTERVAL_S=300
 # At most one emergency heal per this many seconds, counted from the newest of: the
 # last restart the guard made for any reason, the last heal attempt that reached the
 # Docker step (even if the restart then failed), and the root helper's own stamp.
-# Inside the window the agent notifies only.
+# Inside the window the agent notifies only. A restart or attempt counts only at a
+# footprint at or above FSG_HELPER_MIN_MB, or by an emergency heal: a trial (or a
+# heal in a trial window) below that floor leaves the window alone, and the
+# helper's own interval still applies to it.
 FSG_EMERGENCY_MIN_INTERVAL_S=10800
 # Repeat a warn notification after this many minutes, or sooner if the footprint
 # has doubled since the last one. Also the repeat limit of the other agent notices.

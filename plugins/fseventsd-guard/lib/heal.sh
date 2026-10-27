@@ -885,10 +885,37 @@ fsg__heal_refuse() { # result t0 subtitle body what
   fsg_say "heal: refused: $5; nothing was stopped or restarted"
 }
 
-# Logs the root helper's outcome (HELPER_RC) and stamps a restart it made.
+# 0 when this heal's restart or attempt counts against the agent's emergency
+# interval: an emergency heal's always (no restart loops), any other one only at a
+# footprint (MB) at or above FSG_HELPER_MIN_MB. Below it (a trial, or a heal in a
+# trial window) no runaway was healed, so it must not hold back the emergency heal
+# of one that starts next; the helper's own interval still applies (owner, 2026-10-27).
+fsg__heal_counts() { # mb
+  [ "$HEAL_TRIGGER" = emergency ] && return 0
+  fsg_is_uint "${1:-}" && [ "$1" -ge "$FSG_HELPER_MIN_MB" ]
+}
+
+# Logs the root helper's outcome (HELPER_RC) and stamps a restart it made: in
+# last-restart when it counts (fsg__heal_counts, with the helper's own reading of the
+# footprint, else the precheck's), else in last-restart-uncounted ("epoch mb
+# trigger"), also for a call that stamped the helper's root stamp without a restart:
+# the tick then ignores a root stamp no newer than that record (fsg_tick_check).
 fsg__heal_helper_done() {
+  local mb stamped=0
   fsg_log "HEAL helper rc=$HELPER_RC ($(fsg_helper_meaning "$HELPER_RC")) $(tr '\n' ' ' < "$HEAL_DIR/helper.out" 2>/dev/null | cut -c1-200)"
-  case $HELPER_RC in 0|72|73) fsg_now > "$FSG_STATE_DIR/last-restart" ;; esac
+  mb=$(sed -n 's/.*footprint_mb_before=\([0-9][0-9]*\).*/\1/p' "$HEAL_DIR/helper.out" 2>/dev/null | head -n 1)
+  [ -n "$mb" ] || mb=${HEAL_MB_BEFORE:-}
+  case $HELPER_RC in 0|72|73) stamped=1 ;; esac
+  if fsg__heal_counts "$mb"; then
+    [ $stamped = 1 ] && fsg_now > "$FSG_STATE_DIR/last-restart"
+    return 0
+  fi
+  if [ $stamped = 0 ]; then
+    [ "$(head -n 1 "$FSG_ROOT_LOG_DIR/last-restart" 2>/dev/null)" != "${HEAL_ROOT_STAMP:-}" ] || return 0
+    stamped=2
+  fi
+  echo "$(fsg_now) ${mb:-?} $HEAL_TRIGGER" > "$FSG_STATE_DIR/last-restart-uncounted"
+  fsg_log "HEAL $( [ $stamped = 1 ] && echo restart || echo 'restart attempt') at ${mb:-?} MB, below the helper floor $FSG_HELPER_MIN_MB MB: it does not count against the emergency interval"
 }
 
 # 0 when the heal's Docker step acts on Docker: B and C always, A when it has
@@ -1042,8 +1069,9 @@ fsg_heal_run() { # t0 old_pid cap policy
   fi
   ts=$(fsg_now)
   # Every attempt that reaches Docker counts against the agent's emergency
-  # interval, whether or not the restart then works (no restart loops).
-  fsg_now > "$FSG_STATE_DIR/last-attempt"
+  # interval, whether or not the restart then works (no restart loops); below the
+  # helper floor, only an emergency heal's (fsg__heal_counts).
+  fsg__heal_counts "$HEAL_MB_BEFORE" && fsg_now > "$FSG_STATE_DIR/last-attempt"
   HEAL_DK_PRE_DONE=1
   if ! fsg_docker_before "$HEAL_VARIANT"; then
     fsg_log "HEAL docker before-step failed: $DK_ERR (continuing: the restart is what heals Docker's file sharing)"
@@ -1054,6 +1082,7 @@ fsg_heal_run() { # t0 old_pid cap policy
   fsg_drain_phase restarting
   ts=$(fsg_now)
   # Bounded, so the phase budget runners see holds (sudo forwards the TERM).
+  HEAL_ROOT_STAMP=$(head -n 1 "$FSG_ROOT_LOG_DIR/last-restart" 2>/dev/null)
   HEAL_IN_HELPER=1
   fsg_timeout "$FSG_HELPER_TIMEOUT_S" "$(fsg_root_tool sudo)" -n "$FSG_HELPER_PATH" > "$HEAL_DIR/helper.out" 2>&1
   HELPER_RC=$?
@@ -1414,11 +1443,17 @@ fsg_tick_check() {
   fi
   # The newest of: the guard's last restart, its last attempt that reached the
   # Docker step (a failing helper must not bounce Docker every tick), and the
-  # root helper's own stamp (a restart made outside this state dir).
-  local last_r=0 age stamp f
+  # root helper's own stamp (a restart made outside this state dir). Restarts and
+  # attempts below the helper floor do not count (fsg__heal_counts), nor does a root
+  # stamp no newer than the guard's last such restart: the helper wrote it first.
+  local last_r=0 age stamp f low
+  low=$(awk 'NR == 1 { print $1 }' "$FSG_STATE_DIR/last-restart-uncounted" 2>/dev/null)
+  fsg_is_uint "$low" || low=0
   for f in "$FSG_STATE_DIR/last-restart" "$FSG_STATE_DIR/last-attempt" "$FSG_ROOT_LOG_DIR/last-restart"; do
     stamp=$(head -n 1 "$f" 2>/dev/null)
-    if fsg_is_uint "$stamp" && [ "$stamp" -gt "$last_r" ]; then last_r=$stamp; fi
+    fsg_is_uint "$stamp" || continue
+    [ "$f" = "$FSG_ROOT_LOG_DIR/last-restart" ] && [ "$stamp" -le "$low" ] && continue
+    [ "$stamp" -gt "$last_r" ] && last_r=$stamp
   done
   age=$((now - last_r))
   # A stamp in the future means the clock moved back; like the helper, ignore it.

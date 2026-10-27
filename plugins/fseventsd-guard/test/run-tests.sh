@@ -4273,6 +4273,41 @@ if ! skip_case tick-loop; then
   : > "$FSG_FAKE/calls.log"
   "$G" tick >/dev/null 2>&1; eq $? 2 "notify only"
   hasnt "$(cat "$FSG_FAKE/calls.log")" "sudo -n /" "no restart"
+
+  # Inside a trial window (floor 0, interval 120 s). A stamp 2000 s back stands for
+  # the helper's interval having passed while the agent's 3 h have not.
+  t "emergency tier: a trial restart below the helper floor does not hold back an emergency heal"
+  docker_default; install_fake --trial-hours 1; EV=$FSG_PREFIX/Library/Logs/fseventsd-guard
+  trial --variant A --label low > "$C/o" 2>&1; eq $? 0 "the trial restarts fseventsd at 4 MB"
+  absent "$FSG_STATE_DIR/last-restart" "not stamped as a restart that counts"
+  exists "$FSG_STATE_DIR/last-restart-uncounted" "recorded on its own"
+  has "$(cat "$FSG_LOG")" "HEAL restart at 4 MB, below the helper floor 150 MB: it does not count against the emergency interval" "logged"
+  now=$(date +%s); echo $((now - 2000)) > "$EV/last-restart"
+  printf '%s 4 trial\n' $((now - 3000)) > "$FSG_STATE_DIR/last-restart-uncounted"
+  mem 3G; : > "$FSG_FAKE/calls.log"
+  "$G" tick >/dev/null 2>&1; eq $? 2 "a root stamp newer than the trial's is another restart: it counts"
+  printf '%s 4 trial\n' $((now - 1990)) > "$FSG_STATE_DIR/last-restart-uncounted"
+  "$G" tick >/dev/null 2>&1; eq $? 0 "the trial's own root stamp does not count: the emergency heal runs"
+  has "$(cat "$FSG_FAKE/calls.log")" "sudo -n /" "restarted"
+  has "$(cat "$FSG_STATE_DIR/last-heal")" "healed emergency" "an emergency heal"
+  exists "$FSG_STATE_DIR/last-restart" "which counts"
+
+  t "emergency tier: a wave restart counts only at or above the helper floor"
+  docker_default; install_fake --trial-hours 1; EV=$FSG_PREFIX/Library/Logs/fseventsd-guard
+  heal --trigger wave > "$C/o" 2>&1; eq $? 0 "a wave heal restarts fseventsd at 4 MB"
+  absent "$FSG_STATE_DIR/last-restart" "not counted"
+  echo $(( $(date +%s) - 2000 )) > "$EV/last-restart"
+  mem 3G; : > "$FSG_FAKE/calls.log"
+  "$G" tick >/dev/null 2>&1; eq $? 0 "the emergency heal runs"
+  has "$(cat "$FSG_STATE_DIR/last-heal")" "healed emergency" "an emergency heal"
+  rm -f "$FSG_STATE_DIR/last-restart" "$FSG_STATE_DIR/last-attempt"
+  echo $(( $(date +%s) - 2000 )) > "$EV/last-restart"
+  mem 200M; heal --trigger wave > "$C/o" 2>&1; eq $? 0 "a wave heal restarts fseventsd at 200 MB"
+  exists "$FSG_STATE_DIR/last-restart" "counted"
+  echo $(( $(date +%s) - 2000 )) > "$EV/last-restart"
+  mem 3G; : > "$FSG_FAKE/calls.log"
+  "$G" tick >/dev/null 2>&1; eq $? 2 "the emergency heal is held back: notify only"
+  hasnt "$(cat "$FSG_FAKE/calls.log")" "sudo -n /" "no restart"
 fi
 
 # ======================================================================== heartbeat
