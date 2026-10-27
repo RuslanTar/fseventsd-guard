@@ -22,6 +22,7 @@ decision from an accident. The user-facing summary is `../README.md`.
 | The 3-hour emergency interval counts only restarts at or above the helper floor | owner, 2026-10-27 (§4) |
 | A wave heal below runaway heals only when nothing is running; at runaway it keeps the full drain cap | owner, 2026-10-27 (§4, §12 item 7) |
 | The public repo's maintainer records a fix only on evidence; `doctor` and `status` note a release newer than the last one checked | owner, 2026-10-27 (§9) |
+| A restart of fseventsd the guard did not make is logged only (`EXTERNAL_RESTART`; `status` shows the last one) | owner, 2026-10-27 (§5.3) |
 
 ## 2. Parts and where they live
 
@@ -400,7 +401,15 @@ load and on a kickstart, never twice at once. In order:
      Inside the tick, heal paths return their code instead of calling `exit`.
 5. The emergency check (§4), once per tick, its `top` sample tried again when it
    does not answer in time (below). It does not heal while an earlier intent
-   stays unverified; it notifies instead (throttled).
+   stays unverified; it notifies instead (throttled). Before it replaces the
+   previous tick's record (`tick-sample`), it compares the pids: a new pid on the
+   same boot that no restart of the guard explains (`last-restart`,
+   `last-restart-uncounted` or the helper's root stamp at or after that record) is
+   logged as one `EXTERNAL_RESTART` line (old and new pid, `up_s`, `started_at`)
+   and kept in `last-external-restart`, which the text `status` shows (owner,
+   2026-10-27). Log only: no notification, and no stamp, count or interval
+   changes. A reboot is not one. Twice in the week of logs (§4) the pid changed
+   with no heal behind it, once after 3.5 days of uptime.
 6. Back to step 4 while a request is queued. Then release the lock, write the
    heartbeat, and exit with the level or the emergency heal's code (§2).
 

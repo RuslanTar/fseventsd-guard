@@ -411,7 +411,10 @@ If the install created `/usr/local/libexec` and it is now empty,
 | `fseventsd-guard cannot measure fseventsd` | Three checks in a row could not read the daemon; the guard can neither warn nor heal. A check tries a `top` that does not answer within 15 s three times, 5 s apart (a busy Mac), and the reason then gives `ps`'s resident size, a lower bound on the footprint | `fseventsd-guard doctor`, `fseventsd-guard status`. |
 | `fseventsd: delivery stalled` | The probe got no event, but the footprint is below the helper's floor | Manual fix shown in the notification. Report it: it is an open question for the thresholds. |
 
-Logs: `~/Library/Logs/fseventsd-guard.log` (user side, one line per check),
+Logs: `~/Library/Logs/fseventsd-guard.log` (user side, one line per check, and an
+`EXTERNAL_RESTART` line when fseventsd restarted between two checks without the
+guard, such as a manual `kill` or a Quit in Activity Monitor; `status` shows the
+last one, and the guard does not act on it),
 `/Library/Logs/fseventsd-guard/` (helper log and small evidence records),
 `~/Library/Application Support/fseventsd-guard/heals/` (per-heal records with
 phase timings; `docker-stop.txt` has variant B's stop and each poll), and `daily`
@@ -423,6 +426,7 @@ that restarted fseventsd, and the median and 95th percentile of the event rate).
 ```sh
 G=~/fseventsd-guard/plugins/fseventsd-guard/fseventsd-guard   # your clone
 $G status                  # human summary, with the agent's last tick (STALE when overdue)
+                           # and the last restart the guard did not make
 $G status --json --probe   # for scripts (schema in docs/DESIGN.md)
 $G leases                  # drain state and what counts as running work
 $G heal --dry-run          # what a heal would do right now
