@@ -20,6 +20,7 @@ decision from an accident. The user-facing summary is `../README.md`.
 | The plugin's prompt hook warns when the guard is installed but its agent stopped ticking | owner, 2026-10-26 (§14) |
 | Thresholds from a week of logs: warn 256 MB, act 1 GB, emergency ceiling 4 GB | owner, 2026-10-27 (§4) |
 | The 3-hour emergency interval counts only restarts at or above the helper floor | owner, 2026-10-27 (§4) |
+| A wave heal below runaway heals only when nothing is running; at runaway it keeps the full drain cap | owner, 2026-10-27 (§4, §12 item 7) |
 
 ## 2. Parts and where they live
 
@@ -210,8 +211,8 @@ scripts can source it. The root helper is `/bin/sh` with absolute tool paths.
 | Tier | Trigger | Action | Value | Why |
 |---|---|---|---|---|
 | warn | footprint ≥ `FSG_WARN_MB` | notify (renotify after 60 min or when doubled) | 256 MB | 2.5x the healthy maximum: 102 MB in 1858 checks over a week on the author's Mac (2026-10-20 to 10-26). At 500 MB the one growth seen there, peak 498 MB, never warned |
-| wave boundary | workflow calls `status` → 1 or 2 | `heal --trigger wave`: a request the agent runs (cap policy abort) | n/a | preferred tier |
-| wave back-off | a wave heal gave up at the drain cap < 60 min ago | wave heals exit 11 without draining | 60 min | a never-free machine would otherwise get an hour-long hold at every wave boundary; whether a warn alone should drain at all is an open question (§12) |
+| wave boundary | workflow calls `status` → 1 or 2 | `heal --trigger wave`: a request the agent runs (cap policy abort). Below runaway, as the agent's precheck classifies it, it heals only when nothing is running: with work live (what a drain would wait for, or engine work it could not list) it returns 4 at once, with no drain, notice or back-off; idle, it drains with a cap of 0 and policy abort, and work that starts in between makes it give up the same way, without the back-off. At runaway it drains with the request's full cap | n/a | preferred tier. At warn file watching is degraded, not broken, and the emergency tier still covers a runaway, so a warn must not hold every session's leased runs for up to the 60-minute cap and then give up (owner, 2026-10-27) |
+| wave back-off | a wave heal gave up at the drain cap < 60 min ago | wave heals exit 11 without draining | 60 min | a never-free machine would otherwise get an hour-long hold at every wave boundary; only a wave heal at runaway can start it |
 | emergency | footprint ≥ `FSG_ACT_MB`, or a **confirmed** stalled probe | the tick's own emergency heal (cap policy proceed) | 1 GB | 10x the healthy maximum, before the machine suffers: at the fastest growth seen (2.8 GB/h on 2026-10-21, 150 to 427 MB in 6 minutes) a drain that runs its whole 60-minute cap ends near 3.8 GB, against 4.8 GB from 2 GB |
 | CPU escalator | footprint ≥ `FSG_WARN_MB` and fseventsd at ≥ `FSG_CPU_ESCALATE_PCT` of one core for `FSG_CPU_ESCALATE_TICKS` ticks in a row | counts as runaway, so as emergency above; `status` says runaway too (a wave boundary drains with the full cap) | 50%, 3 ticks | a runaway pins a core: 1.2 GB at 100% CPU ([claude-code#96008](https://github.com/anthropics/claude-code/issues/96008)) sat between the 500 MB and 2 GB tiers of the time. macOS's own CPU report fires at 50% over 180 s ([talkstream/fseventsd-runaway@78396ba](https://github.com/talkstream/fseventsd-runaway/tree/78396ba)). The footprint gate stays: in the week of logs a healthy daemon's 5-minute average reached 48%, and `top` showed 50% or more for 3 checks in a row at 86 MB |
 | emergency interval | last guard restart, last heal attempt that reached the Docker step (or an emergency heal refused there, exit 14, or ended there by a `top` that missed again, exit 3), or the helper's root stamp < 3 h ago; a restart or attempt counts only at a footprint ≥ `FSG_HELPER_MIN_MB`, or by an emergency heal | notify only | 10800 s | the original requirements: "at most once per ~3 h", "no restart loops". Counted from the newest of the three, so a wave heal plus an emergency heal cannot loop, and neither can a helper that keeps failing after Docker was stopped, nor a drain repeated every tick for a `--rm` container that keeps running (§6) or on a Mac too loaded for `top` (§5.3). A trial restart, or a wave or manual one in a trial window, below the floor healed no runaway, so it does not hold back an emergency heal (owner, 2026-10-27): it goes to `last-restart-uncounted` (time, footprint, trigger) instead of `last-restart`, the root stamp of that call does not count either, and the helper's own interval still applies. The footprint is the helper's reading at the restart, else the precheck's |
@@ -464,6 +465,7 @@ caller's `FSG_*`.
 ```
 precheck (helper would accept?) ──no──▶ 6 or 9, nothing held
    │yes      wave back-off ──▶ 11, nothing held
+   │         wave below runaway, work running ──▶ 4, nothing held (idle: drain cap 0)
 drain/pending phase=draining (a hold in place is saved aside, §5.5)
    │ ──▶ wait for work started before the drain:
    │          leases (up to FSG_DRAIN_CAP_S) + unleased processes and exec
@@ -501,7 +503,8 @@ if not, it ends as a failed restart (exit 7), with Docker verified or runs held.
 Cap policy by trigger: `emergency` uses `FSG_CAP_POLICY_EMERGENCY=proceed`. By
 then file watching is broken for everyone, and the owner leans to "stop and heal".
 `wave`, `manual` and `trial` use `FSG_CAP_POLICY_MANUAL=abort`, because a person
-or workflow is there to retry. `--on-cap` overrides per request.
+or workflow is there to retry. `--on-cap` overrides per request, except for a wave
+heal below runaway, which always aborts at its cap of 0 (§4).
 
 ### 5.4 Unleased work (fallback while runners are not integrated)
 
@@ -929,7 +932,7 @@ one was a trial's.
 | Command | Codes |
 |---|---|
 | `status` | 0 ok, 1 warn, 2 runaway, 3 cannot measure |
-| `heal` | 0 healed, 3 cannot measure (in the precheck; or after the drain, when a precheck that needed a second `top` is followed by one that misses right before the Docker step: nothing was stopped or restarted, §5.3), 4 drain cap reached (abort), 6 helper would refuse (healthy / rate limited / stalled below the floor), 7 restart failed (Docker restored), 8 restarted but Docker restore or verify failed, or refused while an earlier heal's Docker is still not verified (nothing was stopped), 9 not installed (helper, drop-in or agent missing, the agent not loaded or older than the request protocol, or `sudo -n -l` refuses the helper; checked before the drain), 10 the request, the drain marker or the Docker intent could not be written, or the request stayed unclaimed for 2 agent intervals while no tick ran or for `FSG_REQUEST_MAX_AGE_S`: disk full or state dir not writable (nothing was stopped), 11 wave back-off: a wave heal gave up at the drain cap less than `FSG_WAVE_RETRY_MIN` (60) minutes ago, so no new drain, 12 queued or still running (`--no-wait`, `--result ID --no-wait`), 13 dropped before it started (too old), 14 refused after the drain: the Docker step would stop a running `--rm` container with an anonymous volume, which Docker deletes with it, or Docker answers but did not list its containers, so none could be checked (nothing was stopped or restarted, §6), 130 the agent was stopped during the heal (§5.5), 64 usage or an invalid request. A joined request (§5.3) returns the code of the heal it joined: 0, 7 or 8 |
+| `heal` | 0 healed, 3 cannot measure (in the precheck; or after the drain, when a precheck that needed a second `top` is followed by one that misses right before the Docker step: nothing was stopped or restarted, §5.3), 4 drain cap reached (abort), or a wave heal below runaway with work running (nothing was held, §4), 6 helper would refuse (healthy / rate limited / stalled below the floor), 7 restart failed (Docker restored), 8 restarted but Docker restore or verify failed, or refused while an earlier heal's Docker is still not verified (nothing was stopped), 9 not installed (helper, drop-in or agent missing, the agent not loaded or older than the request protocol, or `sudo -n -l` refuses the helper; checked before the drain), 10 the request, the drain marker or the Docker intent could not be written, or the request stayed unclaimed for 2 agent intervals while no tick ran or for `FSG_REQUEST_MAX_AGE_S`: disk full or state dir not writable (nothing was stopped), 11 wave back-off: a wave heal gave up at the drain cap less than `FSG_WAVE_RETRY_MIN` (60) minutes ago, so no new drain, 12 queued or still running (`--no-wait`, `--result ID --no-wait`), 13 dropped before it started (too old), 14 refused after the drain: the Docker step would stop a running `--rm` container with an anonymous volume, which Docker deletes with it, or Docker answers but did not list its containers, so none could be checked (nothing was stopped or restarted, §6), 130 the agent was stopped during the heal (§5.5), 64 usage or an invalid request. A joined request (§5.3) returns the code of the heal it joined: 0, 7 or 8 |
 | `trial` | the heal's code; 13 dropped before it started (its requester was gone); 64 usage (also `--no-wait`) |
 | `run` | the command's own code; 75 when it gave up waiting for a drain |
 | `release` | 0 released or nothing held; 1 a running heal holds the drain (it releases it itself) |
@@ -1117,14 +1120,13 @@ machine measured 50-200 events/s normally and 2,117-5,715 on flood days
 5. Whether Time Machine really runs a deeper scan after a restart.
 6. Which runners to integrate first (see `WORKFLOW-INTEGRATION.md`). Until then the
    fallback detector carries the drain.
-7. Should a **warn** (status 1) drain at all at a wave boundary? Today the pre-wave
-   call runs `heal --trigger wave` at warn, which holds every session's new leased
-   runs for up to the 60-minute cap and then gives up while long runs continue.
-   The wave back-off (exit 11, 60 min) stops that repeating at every wave, but one
-   hour-long hold per warn remains. Proposed: at warn, run
-   `heal --trigger wave --drain-cap 0` (heal only when nothing is running, as the
-   original plan had it), and drain with the full cap only at
-   runaway (status 2). Owner decision.
+7. Should a **warn** (status 1) drain at all at a wave boundary? Settled (owner,
+   2026-10-27, §4): in the agent, not in the caller's snippet. A wave heal below
+   runaway heals only when nothing is running, as the original plan had it, and
+   returns 4 at once otherwise, with no drain, notice or back-off; at runaway it
+   drains with the full cap. A caller's `--drain-cap 0` alone would still have
+   marked the drain, sent the healing notice and started the back-off, which then
+   returned 11 to runaway wave heals too.
 8. Cancelling a heal. A caller can no longer stop one: Ctrl-C only ends its wait. A
    later `heal --cancel ID` could be honoured while the request is queued or still
    draining, never once its Docker step began. Owner decision.

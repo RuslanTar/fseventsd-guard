@@ -55,7 +55,9 @@ Two tiers act:
 
 - **Before a long test run (preferred).** A script or workflow calls `status`
   before a long or parallel test run (a workflow that runs in waves: before each
-  wave) and `heal` on warn or runaway; the agent runs that heal. See
+  wave) and `heal --trigger wave` on warn or runaway; the agent runs that heal. At
+  warn it heals only when nothing is running, and otherwise returns at once (exit
+  4) without holding any run; at runaway it drains first. See
   `docs/WORKFLOW-INTEGRATION.md`.
 - **Emergency (the agent).** It acts only when the daemon is clearly broken. It still
   drains first: it waits for leased runs up to 60 minutes and for other detected
@@ -120,7 +122,10 @@ launchd agent from reading Docker Desktop's settings while a terminal reads them
 The `healing` notification and `status` name what the drain waits for (command,
 pid, age). At a cap a manual or pre-run (`--trigger wave`) heal gives up and tells you what was
 still running. An emergency heal goes ahead, because by then file watching is
-already broken, and names what it cut, including runs that started mid-drain.
+already broken, and names what it cut, including runs that started mid-drain. A
+pre-run heal below runaway does not drain at all: it heals only when nothing is
+running, and otherwise ends at once (exit 4) without a notification, naming what
+runs.
 
 ## What a restart costs
 
