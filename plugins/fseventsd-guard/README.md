@@ -30,7 +30,10 @@ you at each step.
 - **Who should install it.** Whoever's `fseventsd-guard doctor --affected` exits 0.
   Before 15.6.1 nobody has reported the runaway, and a version at or past a known
   fix (`FSG_AFFECTED_FIXED`, none yet) counts as fixed; `install` refuses there
-  without `--force`.
+  without `--force`. On a release newer than the newest one the range was checked
+  against (`FSG_AFFECTED_REVIEWED`, 27.0.1), `doctor` and `status` add an info
+  line: it still counts as affected; report the line, and who records a fix and
+  when is in [`docs/DESIGN.md` §9](docs/DESIGN.md#9-affected-versions).
 - **What it costs.** One sudo prompt at install; then a notification on each heal,
   IDE and Spotlight rescans after it, and a Docker restart during it (by the Docker
   step, after the drain), as "What a restart costs" below details.

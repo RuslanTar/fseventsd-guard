@@ -21,6 +21,7 @@ decision from an accident. The user-facing summary is `../README.md`.
 | Thresholds from a week of logs: warn 256 MB, act 1 GB, emergency ceiling 4 GB | owner, 2026-10-27 (§4) |
 | The 3-hour emergency interval counts only restarts at or above the helper floor | owner, 2026-10-27 (§4) |
 | A wave heal below runaway heals only when nothing is running; at runaway it keeps the full drain cap | owner, 2026-10-27 (§4, §12 item 7) |
+| The public repo's maintainer records a fix only on evidence; `doctor` and `status` note a release newer than the last one checked | owner, 2026-10-27 (§9) |
 
 ## 2. Parts and where they live
 
@@ -1038,6 +1039,26 @@ logs `cpu_avg_pct`, the share of one core since the previous tick, and
 - When Apple ships a fix, add that line's first fixed version to
   `FSG_AFFECTED_FIXED` with its evidence below, in one pull request. A report on a
   version older than 15.6.1 moves `FSG_AFFECTED_MIN` down.
+- `FSG_AFFECTED_REVIEWED` (27.0.1) is the newest release the range was last checked
+  against: the newest row of the table below, and a test keeps the two equal. On a
+  newer macOS, `doctor`, `doctor --affected` and `status` print one info line: the
+  release counts as affected until a fix is recorded; report it if Apple names an
+  fseventsd fix. Info, not a warning: exit codes and a clean `doctor` stay as they
+  are, and `status --json` does not change. There is no line when the answer is
+  forced (`FSG_AFFECTED`) or the release has a recorded fix.
+- **Who records a fix, and when** (owner, 2026-10-27). The public repo's maintainer,
+  and only on evidence: an Apple release note that names an fseventsd fix, or a
+  report that a release fixed it (in
+  [claude-code#98769](https://github.com/anthropics/claude-code/issues/98769),
+  [Apple forum 849819](https://developer.apple.com/forums/thread/849819) or
+  FB25090184) together with a flood test in which fseventsd's footprint stays flat.
+  Check on each macOS release, and when someone reports the info line above. One
+  pull request adds the line's first fixed version to `FSG_AFFECTED_FIXED`, moves
+  `FSG_AFFECTED_REVIEWED` to that release and adds its row below with the evidence.
+  A release checked without a fix found gets a row saying what was checked, and
+  the knob moves to it, which ends the info line there. No deadline: a late update
+  only costs install nudges on a fixed release, as an installed guard acts only at
+  runaway or on a confirmed stall (§4).
 - `fseventsd-guard doctor --affected` (exit 0/1/3) and the `os.affected` field in
   `status --json` expose the answer. `install` refuses outside the range unless
   `--force`. `FSG_AFFECTED=yes|no` overrides it on one machine. Versions compare
@@ -1113,7 +1134,8 @@ machine measured 50-200 events/s normally and 2,117-5,715 on flood days
    move them.
 2. Which Docker variant wins (trials pending). B is the default until then.
 3. Recording fixes (§9): `FSG_AFFECTED_FIXED` is empty, so every version from
-   15.6.1 on counts as affected until a fix is reported and added.
+   15.6.1 on counts as affected until a fix is reported and added. Who records one,
+   on what evidence and when is settled (owner, 2026-10-27, §9).
 4. A stall with a footprint below the helper's floor: the helper refuses, and the
    guard notifies with the manual command. Should the helper accept a stall it can
    verify itself (a root-owned copy of the probe)?
