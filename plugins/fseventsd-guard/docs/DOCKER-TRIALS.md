@@ -86,8 +86,8 @@ usual way. Then record:
    - **File sharing / bind mounts**: `bind_mount=failed` in `result.txt`
      (`bind_mount=skipped ... not shared` means the probe dir is not in Docker
      Desktop's File Sharing list: set `FSG_PROBE_DIR`, see `doctor`; with "no
-     cached list" the agent could not read that list, so re-run `install` from a
-     terminal first). Or check by
+     cached list" the agent could not read that list, so run `doctor` from a
+     terminal first, which caches it for the agent). Or check by
      hand: `docker run --rm -v "$PWD:/w" alpine:3 ls /w` (use any local image that
      has `/bin/sh`).
    - **Containers**: `containers_failed=` in `result.txt`, `docker ps -a`.
@@ -203,8 +203,9 @@ trial, `fswatch -r -t` (an FSEvents stream) and Node's
 `trial --variant none` runs each ended with exit 3 ("cannot measure fseventsd (top
 did not answer within 15s)" in the agent's tick, at load averages of 33 to 48 from
 a parallel test suite), with the same fseventsd pid throughout (the agent then ran
-throttled, with no `ProcessType`, and tried `top` once; it now runs as
-`Interactive` and tries three times, docs/DESIGN.md §5.3). Afterwards both
+throttled, with no `ProcessType`, and tried `top` once; an install from 2026-10-26
+on (pull request #3) runs it as `Interactive` and tries three times, and `doctor` warns on an
+older plist, docs/DESIGN.md §5.3). Afterwards both
 watchers, and a third one started fresh as a control, saw 3 of 3 more files. So
 the notices keep the line. Re-run on a quiet machine (load well under 20). A pass
 there covers native FSEvents clients and Node watchers (Node's recursive watch on

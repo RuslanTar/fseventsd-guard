@@ -23,6 +23,9 @@ decision from an accident. The user-facing summary is `../README.md`.
 | A wave heal below runaway heals only when nothing is running; at runaway it keeps the full drain cap | owner, 2026-10-27 (§4, §12 item 7) |
 | The public repo's maintainer records a fix only on evidence; `doctor` and `status` note a release newer than the last one checked | owner, 2026-10-27 (§9) |
 | A restart of fseventsd the guard did not make is logged only (`EXTERNAL_RESTART`; `status` shows the last one) | owner, 2026-10-27 (§5.3) |
+| The root helper tries its own `top` three times, 5 s apart, and keeps the 150 MB floor with no stall path | owner, 2026-10-27 (§3, §12 items 4 and 11) |
+| `doctor` refreshes the agent's copy of Docker Desktop's File Sharing list | owner, 2026-10-27 (§6) |
+| A held run waits by default; no runner sets `FSG_RUN_ON_TIMEOUT=proceed` | owner, 2026-10-27 (§5.2) |
 | The deeper rescans a restart may cause (Time Machine, Spotlight) stay a documented, unmeasured cost | owner, 2026-10-27 (§12 item 5) |
 
 ## 2. Parts and where they live
@@ -37,7 +40,7 @@ decision from an accident. The user-facing summary is `../README.md`.
 | Sudoers drop-in | `/etc/sudoers.d/fseventsd-guard` (root:wheel 0440) | Standard include dir. No dot in the name (sudo skips dotted names; the installer's temp file uses that). |
 | Root evidence | `/Library/Logs/fseventsd-guard/` | Root writes its evidence where the user cannot alter it. |
 | User log | `~/Library/Logs/fseventsd-guard.log` | The standard per-user log dir; bounded to 5000 lines. |
-| launchd agent | `~/Library/LaunchAgents/io.github.ruslantar.fseventsd-guard.plist` | Per-user, no root. The only process that heals (§5.3). It runs the app copy's `fseventsd-guard` script directly (`#!/bin/bash`), so Background Items lists it by the guard's name, not as "bash". It runs as `ProcessType` `Interactive`, unthrottled, so it can measure on a loaded Mac (§5.3; `doctor` warns on a plist without it). `doctor` reports launchctl's last exit status for it: a tick exits 0-3 (its level), 4-11 (an emergency heal's code, or 10 when it cannot take its lock), 14 (its emergency heal refused to stop Docker for data safety, §6: `doctor` names the last heal's result and record, with no reinstall advice) or 130 (stopped by a signal, after its trap cleaned up), so any other code is a warning. Another plist in the LaunchAgents dir that runs the app copy under another label (an install left under an older label) would heal next to it: `install` refuses before it changes anything, and `doctor` fails, naming the plist, its label and the fix. |
+| launchd agent | `~/Library/LaunchAgents/io.github.ruslantar.fseventsd-guard.plist` | Per-user, no root. The only process that heals (§5.3). It runs the app copy's `fseventsd-guard` script directly (`#!/bin/bash`), so System Settings > General > Login Items & Extensions lists it by the guard's name, not as "bash". It runs as `ProcessType` `Interactive`, unthrottled, so it can measure on a loaded Mac (§5.3; `doctor` warns on a plist without it). Its `StartInterval` is `FSG_AGENT_INTERVAL_S` as of the install: `doctor` warns while the two differ (re-run install), and the stale rule uses the longer one (§8). `doctor` reports launchctl's last exit status for it: a tick exits 0-3 (its level), 4-11 (an emergency heal's code, or 10 when it cannot take its lock), 14 (its emergency heal refused to stop Docker for data safety, §6: `doctor` names the last heal's result and record, with no reinstall advice) or 130 (stopped by a signal, after its trap cleaned up), so any other code is a warning. Another plist in the LaunchAgents dir that runs the app copy under another label (an install left under an older label) would heal next to it: `install` refuses before it changes anything, and `doctor` fails, naming the plist, its label and the fix. |
 
 The runner-side lease code (`lib/lease.sh`) is POSIX sh so that sh, bash and zsh
 scripts can source it. The root helper is `/bin/sh` with absolute tool paths.
@@ -420,6 +423,13 @@ load and on a kickstart, never twice at once. In order:
 6. Back to step 4 while a request is queued. Then release the lock, write the
    heartbeat, and exit with the level or the emergency heal's code (§2).
 
+The tick also rewrites its heartbeat (`result=running`) just before a heal's drain
+ends and after each heal it runs (a request's, a trial's or its own emergency
+heal). While the drain is live, `fsg_heal_running` keeps a long heal from looking
+stale; without these writes a heal longer than two intervals (a 10-minute drain,
+say) left the rest of the tick looking stale to `status`, `doctor` and the
+stopped-agent warning (§8, §14).
+
 The newest 20 finished requests (`.run`, `.log`, `.result`) are kept.
 
 **Measuring on a loaded Mac.** A runaway comes with a busy machine, and no heal runs
@@ -440,10 +450,18 @@ blind the agent at once. Two parts:
   until then `doctor` warns.
 - The agent's emergency check (step 5) and a heal's precheck, so every heal (also
   `heal --dry-run`), try a `top` that did not answer up to `FSG_MEASURE_TRIES` (3)
-  times in all, `FSG_MEASURE_RETRY_S` (5 s) apart: about a minute at most. Each
+  times in all, `FSG_MEASURE_RETRY_S` (5 s) apart: about a minute at most. The
+  tries are cut to those that fit in half of `FSG_AGENT_INTERVAL_S` (a slow try
+  takes `FSG_TOP_TIMEOUT_S`, each further one `FSG_MEASURE_RETRY_S` more), so a
+  config with many or long tries cannot keep a tick measuring past the next one;
+  the log's "try i of n" counts against that bound, and `doctor` warns when
+  `FSG_MEASURE_TRIES` × (`FSG_TOP_TIMEOUT_S` + `FSG_MEASURE_RETRY_S`) reaches the
+  interval, naming how many tries a check makes instead. Each
   slow try is logged (`MEASURE top did not answer within 15s (try 1 of 3)`). Any
   other failure (no fseventsd, two of them, an unreadable footprint) is final at
-  once. After the last try the reason gives the number of tries and the daemon's
+  once; after slow tries its reason adds "(after N slow tries)" (a `top` that
+  answers with a line that does not parse, as when the pid goes away mid-sample).
+  After the last try the reason gives the number of tries and the daemon's
   resident size from `ps -o rss`, a lower bound on the footprint (it leaves out
   compressed and swapped pages), for the log and the notices; no decision uses it
   (`footprint -p` as the user fails). A blind tick counts once toward
@@ -466,6 +484,11 @@ blind the agent at once. Two parts:
   Like those, an emergency heal ending here counts as an attempt (the emergency
   interval), else the agent would drain again every tick while the Mac stays
   loaded; a precheck that cannot measure ends before the drain and does not count.
+  Nothing stamps an attempt on that precheck path, so on a Mac that stays loaded
+  (the tick's own check answering, the precheck's tries missing) its `cannot heal`
+  notice would come every tick: for an emergency heal both `cannot heal` notices
+  (the precheck's and this one) go out at most once per `FSG_WARN_RENOTIFY_MIN`,
+  under one throttle key. A manual or wave heal notifies each time: its caller asked.
   When it answers, or fails another way (the helper checks for itself), the heal
   goes on unchanged; its measurement is logged only. A precheck that answered at
   once measures no more. The helper can still miss after this check answered.
@@ -655,7 +678,10 @@ as 5 s (launchd.plist(5) says only "system-defined"). An agent with 1390 that
 ignored SIGTERM was SIGKILLed exactly 60 s after `launchctl bootout`, which itself
 returned at once. So a restore that outlasts that minute is cut off; the intent and
 the next tick then recover Docker (below), as after any SIGKILL. `doctor` reports
-the value launchd uses when it is below the plist's. `install` refuses to reload
+the value launchd uses when it is below the plist's, and says that after a
+`launchctl bootout` the next tick comes only once the agent is loaded again (at
+login, or with `launchctl bootstrap`), with leased runs held behind the Docker
+intent meanwhile, for at most `FSG_FAILED_HOLD_S`. `install` refuses to reload
 the agent while a heal is in progress. A SIGKILL runs no trap: the intent and a
 hold saved aside (`drain/pending.saved.<pid>`) stay, and the next tick puts that hold back (unless a
 live drain or hold is in place) before it recovers. Until then leased runs hold
@@ -944,7 +970,11 @@ one was a trial's.
   Docker Desktop does not use its default sharing (the fallback dir is shared
   then), and says so in one ok line; this copy is the only file doctor writes. A
   live list it cannot read leaves the copy as it is, never blanked (doctor warns
-  only when there is no copy either), and `doctor --affected` writes nothing. The
+  only when there is no copy either), and `doctor --affected` writes nothing. When
+  the terminal cannot read the list either, `install` and `doctor` say to let the
+  terminal app access other apps' data (macOS asks, or System Settings > Privacy &
+  Security; the exact pane was not checked on macOS 27), then run `doctor`, or to
+  set `FSG_PROBE_DIR`. The
   copy goes stale when the File Sharing list changes, until doctor or install runs
   again in a terminal; a stale pick can only make the check skip, never fail.
 - If the engine is wedged and `docker ps` cannot list the containers, the restore set
@@ -1015,15 +1045,20 @@ change. New fields may be added. A breaking change bumps the schema to `/2`.
 - `docker_intent` is `null`, or `{"owner_pid", "owner_alive", "trigger", "docker_variant", "since_epoch", "after_step_done"}` while a heal's Docker step has not verified (§5.5). `owner_alive` is true while the tick that wrote it is still in that heal; false means that heal is gone, Docker may be down and the next tick recovers it. `after_step_done` is true once the after-step ran and every container in the restore set was started.
 - `requests` is the agent's queue (§5.3): `queued`, the number of requests not yet claimed, and `running`, `null` or `{"id", "trigger", "requester_pid", "requester_alive", "phase"}`.
 - `agent` is the background agent's heartbeat (`heartbeat` in the state dir), which
-  every tick rewrites as it starts (`result` `running`, `exit` `null`) and as it ends
-  (`result` the level it found: ok|warn|runaway|unknown; `exit` the tick's exit
+  every tick rewrites as it starts (`result` `running`, `exit` `null`), again with
+  `running` just before a heal's drain ends and after each heal (§5.3), and as it
+  ends (`result` the level it found: ok|warn|runaway|unknown; `exit` the tick's exit
   code). `installed` is whether the agent plist exists. `heartbeat_epoch`, `age_s`,
   `result` and `exit` are `null` before the first tick. `running` is true while the
   tick that wrote it still runs. `stale` is true when the agent is installed and the
   heartbeat (or, with none, the newer of the newest `TICK` line in the user log and
-  the plist) is older than twice `interval_s` (`FSG_AGENT_INTERVAL_S`), unless that
-  tick is still running a heal. Stale means the agent is unloaded, switched off in
-  Background Items or hung; `status --json` then also prints a `warning: agent
+  the plist) is older than twice the agent's interval, unless that tick is still
+  running a heal. The interval is `interval_s` (`FSG_AGENT_INTERVAL_S`), or the
+  plist's `StartInterval` when that is longer: launchd ticks at the value install
+  rendered, so a config lowered since must not make a healthy agent look stale. The
+  plist is read only once the config's limit has passed, and the STALE text names
+  the interval it used. Stale means the agent is unloaded, switched off in
+  Login Items & Extensions or hung; `status --json` then also prints a `warning: agent
   STALE ...` line on stderr, `doctor` warns, and the Claude Code plugin's prompt
   hook warns (§14). An agent that predates heartbeats
   is judged by its `TICK` lines only, and not at all without one (§13). `requests`
@@ -1252,8 +1287,9 @@ watched fseventsd. The prompt hook now warns then (owner, 2026-10-26):
 
 - **The rule of `status` and `doctor`.** The hook calls `fsg_agent_fields` (§8,
   `agent.stale`): stale when the heartbeat, or with none the newest `TICK` line or
-  the install, is older than 2 × `FSG_AGENT_INTERVAL_S` from the config, unless that
-  tick is still in a heal. The three cannot disagree.
+  the install, is older than 2 × `FSG_AGENT_INTERVAL_S` from the config, or 2 × the
+  plist's `StartInterval` when that is longer (read only past the config's limit),
+  unless that tick is still in a heal. The three cannot disagree.
 - **Cheap on every prompt.** After the config load, a heartbeat within the limit is
   read with shell builtins and ends the check: no `top`, `launchctl` or `ps`. Only
   an older one, past the stamp and the boot check below, sources `lib/measure.sh`
@@ -1270,7 +1306,12 @@ watched fseventsd. The prompt hook now warns then (owner, 2026-10-26):
 - **At most every 6 hours** (`fsg_hint_every agent-stopped`), stamped in the hint
   dir before it prints, as the nudge is: every session shares the stamp, and a stamp
   that cannot be written prints nothing. `install` and `uninstall` remove it with
-  the nudge's stamps.
+  the nudge's stamps. Prompts that come at once (several sessions, subagents) all
+  pass the quick stamp check before any writes it, so the prompt that would warn
+  first takes a lock (`mkdir` of `agent-stopped.lock`), reads the stamp again under
+  it and writes it before it prints; a prompt that finds the lock taken says
+  nothing, and a lock left by a killed hook is removed after a minute. Six prompts
+  at once give one warning.
 - **What it says.** The last tick's age against the interval, that the guard is not
   watching fseventsd, the causes (unloaded, switched off, hung), and the app copy's
   `doctor` to run in a terminal, which names the cause and the fix. `FSG_HINT=0`

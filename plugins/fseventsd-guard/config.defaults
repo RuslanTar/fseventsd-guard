@@ -34,7 +34,8 @@ FSG_CPU_ESCALATE_TICKS=3
 FSG_TOP_TIMEOUT_S=15
 # The agent's check and a heal's precheck try a `top` that did not answer in time up
 # to this many times in all, this many seconds apart (a loaded Mac; with the
-# defaults about a minute at most). status, the hooks and the checks inside a heal
+# defaults about a minute at most). So does heal --dry-run, which can therefore take
+# up to about a minute on a loaded Mac. status, the hooks and the checks inside a heal
 # try once; a heal whose precheck needed more than one try checks once more before
 # its Docker step and stops there (exit 3, Docker untouched) if top misses again.
 # The tries stop within half of FSG_AGENT_INTERVAL_S whatever these say (doctor
@@ -52,7 +53,9 @@ FSG_STATUS_PROBE=0
 FSG_AGENT_PROBE=1
 
 # --- Background agent ---------------------------------------------------------------
-# launchd StartInterval of the agent (rendered into the plist at install).
+# launchd StartInterval of the agent (rendered into the plist at install; re-run
+# install after changing it). doctor warns while the plist's value differs, and
+# status, doctor and the stopped-agent warning judge a stale agent by the longer one.
 FSG_AGENT_INTERVAL_S=300
 # At most one emergency heal per this many seconds, counted from the newest of: the
 # last restart the guard made for any reason, the last heal attempt that reached the

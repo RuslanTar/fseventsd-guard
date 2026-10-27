@@ -64,7 +64,8 @@ Two tiers act:
   `docs/WORKFLOW-INTEGRATION.md`.
 - **Emergency (the agent).** It acts only when the daemon is clearly broken. It still
   drains first: it waits for leased runs up to 60 minutes and for other detected
-  work up to 10 minutes, then proceeds and tells you which runs it cut.
+  work up to 10 minutes, then proceeds and tells you which runs it cut. It stops
+  waiting early once the footprint passes 4 GB (`FSG_EMERGENCY_CUT_MB`).
 
 ### The drain: which runs wait, which are cut
 
@@ -431,7 +432,8 @@ $G status                  # human summary, with the agent's last tick (STALE wh
                            # and the last restart the guard did not make
 $G status --json --probe   # for scripts (schema in docs/DESIGN.md)
 $G leases                  # drain state and what counts as running work
-$G heal --dry-run          # what a heal would do right now
+$G heal --dry-run          # what a heal would do right now (it retries a slow top,
+                           # so up to about a minute on a loaded Mac)
 $G heal                    # the agent drains, restarts, restores; this waits for it
 $G heal --result ID        # re-attach to a heal after Ctrl-C (or one queued with --no-wait)
 $G run --label specs -- bin/parallel-specs   # run under a lease
@@ -442,7 +444,13 @@ Tune thresholds in `~/Library/Application Support/fseventsd-guard/config`. Every
 default is listed with its meaning in `config.defaults`. Settings rendered into the
 root helper (floor, interval) need `install` again; `doctor` flags the drift.
 `install` refuses a floor below 150 MB or an interval below 1800 s (a trial interval
-below 120 s), and names each one that differs from `config.defaults`. The
+below 120 s), and names each one that differs from `config.defaults`. So does
+`FSG_AGENT_INTERVAL_S`, which `install` writes into the agent's plist as its
+`StartInterval`: `doctor` warns while the two differ, and until `install` runs again
+`status`, `doctor` and the stopped-agent warning judge the agent by the longer of
+the two. `doctor` also warns when `FSG_MEASURE_TRIES` x (`FSG_TOP_TIMEOUT_S` +
+`FSG_MEASURE_RETRY_S`) reaches `FSG_AGENT_INTERVAL_S`: a check then makes only the
+tries that fit in half the interval, and the warning says how many. The
 file is read, never run as shell: only `KEY=VALUE` lines for a key in
 `config.defaults` count, with a value of letters, digits and `. _ - : / @` (spaces
 only inside quotes; a `# comment` may follow). Any other line is ignored, logged,
@@ -473,7 +481,7 @@ the plugin on but do not install it: each teammate still runs the one-time
 | Hook | Speaks when | Says | How often, at what cost |
 |---|---|---|---|
 | `UserPromptSubmit` (`prompt`): the install nudge | The guard is not installed (no agent plist, no root helper: an install stopped at the root question or at sudo does not count) on an affected macOS version | fseventsd's footprint in MB and as a multiple of the 30 MB budget, its uptime and level, why that matters, and what to run in a new terminal window (install asks for sudo): `if [ -d ~/fseventsd-guard ]; then git -C ~/fseventsd-guard pull --ff-only; else git clone https://github.com/RuslanTar/fseventsd-guard.git ~/fseventsd-guard; fi && ~/fseventsd-guard/plugins/fseventsd-guard/fseventsd-guard install` (an existing clone is updated first), then the same path with `doctor`. A short warning for you (`systemMessage`) and the facts for Claude, which says that you have not been told yet | At most hourly at runaway (1 GB and up), every 3 hours at warn (256 MB and up), daily below that; the stamps in `~/Library/Caches/fseventsd-guard-hint` are shared by every session. It measures (`top`, about 2 s) at most once an hour; any other prompt costs a file read (about 25 ms in all, through the wrapper) |
-| `UserPromptSubmit` (`prompt`): the stopped-agent warning | The agent's plist is installed, but its last tick is older than twice `FSG_AGENT_INTERVAL_S` (5 minutes), as `status` and `doctor` judge it (the heartbeat, or with none the newest `TICK` line or the install; a tick still in a heal counts as running): the agent is unloaded, switched off in Login Items & Extensions, or hung. Never while the Mac has been up or awake for less than two intervals: launchd runs the agent at login and on wake, and a prompt can come first | How long ago the last tick was, that the guard is not watching fseventsd, the likely causes, and to run `"$HOME/Library/Application Support/fseventsd-guard/app/fseventsd-guard" doctor` in a terminal (the installed app copy, as the heal notice names it). A short warning for you (`systemMessage`) and the facts for Claude, which says that you have not been told yet | At most every 6 hours; its stamp in `~/Library/Caches/fseventsd-guard-hint` is shared by every session. A recent heartbeat costs the config and one file read (about 25 ms more per prompt than without the check, through the wrapper, on a loaded Mac); it never measures fseventsd or asks `launchctl` |
+| `UserPromptSubmit` (`prompt`): the stopped-agent warning | The agent's plist is installed, but its last tick is older than twice the agent's interval (`FSG_AGENT_INTERVAL_S`, 5 minutes, or the plist's `StartInterval` when that is longer), as `status` and `doctor` judge it (the heartbeat, or with none the newest `TICK` line or the install; a tick still in a heal counts as running, and a tick rewrites its heartbeat after each heal it runs): the agent is unloaded, switched off in Login Items & Extensions, or hung. Never while the Mac has been up or awake for less than two intervals: launchd runs the agent at login and on wake, and a prompt can come first | How long ago the last tick was, that the guard is not watching fseventsd, the likely causes, and to run `"$HOME/Library/Application Support/fseventsd-guard/app/fseventsd-guard" doctor` in a terminal (the installed app copy, as the heal notice names it). A short warning for you (`systemMessage`) and the facts for Claude, which says that you have not been told yet | At most every 6 hours, also when prompts come at once (several sessions or subagents: one of them warns); its stamp in `~/Library/Caches/fseventsd-guard-hint` is shared by every session. A recent heartbeat costs the config and one file read (about 25 ms more per prompt than without the check, through the wrapper, on a loaded Mac); it never measures fseventsd or asks `launchctl` |
 | `PreToolUse` and `PostToolUse` on Bash (`bash`): the heal notice | The guard is installed and a heal is draining, in its Docker step, holding runs because Docker did not verify, or ended in the last 10 minutes | To Claude only: since when, the trigger, what the heal's Docker step does to Docker, that `docker`, `docker compose` and test commands may fail or hang until it ends, that leased runs resume by themselves, that restarting Docker by hand interferes, and `status`; once it ended, the result, that a failure in that window is likely the heal, and (when fseventsd restarted) to restart a session that stops seeing file changes | Once per heal, phase (draining, Docker step, held, ended) and session; a subagent that Claude Code names (`agent_id`) gets its own. Stamps in `$TMPDIR/fseventsd-guard-hook`, removed after a day. It reads the guard's state files only, never Docker or fseventsd: about 15-20 ms per Bash call with no heal, through the wrapper |
 
 Once the guard is installed the nudge stops, and the agent heals unattended; the
@@ -524,7 +532,8 @@ None of them lets a non-root user gain root.
   Sharing later and the agent works from the old list until you run `doctor` (or
   `install`) in a terminal, which refreshes the copy. A wrong pick only makes the
   check skip, never fail. With no copy (the terminal could not read the list
-  either), set `FSG_PROBE_DIR`.
+  either), let the terminal app access other apps' data (macOS asks, or System
+  Settings > Privacy & Security) and run `doctor` again, or set `FSG_PROBE_DIR`.
 - **No bind-mount check in a path with ':'.** `docker run -v` splits its argument
   at ':', so the guard never picks a shared folder with one in its path, and a
   probe dir with one (`FSG_PROBE_DIR`, or a state dir under such a path) skips the
@@ -568,15 +577,20 @@ None of them lets a non-root user gain root.
 - **launchd caps the agent's exit time at 60 s.** The plist asks for enough time to
   restore Docker after a signal (`ExitTimeOut`, 1390 s with the defaults), but
   launchd gives a user agent at most 60 s from SIGTERM to SIGKILL (measured on macOS
-  27.0.1; `doctor` prints the value in use). A heal stopped at logout or by
-  `launchctl bootout` past its Docker before-step can then be killed in its
-  restore, and recovery comes from the Docker intent and the next tick (the item
-  below).
+  27.0.1; `doctor` names it when launchd grants less than the plist asks). A heal
+  stopped at logout or by `launchctl bootout` past its Docker before-step can then
+  be killed in its restore, and recovery comes from the Docker intent and the next
+  tick (the item below). After a `bootout` that tick comes only once the agent is
+  loaded again (at login, or with `launchctl bootstrap`); leased runs hold behind
+  the Docker intent meanwhile, for at most `FSG_FAILED_HOLD_S`.
 - **A loaded Mac can still blind the guard.** The agent's check and a heal's
   precheck try a `top` that misses `FSG_TOP_TIMEOUT_S` (15 s) three times, 5 s
   apart, and the agent runs unthrottled (`ProcessType Interactive`). A Mac so
   loaded that every try misses stays blind: no warning, no heal, and no delivery
-  probe, so a stall goes unseen too; three such checks in a row notify. The root
+  probe, so a stall goes unseen too; three such checks in a row notify. The tries
+  stop within half of `FSG_AGENT_INTERVAL_S`, so a short interval allows fewer
+  (`doctor` warns). An emergency heal that cannot measure sends its `cannot heal`
+  notice at most once per `FSG_WARN_RENOTIFY_MIN` (60 minutes). The root
   helper runs its own `top`, also up to three 15 s tries 5 s apart: if all three
   miss, the helper refuses (70) after the drain and the Docker step, and the heal
   ends with exit 7, Docker restored. A heal whose precheck needed a second try takes
@@ -679,7 +693,7 @@ None of them lets a non-root user gain root.
   - `status` and `doctor` show a busy agent as STALE during a tick past
     `2 * FSG_AGENT_INTERVAL_S` outside a drain (recovery pass, precheck of the next
     request, trial collection), because the heartbeat is written only at tick start
-    and end.
+    and end, just before a heal's drain ends and after each heal.
   - Timing-flaky tests: a 1 s `FSG_RUN_MAX_WAIT_S` can give up before the first
     "holding" line, and a real process with pid 4242 looks like the fake fseventsd.
 - **Open minor items (review of 2026-10-22).** Not fixed yet:
@@ -724,9 +738,8 @@ None of them lets a non-root user gain root.
     that moment takes no lease, so a heal does not wait for it.
   - `uninstall --keep-logs` can leave a stray `.install-manifest.XXXXXX` temp file,
     from an install that was cut short, in the kept root log dir.
-  - `uninstall` does not check the agent's Background Items record (Login Items &
-    Extensions in System Settings); it reports only the launchd switched-off
-    setting.
+  - `uninstall` does not check the agent's entry in System Settings > General >
+    Login Items & Extensions; it reports only the launchd switched-off setting.
   - `uninstall --force` during a heal's Docker step can print the Docker restore
     text twice: before its question, and again once the agent stopped if the
     stopped tick did not restore Docker.
@@ -736,7 +749,7 @@ None of them lets a non-root user gain root.
     verified.
 - **Live launchd checks still owed on a real Mac.** The suite stubs `launchctl`, so
   these have not run for real: Docker Desktop surviving the agent's process-group
-  kill at job exit, the agent switched off in Background Items (the tick's trap and
+  kill at job exit, the agent switched off in Login Items & Extensions (the tick's trap and
   the waiting caller's exit 9), shutdown or `ExitTimeOut` recovery of a heal cut
   part way, and a real `uninstall` (its sudo of the root-owned root-steps copy,
   `bootout` of a running tick, the `launchctl print-disabled` line it looks for).
