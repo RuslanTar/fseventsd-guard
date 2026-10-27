@@ -882,7 +882,11 @@ fsg_heal_main() { # trigger variant policy cap force
   t0=$(fsg_now)
   fsg_heal_precheck "$5"
   if [ $H_MRC -ne 0 ]; then
-    fsg_notify "fseventsd-guard: cannot heal" "cannot measure" "$M_ERR. Next: fseventsd-guard doctor."
+    # The agent tries again every tick while the Mac stays loaded (nothing stamps
+    # an attempt here): one notice per renotify window.
+    if [ "$HEAL_TRIGGER" != emergency ] || fsg_throttle heal-cannot-measure "$FSG_WARN_RENOTIFY_MIN"; then
+      fsg_notify "fseventsd-guard: cannot heal" "cannot measure" "$M_ERR. Next: fseventsd-guard doctor."
+    fi
     fsg_say "heal: cannot measure fseventsd ($M_ERR)"
     return 3
   fi
@@ -1091,8 +1095,10 @@ fsg_heal_run() { # t0 old_pid cap policy
     fsg_log "HEAL busy: top missed again before the Docker step; Docker left alone ($H_GATE_ERR)"
     fsg_heal_record refused-cannot-measure $(( $(fsg_now) - t0 ))
     [ "$HEAL_TRIGGER" = emergency ] && fsg_now > "$FSG_STATE_DIR/last-attempt"
-    fsg_notify "fseventsd-guard: cannot heal" "cannot measure" \
-      "top missed again before the Docker step; Docker left alone ($H_GATE_ERR; the precheck needed $H_TRIES tries). Nothing was stopped or restarted. Next: fseventsd-guard doctor."
+    if [ "$HEAL_TRIGGER" != emergency ] || fsg_throttle heal-cannot-measure "$FSG_WARN_RENOTIFY_MIN"; then
+      fsg_notify "fseventsd-guard: cannot heal" "cannot measure" \
+        "top missed again before the Docker step; Docker left alone ($H_GATE_ERR; the precheck needed $H_TRIES tries). Nothing was stopped or restarted. Next: fseventsd-guard doctor."
+    fi
     fsg_say "heal: cannot measure fseventsd before the Docker step ($H_GATE_ERR); Docker left alone, nothing was stopped or restarted"
     return 3
   fi

@@ -2938,6 +2938,16 @@ if ! skip_case slow-top; then
   eq "$(grep -c 'cannot heal' "$FSG_FAKE/notifications.log")" 1 "one cannot-heal notice"
   eq "$(cat "$FSG_FAKE/docker/desktop")" running "Docker still running"
 
+  t "an emergency heal whose precheck cannot measure notifies once per renotify window"
+  docker_default; install_fake --no-agent; mem 3G
+  : > "$FSG_FAKE/notifications.log"
+  # Each tick alike: its own check answers at once, all three precheck tries miss.
+  printf '0\n5\n5\n5\n0\n5\n5\n5\n' > "$FSG_FAKE/top-delay-seq"
+  FSG_TOP_TIMEOUT_S=2 FSG_MEASURE_RETRY_S=0 "$G" tick > "$C/o" 2>&1; eq $? 3 "tick 1: cannot measure in the precheck ($(tail -n 1 "$C/o"))"
+  FSG_TOP_TIMEOUT_S=2 FSG_MEASURE_RETRY_S=0 "$G" tick > "$C/o" 2>&1; eq $? 3 "tick 2: the same"
+  eq "$(grep -c 'cannot heal' "$FSG_FAKE/notifications.log")" 1 "one cannot-heal notice for two ticks"
+  hasnt "$(cat "$FSG_FAKE/calls.log")" "sudo -n /" "no restart"
+
   t "a heal whose precheck answered at once measures no more before the Docker step"
   docker_default; install_fake; mem 3G
   agent_env FSG_TOP_TIMEOUT_S=2 FSG_MEASURE_RETRY_S=0
