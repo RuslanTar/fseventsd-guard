@@ -18,6 +18,7 @@ decision from an accident. The user-facing summary is `../README.md`.
 | Affected = a range: from the first version with a reported runaway (15.6.1) up to the first fixed version of each major line (replaces an explicit list, 2026-10-20) | owner, 2026-10-25 (§9) |
 | Only the launchd agent runs heals; wave, manual and trial callers write a request and wait for its result | owner, 2026-10-20 (§5.3) |
 | The plugin's prompt hook warns when the guard is installed but its agent stopped ticking | owner, 2026-10-26 (§14) |
+| Thresholds from a week of logs: warn 256 MB, act 1 GB, emergency ceiling 4 GB | owner, 2026-10-27 (§4) |
 
 ## 2. Parts and where they live
 
@@ -207,15 +208,15 @@ scripts can source it. The root helper is `/bin/sh` with absolute tool paths.
 
 | Tier | Trigger | Action | Value | Why |
 |---|---|---|---|---|
-| warn | footprint ≥ `FSG_WARN_MB` | notify (renotify after 60 min or when doubled) | 500 MB | healthy was 4-90 MB |
+| warn | footprint ≥ `FSG_WARN_MB` | notify (renotify after 60 min or when doubled) | 256 MB | 2.5x the healthy maximum: 102 MB in 1858 checks over a week on the author's Mac (2026-10-20 to 10-26). At 500 MB the one growth seen there, peak 498 MB, never warned |
 | wave boundary | workflow calls `status` → 1 or 2 | `heal --trigger wave`: a request the agent runs (cap policy abort) | n/a | preferred tier |
 | wave back-off | a wave heal gave up at the drain cap < 60 min ago | wave heals exit 11 without draining | 60 min | a never-free machine would otherwise get an hour-long hold at every wave boundary; whether a warn alone should drain at all is an open question (§12) |
-| emergency | footprint ≥ `FSG_ACT_MB`, or a **confirmed** stalled probe | the tick's own emergency heal (cap policy proceed) | 2 GB | well above warn, before the machine suffers |
-| CPU escalator | footprint ≥ `FSG_WARN_MB` and fseventsd at ≥ `FSG_CPU_ESCALATE_PCT` of one core for `FSG_CPU_ESCALATE_TICKS` ticks in a row | counts as runaway, so as emergency above; `status` says runaway too (a wave boundary drains with the full cap) | 50%, 3 ticks | a runaway pins a core: 1.2 GB at 100% CPU ([claude-code#96008](https://github.com/anthropics/claude-code/issues/96008)) sat between warn and act. macOS's own CPU report fires at 50% over 180 s ([talkstream/fseventsd-runaway@78396ba](https://github.com/talkstream/fseventsd-runaway/tree/78396ba)) |
+| emergency | footprint ≥ `FSG_ACT_MB`, or a **confirmed** stalled probe | the tick's own emergency heal (cap policy proceed) | 1 GB | 10x the healthy maximum, before the machine suffers: at the fastest growth seen (2.8 GB/h on 2026-10-21, 150 to 427 MB in 6 minutes) a drain that runs its whole 60-minute cap ends near 3.8 GB, against 4.8 GB from 2 GB |
+| CPU escalator | footprint ≥ `FSG_WARN_MB` and fseventsd at ≥ `FSG_CPU_ESCALATE_PCT` of one core for `FSG_CPU_ESCALATE_TICKS` ticks in a row | counts as runaway, so as emergency above; `status` says runaway too (a wave boundary drains with the full cap) | 50%, 3 ticks | a runaway pins a core: 1.2 GB at 100% CPU ([claude-code#96008](https://github.com/anthropics/claude-code/issues/96008)) sat between the 500 MB and 2 GB tiers of the time. macOS's own CPU report fires at 50% over 180 s ([talkstream/fseventsd-runaway@78396ba](https://github.com/talkstream/fseventsd-runaway/tree/78396ba)). The footprint gate stays: in the week of logs a healthy daemon's 5-minute average reached 48%, and `top` showed 50% or more for 3 checks in a row at 86 MB |
 | emergency interval | last guard restart, last heal attempt that reached the Docker step (or an emergency heal refused there, exit 14, or ended there by a `top` that missed again, exit 3), or the helper's root stamp < 3 h ago | notify only | 10800 s | the original requirements: "at most once per ~3 h", "no restart loops". Counted from the newest of the three, so a wave heal plus an emergency heal cannot loop, and neither can a helper that keeps failing after Docker was stopped, nor a drain repeated every tick for a `--rm` container that keeps running (§6) or on a Mac too loaded for `top` (§5.3) |
-| helper floor | helper refuses below | n/a | 150 MB | above healthy (≤ 90 MB), below warn |
+| helper floor | helper refuses below | n/a | 150 MB | above healthy (≤ 102 MB), below warn |
 | helper interval | helper refuses within | n/a | 1800 s | hard backstop under every tier |
-| emergency ceiling | footprint ≥ `FSG_EMERGENCY_CUT_MB` during an emergency drain | stop waiting, proceed | 8 GB | the daemon reached 17 GB on a 96%-full disk; waiting 60 min more risks the machine |
+| emergency ceiling | footprint ≥ `FSG_EMERGENCY_CUT_MB` during an emergency drain | stop waiting, proceed | 4 GB | the daemon reached 17 GB on a 96%-full disk; waiting 60 min more risks the machine. From the act threshold it fires within the cap only when growth outruns 3 GB/h; the 8 GB of before could not fire within the cap from 2 GB at the rates seen |
 
 The CPU share is the CPU time fseventsd used since the previous tick divided by the
 wall time between the two (`ps -o time`, kept in `tick-sample` in the state dir), an
@@ -224,8 +225,10 @@ starts over, so a restart resets the count. `status` honours the agent's count
 only for the same pid and a record younger than two agent intervals.
 
 A stall counts only if a second probe, run right away, also stalls. At load
-average 100-300 one slow probe is not evidence. All values are config knobs, to be
-calibrated from a few days of logs (open question, §12).
+average 100-300 one slow probe is not evidence. All values are config knobs. Warn,
+act and the ceiling were set from a week of logs on the author's Mac (owner,
+2026-10-27): one Mac, and one growth episode that peaked at 498 MB, caught by the
+stall rule (§12 item 1).
 
 ## 5. The drain
 
@@ -962,7 +965,7 @@ change. New fields may be added. A breaking change bumps the schema to `/2`.
   "footprint_mb": 5,
   "cpu_pct": 4.2,
   "uptime_s": 8821,
-  "thresholds": {"budget_mb": 30, "warn_mb": 500, "act_mb": 2048},
+  "thresholds": {"budget_mb": 30, "warn_mb": 256, "act_mb": 1024},
   "probe": {"ran": true, "result": "ok|stalled|error|unavailable|skipped", "latency_ms": 11, "timeout_s": 10, "start_ms": 0},
   "drain": {"pending": false, "phase": null, "reason": null, "live_leases": 0},
   "last_heal": null,
@@ -1093,14 +1096,17 @@ machine measured 50-200 events/s normally and 2,117-5,715 on flood days
 | Heals run where they are called (implicit) | Only the agent heals; callers queue a request and wait | A killed caller must not strand Docker (owner, 2026-10-20) |
 | Stall → heal | Stall confirmed by a second probe | Load average 100-300 |
 | Footprint via `top` (and `footprint` if cheap) | `top` for the decision; `footprint` (10 s bound) only in the helper's evidence | `footprint` on a 17 GB process is slow |
-| (not planned) | Emergency ceiling 8 GB cuts the drain short | Protects a machine with a nearly full disk |
+| (not planned) | Emergency ceiling (4 GB) cuts the drain short | Protects a machine with a nearly full disk |
 | (not planned) | Helper requires ppid 1 | A root process exec'ing the binary from elsewhere is not the daemon |
 | (not planned) | `doctor --affected` and the affected version range | Owner, 2026-10-16, 2026-10-20 and 2026-10-25 |
 
 ## 12. Open questions
 
-1. Thresholds after a few days of logs (warn 500 MB, act 2 GB, floor 150 MB,
-   emergency interval 3 h, ceiling 8 GB, drain cap 60 min).
+1. Thresholds: set from a week of logs on the author's Mac (owner, 2026-10-27,
+   §4): warn 500 to 256 MB, act 2 GB to 1 GB, ceiling 8 GB to 4 GB; the floor
+   (150 MB), the emergency interval (3 h) and the drain cap (60 min) stay. The log
+   holds one Mac and no growth past 498 MB, so a runaway seen elsewhere can still
+   move them.
 2. Which Docker variant wins (trials pending). B is the default until then.
 3. Recording fixes (§9): `FSG_AFFECTED_FIXED` is empty, so every version from
    15.6.1 on counts as affected until a fix is reported and added.
