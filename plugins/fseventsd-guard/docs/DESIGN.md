@@ -281,7 +281,11 @@ machine that is always busy:
   nothing: Docker has not been touched.
 - Max wait: `FSG_RUN_MAX_WAIT_S` (default 0 = until the drain's own deadline).
   At the limit, `FSG_RUN_ON_TIMEOUT=fail` (default) returns 75 (EX_TEMPFAIL), and
-  `proceed` starts anyway.
+  `proceed` starts anyway. Waiting is the default (owner, 2026-10-27) because a
+  held run that proceeds does so exactly while Docker is stopped or being
+  restored, the one thing the lease exists to prevent, so every heal would turn
+  into false test failures; the wait is bounded by the drain's deadline, and a
+  drain whose owner died is ignored.
 - It never blocks a run because of its own problems. If the state directory cannot
   be created or the start time cannot be read, the run goes ahead.
   `FSG_DISABLE=1` turns it off. Where the guard is not installed (no app copy, as

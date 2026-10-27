@@ -179,6 +179,11 @@ fi
 - Nested leased scripts inherit the outer lease, so they never deadlock.
 - Exit 75 means the run gave up waiting for a drain (only with `FSG_RUN_MAX_WAIT_S`
   set). Treat it like a transient infrastructure failure: retry later.
+- A held run waits by default, and no runner should set `FSG_RUN_ON_TIMEOUT=proceed`:
+  a run that proceeds starts exactly while Docker is stopped or being restored, so
+  every heal would show up as false test failures. A runner under a hard time limit
+  of its own sets `FSG_RUN_MAX_WAIT_S` below that limit and turns 75 into its own
+  "did not run" result.
 
 ### 2.1 Which runners to lease
 
