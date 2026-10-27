@@ -143,8 +143,10 @@ scripts can source it. The root helper is `/bin/sh` with absolute tool paths.
   named `fseventsd` (`pgrep -x -u 0`, so a user process with that name can neither
   block it nor blind the guard's measurement) that runs as uid 0 with launchd (ppid 1) as parent and whose `ps` comm
   (the process's argv[0], not a verified executable path) is the system fseventsd path, when its footprint is at or above the floor (150 MB) and its own
-  rate limit (30 min, root-owned stamp) allows. It re-checks the pid right before
-  `kill -TERM`. Worst case for a compromised user account: one fseventsd restart
+  rate limit (30 min, root-owned stamp) allows. It reads the footprint with its own
+  `top`: up to three tries of at most 15 s, 5 s apart, with fixed constants (no new
+  input reaches root), re-checking the pid before each further try. It re-checks the
+  pid right before `kill -TERM`. Worst case for a compromised user account: one fseventsd restart
   per 30 minutes while the daemon is already over 150 MB; while a trial window is
   open (at most 24 h after an install with `--trial-hours`), one restart per 120 s
   at any footprint. The config can set these (it is user-writable), so they are
@@ -447,9 +449,11 @@ blind the agent at once. Two parts:
   try, right before its Docker step: after the drain and the `--rm` volume checks,
   before the Docker intent, and only when that step acts on Docker (B, C, or A with
   containers to stop; not `none`, nor a Docker that is stopped or not local). The
-  root helper takes one `top` sample of its own, bounded at 15 s and not tried
-  again, and refuses (70) when it misses, after the Docker step ran; this check
-  keeps that from bouncing Docker for nothing on a Mac that has just missed. When
+  root helper runs its own `top`, bounded at 15 s, up to three times 5 s apart (it
+  checks again before each further try that fseventsd is still the same genuine
+  pid, else refuses 69), and refuses (70) when all three miss, after the Docker
+  step ran; this check keeps that from bouncing Docker for nothing on a Mac that
+  has just missed. When
   this `top` misses too, the heal ends with exit 3 and Docker untouched: logged
   (`HEAL busy: top missed again before the Docker step; Docker left alone`),
   recorded as `refused-cannot-measure`, a `cannot heal` notice (cannot measure)
@@ -1146,8 +1150,15 @@ machine measured 50-200 events/s normally and 2,117-5,715 on flood days
    15.6.1 on counts as affected until a fix is reported and added. Who records one,
    on what evidence and when is settled (owner, 2026-10-27, §9).
 4. A stall with a footprint below the helper's floor: the helper refuses, and the
-   guard notifies with the manual command. Should the helper accept a stall it can
-   verify itself (a root-owned copy of the probe)?
+   guard notifies with the manual command. Settled (owner, 2026-10-27): the floor
+   stays and the helper takes no stall path. Verifying a stall as root needs a probe
+   that root runs, and the only probe is a binary the user builds, which root must
+   never run (§3); it would also widen the worst case from "one restart per 30
+   minutes while fseventsd is over 150 MB" to any footprint whenever a probe can be
+   made to time out, which a busy Mac does by itself. In the author's log both stalls
+   below the floor had cleared by the heal's own precheck. Revisit only if the log
+   shows a below-floor stall that persists (`HEAL skipped ... delivery is stalled but
+   the footprint`).
 5. Whether Time Machine really runs a deeper scan after a restart.
 6. Which runners to integrate first (see `WORKFLOW-INTEGRATION.md`). Until then the
    fallback detector carries the drain.
@@ -1172,15 +1183,17 @@ machine measured 50-200 events/s normally and 2,117-5,715 on flood days
     the tick. Checked in the first live B or C trial (`DOCKER-TRIALS.md` §2); if
     Docker shares the group, the plist needs `AbandonProcessGroup` or the agent must
     start Docker Desktop with `open -a Docker` (owner decision).
-11. The root helper measures with its own `top`, bounded at 15 s and tried once: on
-    a Mac loaded enough to miss that, it refuses with 70 after the drain and the
-    Docker before-step ran (exit 7). A heal whose precheck needed a second `top`
-    takes one more right before the Docker step and ends with 3, Docker untouched,
-    when it misses (§5.3); a helper `top` that misses after that one answered, or
-    after a precheck that answered at once, still ends this way. Retrying in the
-    helper changes root code, so every install asks for sudo again (owner
-    decision). With `ProcessType` `Interactive` it most likely runs at the agent's
-    priority (§5.3, not checked).
+11. The root helper measures with its own `top`. Settled (owner, 2026-10-27): it
+    tries up to three times, 15 s each, 5 s apart (55 s at most, inside
+    `FSG_HELPER_TIMEOUT_S`), logs a `NOTE` per miss, and re-checks the genuine pid
+    before each further try (69 when it changed). Only a Mac loaded enough to miss
+    all three still refuses with 70 after the drain and the Docker before-step ran
+    (exit 7). A heal whose precheck needed a second `top` takes one more right
+    before the Docker step and ends with 3, Docker untouched, when it misses (§5.3).
+    An install from before the retry keeps its single try until the next install
+    (`doctor` reports the helper as differing; the install asks for sudo). With
+    `ProcessType` `Interactive` it most likely runs at the agent's priority (§5.3,
+    not checked).
 12. A tick that cannot measure returns before its probe, so a delivery stall goes
     unseen while the agent is blind. It could still probe and notify a stall
     (it cannot heal without a measurement).

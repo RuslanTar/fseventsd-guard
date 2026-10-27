@@ -570,13 +570,19 @@ None of them lets a non-root user gain root.
   apart, and the agent runs unthrottled (`ProcessType Interactive`). A Mac so
   loaded that every try misses stays blind: no warning, no heal, and no delivery
   probe, so a stall goes unseen too; three such checks in a row notify. The root
-  helper takes its own `top` sample, bounded at 15 s and tried once: if it misses,
-  the helper refuses (70) after the drain and the Docker step, and the heal ends
-  with exit 7, Docker restored. A heal whose precheck needed a second try takes one
-  more `top` right before the Docker step and, if that misses too, ends with exit 3
-  before it touches Docker (an emergency heal ending this way waits out the 3-hour
-  emergency interval); the helper can still miss after that one answered.
-  Retrying in the helper is root code (a sudo install).
+  helper runs its own `top`, also up to three 15 s tries 5 s apart: if all three
+  miss, the helper refuses (70) after the drain and the Docker step, and the heal
+  ends with exit 7, Docker restored. A heal whose precheck needed a second try takes
+  one more `top` right before the Docker step and, if that misses too, ends with
+  exit 3 before it touches Docker (an emergency heal ending this way waits out the
+  3-hour emergency interval). An install from before the helper's retry keeps a
+  single try until you install again (`doctor` reports the helper as differing; the
+  install asks for sudo once).
+- **No restart below the helper's floor, stalled or not.** A delivery stall at a
+  footprint under 150 MB is notified with the manual fix, never healed: the helper
+  would need a probe that root runs, and the only one is a binary you build, which
+  root never runs. The stalls below the floor seen so far had cleared by the heal's
+  own precheck. Kept that way on purpose (owner, 2026-10-27).
 - **An agent killed outright mid-heal.** A caller cannot stop a heal, but the
   agent's tick can still be killed (`kill -9`, or launchd's SIGKILL at the end of
   its exit time, above). That runs no cleanup: Docker stays as the heal left it
