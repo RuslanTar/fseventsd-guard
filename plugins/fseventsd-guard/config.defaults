@@ -16,10 +16,13 @@
 # --- Thresholds (MB of physical footprint, as top's MEM column reports it) ---------
 # Apple's own launchd memory budget for fseventsd. Reported only.
 FSG_BUDGET_MB=30
-# Warn tier: notify only. A healthy daemon sat at 4-90 MB on the author's Mac.
-FSG_WARN_MB=500
-# Emergency tier: the background agent heals (through the drain).
-FSG_ACT_MB=2048
+# Warn tier: notify only. A healthy daemon stayed at or below 102 MB over a week of
+# checks on the author's Mac, and the one growth seen there peaked at 498 MB.
+FSG_WARN_MB=256
+# Emergency tier: the background agent heals (through the drain). 10x the healthy
+# maximum; at the fastest growth seen there (2.8 GB/h), a drain that runs its whole
+# 60-minute cap from here ends near 3.8 GB.
+FSG_ACT_MB=1024
 # CPU escalator: a footprint at or above warn with fseventsd at or above this share
 # of one core (percent, from the CPU time it used between two ticks) for
 # FSG_CPU_ESCALATE_TICKS ticks in a row counts as runaway, like the act threshold
@@ -152,7 +155,8 @@ FSG_CAP_POLICY_MANUAL=abort
 # emergency heals are not affected.
 FSG_WAVE_RETRY_MIN=60
 # Emergency heals stop waiting early when the footprint passes this (0 = never).
-FSG_EMERGENCY_CUT_MB=8192
+# From the act threshold, growth faster than 3 GB/h reaches it within the drain cap.
+FSG_EMERGENCY_CUT_MB=4096
 # The agent drops a heal request older than this when it takes it (exit 13): it
 # was queued while the agent was unloaded or the user logged out.
 FSG_REQUEST_MAX_AGE_S=7200

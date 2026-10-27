@@ -277,13 +277,18 @@ if ! skip_case status; then
   t "status warn"
   mem 612M; out=$("$G" status --json); rc=$?
   eq $rc 1 "exit"; eq "$(jget "$out" 'd["level"]')" warn "level"
-  has "$(jget "$out" 'd["reasons"][0]')" "warn threshold 500" "reason"
+  has "$(jget "$out" 'd["reasons"][0]')" "warn threshold 256" "reason"
+  eq "$(jget "$out" 'd["thresholds"]["warn_mb"]')" 256 "warn default"
+  mem 256M; "$G" status >/dev/null; eq $? 1 "warn threshold is inclusive"
+  mem 255M; "$G" status >/dev/null; eq $? 0 "below warn"
 
   t "status runaway"
   mem 3G; "$G" status >/dev/null; eq $? 2 "3G exit"
-  mem 1.5G; "$G" status >/dev/null; eq $? 1 "1.5G = 1536 MB is warn"
+  mem 0.9G; "$G" status >/dev/null; eq $? 1 "0.9G = 921 MB is warn"
   mem 17G; out=$("$G" status --json); eq "$(jget "$out" 'd["footprint_mb"]')" 17408 "17G in MB"
-  mem 2048M; "$G" status >/dev/null; eq $? 2 "act threshold is inclusive"
+  eq "$(jget "$out" 'd["thresholds"]["act_mb"]')" 1024 "act default"
+  mem 1024M; "$G" status >/dev/null; eq $? 2 "act threshold is inclusive"
+  mem 1023M; "$G" status >/dev/null; eq $? 1 "below act"
 
   t "status cannot measure"
   : > "$FSG_FAKE/fsev/pids"; out=$("$G" status --json); rc=$?
@@ -314,12 +319,12 @@ if ! skip_case status; then
   has "$out" "delivery probe: ok (5 ms)" "latency from the old format"; hasnt "$out" "stream start" "no start line"
 
   t "status thresholds precedence"
-  mem 300M
-  "$G" status >/dev/null; eq $? 0 "300M default ok"
-  FSG_WARN_MB=200 "$G" status >/dev/null; eq $? 1 "env warn 200"
-  mkdir -p "$FSG_STATE_DIR"; echo "FSG_WARN_MB=250" > "$FSG_STATE_DIR/config"
-  "$G" status >/dev/null; eq $? 1 "user config warn 250"
-  FSG_WARN_MB=400 "$G" status >/dev/null; eq $? 0 "env beats user config"
+  mem 200M
+  "$G" status >/dev/null; eq $? 0 "200M default ok"
+  FSG_WARN_MB=150 "$G" status >/dev/null; eq $? 1 "env warn 150"
+  mkdir -p "$FSG_STATE_DIR"; echo "FSG_WARN_MB=180" > "$FSG_STATE_DIR/config"
+  "$G" status >/dev/null; eq $? 1 "user config warn 180"
+  FSG_WARN_MB=220 "$G" status >/dev/null; eq $? 0 "env beats user config"
 
   t "affected versions: a range"
   for v in 15.6.1 15.6.2 15.7.9 15.10 26.0 26.4.1 27.0 27.0.0 27.0.1 27.2 28.0; do
@@ -360,9 +365,9 @@ if ! skip_case config-check; then
   mkdir -p "$FSG_STATE_DIR"; echo "FSG_ACT_MB=2G" > "$FSG_STATE_DIR/config"
   mem 17G; out=$("$G" status --json 2> "$C/err"); rc=$?
   eq $rc 2 "17 GB is runaway with the default act threshold"
-  eq "$(jget "$out" 'd["thresholds"]["act_mb"]')" 2048 "default used"
+  eq "$(jget "$out" 'd["thresholds"]["act_mb"]')" 1024 "default used"
   has "$(cat "$C/err")" "FSG_ACT_MB='2G'" "stderr names the key and value"
-  has "$(cat "$FSG_LOG")" "CONFIG FSG_ACT_MB='2G' from $FSG_STATE_DIR/config is not a whole number; using the default 2048" "logged"
+  has "$(cat "$FSG_LOG")" "CONFIG FSG_ACT_MB='2G' from $FSG_STATE_DIR/config is not a whole number; using the default 1024" "logged"
   docker_default; install_fake --no-agent
   "$G" doctor --prefix "$FSG_PREFIX" > "$C/doc.out" 2>/dev/null; eq $? 2 "doctor fails"
   has "$(cat "$C/doc.out")" "FAIL  config: FSG_ACT_MB='2G' ($FSG_STATE_DIR/config) is not a whole number" "doctor names key and value"
@@ -370,8 +375,8 @@ if ! skip_case config-check; then
   t "numeric config: environment, leading zeros, empty"
   FSG_DRAIN_POLL_S=abc "$G" doctor --prefix "$FSG_PREFIX" > "$C/doc.out" 2>/dev/null
   has "$(cat "$C/doc.out")" "FSG_DRAIN_POLL_S='abc' (environment)" "environment named as the source"
-  mem 300M; FSG_WARN_MB=08 "$G" status >/dev/null 2>&1; eq $? 0 "leading zero rejected (default 500, not 8)"
-  FSG_WARN_MB= "$G" status >/dev/null 2>"$C/err"; eq $? 0 "empty value: default 500"
+  mem 200M; FSG_WARN_MB=08 "$G" status >/dev/null 2>&1; eq $? 0 "leading zero rejected (default 256, not 8)"
+  FSG_WARN_MB= "$G" status >/dev/null 2>"$C/err"; eq $? 0 "empty value: default 256"
   has "$(cat "$C/err")" "FSG_WARN_MB=''" "empty value reported"
   FSG_WARN_MB=200 "$G" status >/dev/null 2>"$C/err"; eq $? 1 "a valid value is kept"
   eq "$(cat "$C/err")" "" "nothing reported for valid values"
@@ -380,7 +385,7 @@ if ! skip_case config-check; then
   t "the user config is parsed, never run as shell"
   mkdir -p "$FSG_STATE_DIR"
   cat > "$FSG_STATE_DIR/config" <<EOF
-FSG_WARN_MB=250   # a comment after a value
+FSG_WARN_MB=150   # a comment after a value
 FSG_DOCKER_VARIANT="A"
 FSG_CAP_POLICY_MANUAL=\$(touch $C/pwned1)
 fsg_source_gate() { FSG_ROOT_TEXT='echo planted-root-text'; FSG_HELPER_TEXT=x; FSG_GATE_NOTE='reviewed: commit fake'; }
@@ -388,7 +393,7 @@ touch $C/pwned2
 FSG_NOT_A_SETTING=1
 FSG_STOP_TIMEOUT_S="30s"
 EOF
-  mem 300M; "$G" status >/dev/null 2>"$C/err"; eq $? 1 "a valid line applies (warn at 250)"
+  mem 200M; "$G" status >/dev/null 2>"$C/err"; eq $? 1 "a valid line applies (warn at 150)"
   absent "$C/pwned1" "a command substitution in a value did not run"
   absent "$C/pwned2" "a command line did not run"
   has "$(cat "$C/err")" "ignored line 3 of" "the unsafe value is ignored"
@@ -1863,7 +1868,8 @@ if ! skip_case heal; then
   killbg "$LAST_BG"
 
   t "heal emergency ceiling"
-  docker_default; install_fake; mem 9G
+  # 5 GB: past the 4 GB default ceiling.
+  docker_default; install_fake; mem 5G
   bg "$G" run --label long -- sleep 60; sleep 1
   s=$(date +%s); "$G" tick > "$C/o" 2>&1; eq $? 0 "healed"
   [ $(( $(date +%s) - s )) -lt 15 ] && ok || bad "did not wait for the 20 s cap"
@@ -4118,10 +4124,10 @@ if ! skip_case tick; then
   t "tick tiers"
   docker_default; install_fake --no-agent
   "$G" tick; eq $? 0 "ok"
-  mem 600M; "$G" tick; eq $? 1 "warn"
-  n=$(grep -c 'fseventsd at 600 MB' "$FSG_FAKE/notifications.log"); eq "$n" 1 "warn notified"
+  mem 300M; "$G" tick; eq $? 1 "warn"
+  n=$(grep -c 'fseventsd at 300 MB' "$FSG_FAKE/notifications.log"); eq "$n" 1 "warn notified"
   "$G" tick; n=$(grep -c 'fseventsd at' "$FSG_FAKE/notifications.log"); eq "$n" 1 "no repeat within the renotify window"
-  mem 1300M; "$G" tick; n=$(grep -c 'fseventsd at' "$FSG_FAKE/notifications.log"); eq "$n" 2 "renotify when doubled"
+  mem 600M; "$G" tick; n=$(grep -c 'fseventsd at' "$FSG_FAKE/notifications.log"); eq "$n" 2 "renotify when doubled"
   has "$(tail -n 1 "$FSG_FAKE/notifications.log")" "Next: run fseventsd-guard heal" "next step"
   mem 3G; : > "$FSG_FAKE/calls.log"; "$G" tick > /dev/null 2>&1; eq $? 0 "runaway: emergency heal"
   has "$(cat "$FSG_FAKE/calls.log")" "sudo -n /" "restart happened"
@@ -4175,7 +4181,7 @@ if ! skip_case tick; then
   cpu_step 10; "$G" tick; eq $? 1 "a quiet tick"
   has "$(grep ' TICK level=' "$FSG_LOG" | tail -n 1)" "cpu_streak=0" "streak reset"
   cpu_step 60; "$G" tick; cpu_step 60; "$G" tick; eq $? 1 "2 more ticks: warn"
-  mem 300M; cpu_step 90; "$G" tick; eq $? 0 "below warn: ok"
+  mem 200M; cpu_step 90; "$G" tick; eq $? 0 "below warn: ok"
   has "$(grep ' TICK level=' "$FSG_LOG" | tail -n 1)" "cpu_streak=0" "below warn does not count"
   mem 600M; cpu_step 60; "$G" tick; cpu_step 60; "$G" tick
   echo 4300 > "$FSG_FAKE/fsev/pids"; echo 600M > "$FSG_FAKE/fsev/4300.mem"; echo 9:00.00 > "$FSG_FAKE/fsev/4300.time"
@@ -4186,7 +4192,7 @@ if ! skip_case tick; then
   has "$(jget "$out" 'd["reasons"][0]')" "cpu 97% of a core for 3 ticks in a row" "reason"
   FSG_CPU_ESCALATE_PCT=0 "$G" status >/dev/null; eq $? 1 "0 turns it off"
   FSG_CPU_ESCALATE_TICKS=4 "$G" status >/dev/null; eq $? 1 "4 ticks needed"
-  mem 300M; "$G" status >/dev/null; eq $? 0 "below warn: ok"
+  mem 200M; "$G" status >/dev/null; eq $? 0 "below warn: ok"
   mem 600M; printf 'epoch=%s\npid=4300\ncpu_ms=1\ncpu_pct=97\nstreak=3\n' $(( $(date +%s) - 700 )) > "$FSG_STATE_DIR/tick-sample"
   "$G" status >/dev/null; eq $? 1 "a record older than two intervals does not count"
   printf 'epoch=%s\npid=4242\ncpu_ms=1\ncpu_pct=97\nstreak=3\n' "$(date +%s)" > "$FSG_STATE_DIR/tick-sample"
@@ -4232,7 +4238,7 @@ if ! skip_case tick; then
   printf 'stalled\nok\n' > "$FSG_FAKE/probe-seq"; "$G" tick; eq $? 0 "one slow probe is not a stall"
   has "$(cat "$FSG_LOG")" "probe stalled once, then ok" "logged"
   has "$(grep ' TICK level=' "$FSG_LOG" | tail -n 1)" "probe=ok/7ms start_ms=0" "the stream start time in the tick line"
-  mem 300M; printf 'stalled\nstalled\nstalled\n' > "$FSG_FAKE/probe-seq"; : > "$FSG_FAKE/calls.log"
+  mem 200M; printf 'stalled\nstalled\nstalled\n' > "$FSG_FAKE/probe-seq"; : > "$FSG_FAKE/calls.log"
   "$G" tick >/dev/null 2>&1; rc=$?
   eq $rc 0 "confirmed stall above the floor heals"
   has "$(cat "$FSG_FAKE/calls.log")" "sudo -n /" "restart"
@@ -4820,7 +4826,7 @@ if ! skip_case claude-hook-prompt; then
   has "$m" "On macOS 27.0.1 it can grow without limit and silently stop delivering file events" "why it matters"
   has "$m" "new terminal window (it asks for sudo): if [ -d ~/fseventsd-guard ]; then git -C ~/fseventsd-guard pull --ff-only; else git clone https://github.com/RuslanTar/fseventsd-guard.git ~/fseventsd-guard; fi && ~/fseventsd-guard/plugins/fseventsd-guard/fseventsd-guard install." "the install command, from an up-to-date clone of the public repo"
   has "$m" "Silence: FSG_HINT=0, or mkdir -p $FSG_HINT_DIR && touch $FSG_HINT_DIR/off" "how to silence it"
-  has "$x" "a footprint of 3072 MB (102x Apple's 30 MB budget), uptime 1h02m, level runaway (the guard warns at 500 MB and heals at 2048 MB)" "the facts"
+  has "$x" "a footprint of 3072 MB (102x Apple's 30 MB budget), uptime 1h02m, level runaway (the guard warns at 256 MB and heals at 1024 MB)" "the facts"
   has "$x" "On macOS 27.0.1 fseventsd has a known bug" "the version"
   has "$x" "IDE, dev servers, Docker bind mounts and Claude Code stop seeing file changes" "the symptoms"
   has "$x" "runs in a new terminal window, not through Claude: if [ -d ~/fseventsd-guard ]; then git -C ~/fseventsd-guard pull --ff-only; else git clone https://github.com/RuslanTar/fseventsd-guard.git ~/fseventsd-guard; fi && ~/fseventsd-guard/plugins/fseventsd-guard/fseventsd-guard install, then the same path with doctor." "install, then doctor"
@@ -4837,7 +4843,7 @@ if ! skip_case claude-hook-prompt; then
   export CLAUDE_PROJECT_DIR="$REPO"
   mem 612M; out=$(hook prompt); json_ok "$out"
   has "$(hook_msg "$out")" "fseventsd is growing: 612 MB, 20x Apple's 30 MB budget (up 1h02m)" "warn line"
-  has "$(hook_ctx "$out")" "level warn (the guard warns at 500 MB" "warn facts"
+  has "$(hook_ctx "$out")" "level warn (the guard warns at 256 MB" "warn facts"
   has "$(hook_ctx "$out")" "every 3 hours at this level" "warn cadence"
   rm -rf "$FSG_HINT_DIR"; mem 5000K; out=$(hook prompt); json_ok "$out"
   has "$(hook_msg "$out")" "fseventsd is fine now (4 MB, within Apple's 30 MB budget), but it can grow" "ok line"
